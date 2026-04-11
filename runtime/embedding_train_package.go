@@ -3,7 +3,7 @@ package barruntime
 import (
 	"os"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
+	"github.com/odvcencio/manta/artifact/barr"
 )
 
 // EmbeddingTrainPackagePaths names the files that make up a packaged native-training embedder.

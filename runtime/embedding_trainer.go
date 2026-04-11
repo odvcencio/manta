@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/runtime/backend"
 )
 
 // EmbeddingPairExample is one supervised pairwise training example.
@@ -1249,10 +1249,10 @@ func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []Embed
 }
 
 func batchedContrastiveForwardEnabled() bool {
-	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_BATCHED_FORWARD") {
+	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_BATCHED_FORWARD") {
 		return false
 	}
-	switch os.Getenv("BARR_TRAIN_BATCHED_FORWARD") {
+	switch trainEnv("MANTA_TRAIN_BATCHED_FORWARD") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -1261,17 +1261,17 @@ func batchedContrastiveForwardEnabled() bool {
 }
 
 func sequenceMatMulBindingsEnabled() bool {
-	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_SEQUENCE_MATMUL_BINDINGS") {
+	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_SEQUENCE_MATMUL_BINDINGS") {
 		return false
 	}
-	return trainEnvFlagEnabled("BARR_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS")
+	return trainEnvFlagEnabled("MANTA_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS")
 }
 
 func qkvMultiBoundRightEnabled() bool {
-	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_QKV_MULTI_BOUND") {
+	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_QKV_MULTI_BOUND") {
 		return false
 	}
-	switch os.Getenv("BARR_TRAIN_QKV_MULTI_BOUND") {
+	switch trainEnv("MANTA_TRAIN_QKV_MULTI_BOUND") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -1280,10 +1280,10 @@ func qkvMultiBoundRightEnabled() bool {
 }
 
 func sharedLeftMatMulEnabled() bool {
-	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_SHARED_LEFT_MATMUL") {
+	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_SHARED_LEFT_MATMUL") {
 		return false
 	}
-	switch os.Getenv("BARR_TRAIN_SHARED_LEFT_MATMUL") {
+	switch trainEnv("MANTA_TRAIN_SHARED_LEFT_MATMUL") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -1292,10 +1292,10 @@ func sharedLeftMatMulEnabled() bool {
 }
 
 func concatenatedSharedLeftMatMulEnabled() bool {
-	if !sharedLeftMatMulEnabled() || trainEnvFlagEnabled("BARR_TRAIN_DISABLE_CONCAT_SHARED_LEFT_MATMUL") {
+	if !sharedLeftMatMulEnabled() || trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_CONCAT_SHARED_LEFT_MATMUL") {
 		return false
 	}
-	switch os.Getenv("BARR_TRAIN_CONCAT_SHARED_LEFT_MATMUL") {
+	switch trainEnv("MANTA_TRAIN_CONCAT_SHARED_LEFT_MATMUL") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -1304,10 +1304,10 @@ func concatenatedSharedLeftMatMulEnabled() bool {
 }
 
 func combinedAttentionVKGradMatMulEnabled() bool {
-	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_COMBINED_ATTENTION_VK_GRAD") {
+	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_COMBINED_ATTENTION_VK_GRAD") {
 		return false
 	}
-	switch os.Getenv("BARR_TRAIN_COMBINED_ATTENTION_VK_GRAD") {
+	switch trainEnv("MANTA_TRAIN_COMBINED_ATTENTION_VK_GRAD") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -1316,10 +1316,10 @@ func combinedAttentionVKGradMatMulEnabled() bool {
 }
 
 func accumulatedAttentionInputGradMatMulEnabled() bool {
-	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_ACCUMULATED_ATTENTION_INPUT_GRAD") {
+	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_ACCUMULATED_ATTENTION_INPUT_GRAD") {
 		return false
 	}
-	switch os.Getenv("BARR_TRAIN_ACCUMULATED_ATTENTION_INPUT_GRAD") {
+	switch trainEnv("MANTA_TRAIN_ACCUMULATED_ATTENTION_INPUT_GRAD") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -1328,10 +1328,10 @@ func accumulatedAttentionInputGradMatMulEnabled() bool {
 }
 
 func batchedBackwardEnabled() bool {
-	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_BATCHED_BACKWARD") {
+	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_BATCHED_BACKWARD") {
 		return false
 	}
-	switch os.Getenv("BARR_TRAIN_BATCHED_BACKWARD") {
+	switch trainEnv("MANTA_TRAIN_BATCHED_BACKWARD") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -1340,12 +1340,22 @@ func batchedBackwardEnabled() bool {
 }
 
 func trainEnvFlagEnabled(name string) bool {
-	switch os.Getenv(name) {
+	switch trainEnv(name) {
 	case "1", "true", "TRUE", "yes", "YES":
 		return true
 	default:
 		return false
 	}
+}
+
+func trainEnv(name string) string {
+	if value, ok := os.LookupEnv(name); ok {
+		return value
+	}
+	if strings.HasPrefix(name, "MANTA_") {
+		return os.Getenv("BARR_" + strings.TrimPrefix(name, "MANTA_"))
+	}
+	return ""
 }
 
 func (t *EmbeddingTrainer) newEmbeddingBatchSequence(tokens, mask []int32, tokenEmbed *backend.Tensor) (*embeddingBatchSequence, error) {

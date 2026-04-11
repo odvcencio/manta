@@ -5,7 +5,7 @@ package cuda
 import (
 	"testing"
 
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/runtime/backend"
 )
 
 func TestCUDAActivationAcceleratorTracksStats(t *testing.T) {

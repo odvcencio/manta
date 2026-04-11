@@ -6,14 +6,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/compiler"
-	barruntime "github.com/odvcencio/barracuda/runtime"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/compiler"
+	barruntime "github.com/odvcencio/manta/runtime"
 )
 
 const DefaultEmbeddingModelName = "manta-embed-v0"
 
-// DefaultEmbeddingPackageConfig controls Barracuda's built-in default
+// DefaultEmbeddingPackageConfig controls Manta's built-in default
 // embedding-model package initialization.
 type DefaultEmbeddingPackageConfig struct {
 	Name            string
@@ -30,7 +30,7 @@ type DefaultEmbeddingPackageConfig struct {
 	Temperature     float32
 }
 
-// InitDefaultEmbeddingPackage compiles Barracuda's default trainable embedding
+// InitDefaultEmbeddingPackage compiles Manta's default trainable embedding
 // shape and writes a native training package ready for train-corpus/train-embed.
 func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig) (barruntime.EmbeddingTrainPackagePaths, error) {
 	if path == "" {

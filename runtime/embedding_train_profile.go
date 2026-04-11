@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/runtime/backend"
 	mll "github.com/odvcencio/mll"
 )
 
-// EmbeddingTrainProfileVersion identifies the serialized Barracuda training-profile schema.
+// EmbeddingTrainProfileVersion identifies the serialized Manta training-profile schema.
 const EmbeddingTrainProfileVersion = "barr/embed-train-profile/v0alpha1"
 
 var tagXTPR = [4]byte{'X', 'T', 'P', 'R'}
@@ -83,8 +83,8 @@ func encodeEmbeddingTrainProfileMLL(profile EmbeddingTrainProfile) ([]byte, erro
 	strg := mll.NewStringTableBuilder()
 	strg.Intern("")
 	head := mll.HeadSection{
-		Name:        strg.Intern("barracuda-train-profile"),
-		Description: strg.Intern("Barracuda training profile"),
+		Name:        strg.Intern("manta-train-profile"),
+		Description: strg.Intern("Manta training profile"),
 		Generation:  uint64(profile.Step),
 		Metadata: []mll.HeadMetadataEntry{
 			headStringMeta(strg, "profile_version", profile.Version),

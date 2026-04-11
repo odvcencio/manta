@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/odvcencio/barracuda/ir/hir"
-	"github.com/odvcencio/barracuda/syntax"
+	"github.com/odvcencio/manta/ir/hir"
+	"github.com/odvcencio/manta/syntax"
 )
 
 // DiagnosticsError reports one or more source-tied compiler diagnostics.

@@ -5,8 +5,8 @@ import (
 	"math/rand"
 	"os"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/runtime/backend"
 )
 
 func SyncEmbeddingTokenizerVocab(barrPath string, vocabSize int) error {

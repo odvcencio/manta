@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
+	"github.com/odvcencio/manta/artifact/barr"
 )
 
 // Request is an execution request for a loaded program.
@@ -252,13 +252,13 @@ type Result struct {
 	Trace    []TraceStep
 }
 
-// Executor runs a previously loaded Barracuda module.
+// Executor runs a previously loaded Manta module.
 type Executor interface {
 	Backend() barr.BackendKind
 	Run(ctx context.Context, req Request) (Result, error)
 }
 
-// Backend loads Barracuda modules and returns executors.
+// Backend loads Manta modules and returns executors.
 type Backend interface {
 	Kind() barr.BackendKind
 	CanLoad(mod *barr.Module) bool

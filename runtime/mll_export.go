@@ -11,8 +11,8 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/runtime/backend"
 	mll "github.com/odvcencio/mll"
 )
 
@@ -26,9 +26,9 @@ func DefaultMLLPath(barrPath string) string {
 	return defaultManifestPath(barrPath, ".mll")
 }
 
-// ExportPackageToMLL exports a Barracuda artifact plus its sibling package
+// ExportPackageToMLL exports a Manta artifact plus its sibling package
 // files into a sealed MLL container. The resulting file keeps the current
-// Barracuda module JSON in a schemaless XBAR section while populating the
+// Manta module JSON in a schemaless XBAR section while populating the
 // closest matching MLL core sections.
 func ExportPackageToMLL(barrPath, outPath string) (string, error) {
 	if barrPath == "" {
@@ -87,7 +87,7 @@ func buildMLLExport(mod *barr.Module, artifactJSON []byte, jsonFiles map[string]
 		types:   mll.NewTypeBuilder(),
 		dims:    map[string]bool{},
 	}
-	// Reserve index 0 so Barracuda optional fields can safely use 0 as "absent".
+	// Reserve index 0 so Manta optional fields can safely use 0 as "absent".
 	state.strings.Intern("")
 
 	var (
@@ -237,7 +237,7 @@ func buildMLLExport(mod *barr.Module, artifactJSON []byte, jsonFiles map[string]
 
 	head := mll.HeadSection{
 		Name:        state.strings.Intern(mod.Name),
-		Description: state.strings.Intern("Barracuda sealed export"),
+		Description: state.strings.Intern("Manta sealed export"),
 		Metadata:    buildMLLHeadMetadata(state.strings, mod, packageKind, weights),
 	}
 
@@ -649,7 +649,7 @@ func buildMLLExportMetadata(mod *barr.Module, artifactJSON []byte, jsonFiles map
 		if err != nil {
 			return nil, err
 		}
-		meta.JSONFiles["barracuda_package"] = body
+		meta.JSONFiles["manta_package"] = body
 	}
 	if len(logicalTensorDTypes) > 0 {
 		meta.LogicalTensorDType = logicalTensorDTypes
@@ -826,7 +826,7 @@ func barrDTypeToMLL(dtype string) (mll.DType, error) {
 	case "q8":
 		return mll.DTypeQ8, nil
 	default:
-		return mll.DTypeInvalid, fmt.Errorf("unsupported Barracuda dtype %q", dtype)
+		return mll.DTypeInvalid, fmt.Errorf("unsupported Manta dtype %q", dtype)
 	}
 }
 
@@ -856,7 +856,7 @@ func encodeTensorStorage(t *backend.Tensor) (mll.DType, []byte, bool, error) {
 	case "f32":
 		return mll.DTypeF32, encodeFloat32Bytes(t.F32), false, nil
 	case "q4", "q8":
-		// Barracuda currently stores fake-quantized q4/q8 tensors as float32
+		// Manta currently stores fake-quantized q4/q8 tensors as float32
 		// values, so the first MLL export keeps the raw bytes honest and records
 		// the logical dtype in XBAR metadata.
 		return mll.DTypeF32, encodeFloat32Bytes(t.F32), true, nil

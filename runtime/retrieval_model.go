@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/runtime/backend"
 )
 
 const RetrievalManifestVersion = "barr/retrieval-manifest/v0alpha1"
@@ -61,7 +61,7 @@ func ResolveRetrievalManifestPath(barrPath string) string {
 
 // WriteFile writes the retrieval manifest as an authored MLL container.
 func (m RetrievalManifest) WriteFile(path string) error {
-	return writeAuthoredManifestMLL(path, "retrieval_manifest", RetrievalManifestVersion, m.nameOrDefault(), "Barracuda retrieval manifest", m.mllValues())
+	return writeAuthoredManifestMLL(path, "retrieval_manifest", RetrievalManifestVersion, m.nameOrDefault(), "Manta retrieval manifest", m.mllValues())
 }
 
 // LoadRetrieval loads a retrieval module with a validated serving manifest.

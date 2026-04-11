@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
+	"github.com/odvcencio/manta/artifact/barr"
 )
 
 // EmbeddingPackagePaths names the files that make up a packaged embedding model.
@@ -38,7 +38,7 @@ func (rt *Runtime) LoadEmbeddingPackage(ctx context.Context, barrPath string) (*
 }
 
 func (rt *Runtime) tryLoadSealedEmbeddingPackage(ctx context.Context, path string) (*EmbeddingModel, bool, error) {
-	reader, meta, err := readSealedBarracudaMLL(path)
+	reader, meta, err := readSealedMantaMLL(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil

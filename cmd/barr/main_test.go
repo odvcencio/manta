@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/compiler"
-	barruntime "github.com/odvcencio/barracuda/runtime"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/compiler"
+	barruntime "github.com/odvcencio/manta/runtime"
 	mll "github.com/odvcencio/mll"
 )
 
@@ -556,7 +556,7 @@ func TestRunTrainCorpusRepeatedEncoderExampleFlow(t *testing.T) {
 	}
 	corpusPath := filepath.Join(dir, "corpus.txt")
 	corpus := "" +
-		"Barracuda trains and serves compact transformer encoders.\n" +
+		"Manta trains and serves compact transformer encoders.\n" +
 		"CorkScrewDB needs a small default model with strong retrieval quality.\n" +
 		"Quantized embeddings should be fast, portable, and cheap to ship.\n" +
 		"Native CUDA training should reuse weights, activations, and optimizer state.\n" +

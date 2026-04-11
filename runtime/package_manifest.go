@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
+	"github.com/odvcencio/manta/artifact/barr"
 	mll "github.com/odvcencio/mll"
 )
 
@@ -135,8 +135,8 @@ func encodePackageManifestMLL(manifest PackageManifest) ([]byte, error) {
 	}
 
 	head := mll.HeadSection{
-		Name:        strg.Intern("barracuda-package-manifest"),
-		Description: strg.Intern("Barracuda package manifest"),
+		Name:        strg.Intern("manta-package-manifest"),
+		Description: strg.Intern("Manta package manifest"),
 		Metadata: []mll.HeadMetadataEntry{
 			headStringMeta(strg, manifestVersionKey, manifest.Version),
 			headStringMeta(strg, "package_kind", string(manifest.Kind)),

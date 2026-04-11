@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
+	"github.com/odvcencio/manta/artifact/barr"
 )
 
 // CompileNativeKernelProgram builds a backend-owned kernel program from a

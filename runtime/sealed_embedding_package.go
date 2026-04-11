@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
+	"github.com/odvcencio/manta/artifact/barr"
 	mll "github.com/odvcencio/mll"
 )
 
@@ -35,7 +35,7 @@ func (rt *Runtime) LoadSealedEmbeddingPackage(ctx context.Context, path string, 
 
 // ReadSealedEmbeddingPackage decodes a single-file sealed MLL embedding package.
 func ReadSealedEmbeddingPackage(path string) (SealedEmbeddingPackage, error) {
-	reader, meta, err := readSealedBarracudaMLL(path)
+	reader, meta, err := readSealedMantaMLL(path)
 	if err != nil {
 		return SealedEmbeddingPackage{}, err
 	}
@@ -49,7 +49,7 @@ func ReadSealedEmbeddingPackage(path string) (SealedEmbeddingPackage, error) {
 	return pkg, nil
 }
 
-func readSealedBarracudaMLL(path string) (*mll.Reader, barr.MLLMetadata, error) {
+func readSealedMantaMLL(path string) (*mll.Reader, barr.MLLMetadata, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, barr.MLLMetadata{}, err

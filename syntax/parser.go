@@ -225,7 +225,7 @@ type parser struct {
 	diags      []Diagnostic
 }
 
-// Parse parses Barracuda source into a tiny v0 AST.
+// Parse parses Manta source into a tiny v0 AST.
 func Parse(moduleName string, src []byte) (*File, []Diagnostic) {
 	p := &parser{
 		moduleName: moduleName,

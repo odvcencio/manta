@@ -17,8 +17,8 @@ const MLLMetadataVersion = "barr/mll/v0alpha1"
 
 var MLLTagXBAR = [4]byte{'X', 'B', 'A', 'R'}
 
-// MLLMetadata preserves the Barracuda module inside an MLL container while
-// the native MLL section model catches up with Barracuda-specific semantics.
+// MLLMetadata preserves the Manta module inside an MLL container while
+// the native MLL section model catches up with Manta-specific semantics.
 type MLLMetadata struct {
 	Version            string                     `json:"version"`
 	ModuleName         string                     `json:"module_name"`
@@ -206,7 +206,7 @@ func EncodeMLL(mod *Module) ([]byte, error) {
 
 	head := mll.HeadSection{
 		Name:        state.strings.Intern(mod.Name),
-		Description: state.strings.Intern("Barracuda module artifact"),
+		Description: state.strings.Intern("Manta module artifact"),
 		Metadata: []mll.HeadMetadataEntry{
 			headStringMeta(state.strings, "artifact_version", mod.Version),
 			headStringMeta(state.strings, "supported_backends", joinBackends(mod.Requirements.SupportedBackends)),
@@ -490,6 +490,6 @@ func barrDTypeToMLL(dtype string) (mll.DType, error) {
 	case "q8":
 		return mll.DTypeQ8, nil
 	default:
-		return mll.DTypeInvalid, fmt.Errorf("unsupported Barracuda dtype %q", dtype)
+		return mll.DTypeInvalid, fmt.Errorf("unsupported Manta dtype %q", dtype)
 	}
 }

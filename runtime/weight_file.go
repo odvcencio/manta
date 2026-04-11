@@ -8,12 +8,12 @@ import (
 	"os"
 	"sort"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/runtime/backend"
 	mll "github.com/odvcencio/mll"
 )
 
-// WeightFileVersion identifies the serialized Barracuda weight file schema.
+// WeightFileVersion identifies the serialized Manta weight file schema.
 const WeightFileVersion = "barr/weights/v0alpha1"
 
 var tagXWGT = [4]byte{'X', 'W', 'G', 'T'}
@@ -177,8 +177,8 @@ func encodeWeightFileMLL(weights WeightFile) ([]byte, error) {
 	}
 
 	head := mll.HeadSection{
-		Name:        strg.Intern("barracuda-weights"),
-		Description: strg.Intern("Barracuda weight container"),
+		Name:        strg.Intern("manta-weights"),
+		Description: strg.Intern("Manta weight container"),
 		Metadata: []mll.HeadMetadataEntry{
 			headStringMeta(strg, "weight_file_version", weights.Version),
 			headIntMeta(strg, "weight_count", int64(len(names))),

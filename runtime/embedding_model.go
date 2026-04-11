@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/runtime/backend"
 )
 
 const EmbeddingManifestVersion = "barr/embedding-manifest/v0alpha1"
@@ -80,7 +80,7 @@ func ResolveEmbeddingManifestPath(barrPath string) string {
 
 // WriteFile writes the embedding manifest as an authored MLL container.
 func (m EmbeddingManifest) WriteFile(path string) error {
-	return writeAuthoredManifestMLL(path, "embedding_manifest", EmbeddingManifestVersion, m.nameOrDefault(), "Barracuda embedding manifest", m.mllValues())
+	return writeAuthoredManifestMLL(path, "embedding_manifest", EmbeddingManifestVersion, m.nameOrDefault(), "Manta embedding manifest", m.mllValues())
 }
 
 // LoadEmbedding loads an embedding module with a validated serving manifest.

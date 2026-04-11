@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
+	"github.com/odvcencio/manta/artifact/barr"
 	mll "github.com/odvcencio/mll"
 )
 
@@ -22,7 +22,7 @@ type TokenizerMerge struct {
 	Right string `json:"right"`
 }
 
-// TokenizerFile is a lightweight Barracuda text-tokenizer bundle for training-time ingestion.
+// TokenizerFile is a lightweight Manta text-tokenizer bundle for training-time ingestion.
 type TokenizerFile struct {
 	Version      string           `json:"version"`
 	Tokens       []string         `json:"tokens"`
@@ -105,8 +105,8 @@ func encodeTokenizerMLL(file TokenizerFile) ([]byte, error) {
 	strg.Intern(file.EOSToken)
 
 	head := mll.HeadSection{
-		Name:        strg.Intern("barracuda-tokenizer"),
-		Description: strg.Intern("Barracuda tokenizer"),
+		Name:        strg.Intern("manta-tokenizer"),
+		Description: strg.Intern("Manta tokenizer"),
 		Metadata: []mll.HeadMetadataEntry{
 			headStringMeta(strg, "tokenizer_version", file.Version),
 			headIntMeta(strg, "token_count", int64(len(file.Tokens))),

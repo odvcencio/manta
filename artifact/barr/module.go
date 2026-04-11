@@ -89,7 +89,7 @@ type Param struct {
 	Trainable bool      `json:"trainable,omitempty"`
 }
 
-// Module is the compiled Barracuda artifact.
+// Module is the compiled Manta artifact.
 type Module struct {
 	Version      string         `json:"version"`
 	Name         string         `json:"name"`

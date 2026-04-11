@@ -5,11 +5,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/ir/hir"
-	"github.com/odvcencio/barracuda/ir/lir"
-	"github.com/odvcencio/barracuda/ir/mir"
-	"github.com/odvcencio/barracuda/syntax"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/ir/hir"
+	"github.com/odvcencio/manta/ir/lir"
+	"github.com/odvcencio/manta/ir/mir"
+	"github.com/odvcencio/manta/syntax"
 )
 
 // Options configures compilation.

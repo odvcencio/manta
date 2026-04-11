@@ -13,13 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/compiler"
-	"github.com/odvcencio/barracuda/models"
-	barruntime "github.com/odvcencio/barracuda/runtime"
-	"github.com/odvcencio/barracuda/runtime/backend"
-	"github.com/odvcencio/barracuda/runtime/backends/cuda"
-	"github.com/odvcencio/barracuda/runtime/backends/metal"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/compiler"
+	"github.com/odvcencio/manta/models"
+	barruntime "github.com/odvcencio/manta/runtime"
+	"github.com/odvcencio/manta/runtime/backend"
+	"github.com/odvcencio/manta/runtime/backends/cuda"
+	"github.com/odvcencio/manta/runtime/backends/metal"
 )
 
 func main() {
@@ -36,8 +36,8 @@ func main() {
 }
 
 func startOptionalProfiles() (func(), error) {
-	cpuPath := os.Getenv("BARR_CPU_PROFILE")
-	memPath := os.Getenv("BARR_MEM_PROFILE")
+	cpuPath := mantaEnv("MANTA_CPU_PROFILE")
+	memPath := mantaEnv("MANTA_MEM_PROFILE")
 	var cpuFile *os.File
 	if cpuPath != "" {
 		file, err := os.Create(cpuPath)
@@ -70,6 +70,16 @@ func startOptionalProfiles() (func(), error) {
 			fmt.Fprintf(os.Stderr, "memory profile: %s\n", memPath)
 		}
 	}, nil
+}
+
+func mantaEnv(name string) string {
+	if value, ok := os.LookupEnv(name); ok {
+		return value
+	}
+	if strings.HasPrefix(name, "MANTA_") {
+		return os.Getenv("BARR_" + strings.TrimPrefix(name, "MANTA_"))
+	}
+	return ""
 }
 
 func run(args []string) error {
@@ -1034,7 +1044,7 @@ func runTrainTokenizer(args []string) error {
 		return err
 	}
 	if err := barruntime.SyncEmbeddingTokenizerVocab(artifactPath, len(tokenizer.Tokens)); err != nil {
-		return fmt.Errorf("sync tokenizer vocab through Barracuda package: %w", err)
+		return fmt.Errorf("sync tokenizer vocab through Manta package: %w", err)
 	}
 	fmt.Printf("trained tokenizer %q\n", outputPath)
 	fmt.Printf("vocab: %d tokens, merges: %d\n", len(tokenizer.Tokens), len(tokenizer.Merges))
@@ -1107,14 +1117,14 @@ func printUsage() {
 	fmt.Println("  barr run <artifact.mll> [entry]")
 	fmt.Println("  barr demo [module-name]")
 	fmt.Println()
-	fmt.Println("compile lowers a .bar source file into an .mll Barracuda artifact.")
+	fmt.Println("compile lowers a .bar source file into an .mll Manta artifact.")
 	fmt.Println("inspect summarizes an artifact and verifies its sibling package manifest when present.")
-	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Barracuda metadata in XBAR.")
-	fmt.Println("init-model creates the Barracuda-owned default quantized embedding training package.")
+	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Manta metadata in XBAR.")
+	fmt.Println("init-model creates the Manta-owned default quantized embedding training package.")
 	fmt.Println("init-train creates a native training package next to an artifact.")
 	fmt.Println("rename-embed rewrites a training package under a new embedding model identity.")
 	fmt.Println("train-tokenizer builds a sibling .tokenizer.mll from a raw text corpus, using embedding-manifest vocab_size by default.")
-	fmt.Println("train-corpus trains tokenizer + mined text pairs + embedder in one Barracuda job from a raw text corpus.")
+	fmt.Println("train-corpus trains tokenizer + mined text pairs + embedder in one Manta job from a raw text corpus.")
 	fmt.Println("train-embed reloads a training package, fits it on token JSONL or text JSONL (with --tokenizer or a sibling .tokenizer.mll), and writes it back.")
 	fmt.Println("run loads an artifact, binds stub weights and inputs, and executes one entrypoint.")
 	fmt.Println("demo creates a tiny inference-style module and loads it through the runtime.")

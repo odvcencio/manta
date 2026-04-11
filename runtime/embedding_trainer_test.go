@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/compiler"
-	"github.com/odvcencio/barracuda/runtime/backend"
-	"github.com/odvcencio/barracuda/runtime/backends/cuda"
-	"github.com/odvcencio/barracuda/runtime/backends/metal"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/compiler"
+	"github.com/odvcencio/manta/runtime/backend"
+	"github.com/odvcencio/manta/runtime/backends/cuda"
+	"github.com/odvcencio/manta/runtime/backends/metal"
 )
 
 type countingMatMulAccelerator struct {
@@ -1229,7 +1229,7 @@ func TestTrainerActivationAccelModeFromEnv(t *testing.T) {
 		{
 			name: "full enables all activation backward",
 			env: map[string]string{
-				"BARR_TRAIN_ENABLE_ACTIVATION_ACCEL": "1",
+				"MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL": "1",
 			},
 			full:    true,
 			softmax: true,
@@ -1237,32 +1237,32 @@ func TestTrainerActivationAccelModeFromEnv(t *testing.T) {
 		{
 			name: "softmax only",
 			env: map[string]string{
-				"BARR_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL": "1",
+				"MANTA_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL": "1",
 			},
 			softmax: true,
 		},
 		{
 			name: "global disable wins",
 			env: map[string]string{
-				"BARR_TRAIN_DISABLE_ACTIVATION_ACCEL":      "1",
-				"BARR_TRAIN_ENABLE_ACTIVATION_ACCEL":       "1",
-				"BARR_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL": "1",
+				"MANTA_TRAIN_DISABLE_ACTIVATION_ACCEL":      "1",
+				"MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL":       "1",
+				"MANTA_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL": "1",
 			},
 		},
 		{
 			name: "softmax disable can narrow full mode",
 			env: map[string]string{
-				"BARR_TRAIN_ENABLE_ACTIVATION_ACCEL":        "1",
-				"BARR_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL": "1",
+				"MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL":        "1",
+				"MANTA_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL": "1",
 			},
 			full: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("BARR_TRAIN_DISABLE_ACTIVATION_ACCEL", "")
-			t.Setenv("BARR_TRAIN_ENABLE_ACTIVATION_ACCEL", "")
-			t.Setenv("BARR_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL", "")
-			t.Setenv("BARR_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL", "")
+			t.Setenv("MANTA_TRAIN_DISABLE_ACTIVATION_ACCEL", "")
+			t.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "")
+			t.Setenv("MANTA_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL", "")
+			t.Setenv("MANTA_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL", "")
 			for name, value := range tc.env {
 				t.Setenv(name, value)
 			}
@@ -1278,7 +1278,7 @@ func TestTrainerActivationAccelModeFromEnv(t *testing.T) {
 }
 
 func TestEmbeddingTrainerGELUBackwardAcceleratorMatchesHost(t *testing.T) {
-	t.Setenv("BARR_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
+	t.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
@@ -1303,7 +1303,7 @@ func TestEmbeddingTrainerGELUBackwardAcceleratorMatchesHost(t *testing.T) {
 }
 
 func TestEmbeddingTrainerSoftmaxBackwardAcceleratorMatchesHost(t *testing.T) {
-	t.Setenv("BARR_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL", "1")
+	t.Setenv("MANTA_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
@@ -1337,7 +1337,7 @@ func TestEmbeddingTrainerSoftmaxBackwardAcceleratorMatchesHost(t *testing.T) {
 }
 
 func TestEmbeddingTrainerLayerNormBackwardAcceleratorMatchesHost(t *testing.T) {
-	t.Setenv("BARR_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
+	t.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
@@ -1371,7 +1371,7 @@ func TestEmbeddingTrainerLayerNormBackwardAcceleratorMatchesHost(t *testing.T) {
 }
 
 func TestEmbeddingTrainerBatchedGELUBackwardAcceleratorMatchesHost(t *testing.T) {
-	t.Setenv("BARR_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
+	t.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
@@ -1413,7 +1413,7 @@ func TestEmbeddingTrainerBatchedGELUBackwardAcceleratorMatchesHost(t *testing.T)
 }
 
 func TestEmbeddingTrainerBatchedSoftmaxBackwardAcceleratorMatchesHost(t *testing.T) {
-	t.Setenv("BARR_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
+	t.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
@@ -1455,7 +1455,7 @@ func TestEmbeddingTrainerBatchedSoftmaxBackwardAcceleratorMatchesHost(t *testing
 }
 
 func TestEmbeddingTrainerBatchedLayerNormBackwardAcceleratorMatchesHost(t *testing.T) {
-	t.Setenv("BARR_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
+	t.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
@@ -1509,7 +1509,7 @@ func TestEmbeddingTrainerBatchedLayerNormBackwardAcceleratorMatchesHost(t *testi
 }
 
 func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
-	t.Setenv("BARR_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS", "1")
+	t.Setenv("MANTA_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul == nil {
 		t.Skip("no trainer matmul accelerator available")
@@ -1588,7 +1588,7 @@ func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
 }
 
 func TestEmbeddingTrainerFFNActivationsBindAndRelease(t *testing.T) {
-	t.Setenv("BARR_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS", "1")
+	t.Setenv("MANTA_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS", "1")
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul == nil {
 		t.Skip("no trainer matmul accelerator available")
@@ -1805,7 +1805,7 @@ func TestEmbeddingTrainerBatchedForwardGroupsVariableSequenceLengths(t *testing.
 }
 
 func TestEmbeddingTrainerQKVMultiBoundCanBeDisabled(t *testing.T) {
-	t.Setenv("BARR_TRAIN_DISABLE_QKV_MULTI_BOUND", "1")
+	t.Setenv("MANTA_TRAIN_DISABLE_QKV_MULTI_BOUND", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -1921,7 +1921,7 @@ func TestEmbeddingTrainerConcatenatedSharedLeftQKVGradMatchesSeparateMatMuls(t *
 }
 
 func TestEmbeddingTrainerConcatenatedSharedLeftQKVGradCanBeDisabled(t *testing.T) {
-	t.Setenv("BARR_TRAIN_DISABLE_CONCAT_SHARED_LEFT_MATMUL", "1")
+	t.Setenv("MANTA_TRAIN_DISABLE_CONCAT_SHARED_LEFT_MATMUL", "1")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -2010,7 +2010,7 @@ func TestEmbeddingTrainerCombinedAttentionVKGradMatchesSeparateMatMuls(t *testin
 }
 
 func TestEmbeddingTrainerCombinedAttentionVKGradCanBeDisabled(t *testing.T) {
-	t.Setenv("BARR_TRAIN_DISABLE_COMBINED_ATTENTION_VK_GRAD", "1")
+	t.Setenv("MANTA_TRAIN_DISABLE_COMBINED_ATTENTION_VK_GRAD", "1")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -2139,7 +2139,7 @@ func TestEmbeddingTrainerAccumulatedAttentionInputGradMatchesSeparateMatMuls(t *
 }
 
 func TestEmbeddingTrainerAccumulatedAttentionInputGradCanBeDisabled(t *testing.T) {
-	t.Setenv("BARR_TRAIN_DISABLE_ACCUMULATED_ATTENTION_INPUT_GRAD", "1")
+	t.Setenv("MANTA_TRAIN_DISABLE_ACCUMULATED_ATTENTION_INPUT_GRAD", "1")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -2175,7 +2175,7 @@ func TestEmbeddingTrainerAccumulatedAttentionInputGradCanBeDisabled(t *testing.T
 }
 
 func TestEmbeddingTrainerSharedLeftQKVGradMatMulCanBeDisabled(t *testing.T) {
-	t.Setenv("BARR_TRAIN_DISABLE_SHARED_LEFT_MATMUL", "1")
+	t.Setenv("MANTA_TRAIN_DISABLE_SHARED_LEFT_MATMUL", "1")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -2194,7 +2194,7 @@ func TestEmbeddingTrainerSharedLeftQKVGradMatMulCanBeDisabled(t *testing.T) {
 }
 
 func TestEmbeddingTrainerBatchedForwardCanBeDisabled(t *testing.T) {
-	t.Setenv("BARR_TRAIN_DISABLE_BATCHED_FORWARD", "1")
+	t.Setenv("MANTA_TRAIN_DISABLE_BATCHED_FORWARD", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -2224,7 +2224,7 @@ func TestEmbeddingTrainerBatchedForwardCanBeDisabled(t *testing.T) {
 }
 
 func TestEmbeddingTrainerSequenceMatMulBindingsCanBeEnabled(t *testing.T) {
-	t.Setenv("BARR_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS", "1")
+	t.Setenv("MANTA_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()

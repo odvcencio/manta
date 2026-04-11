@@ -41,7 +41,7 @@ func TrainTokenizerFromCorpus(cfg TokenizerTrainConfig) (TokenizerFile, error) {
 		return TokenizerFile{}, fmt.Errorf("tokenizer vocab size must be positive")
 	}
 	if cfg.VocabSize < 5 {
-		return TokenizerFile{}, fmt.Errorf("tokenizer vocab size %d is too small for Barracuda special tokens", cfg.VocabSize)
+		return TokenizerFile{}, fmt.Errorf("tokenizer vocab size %d is too small for Manta special tokens", cfg.VocabSize)
 	}
 	if cfg.MinFreq <= 0 {
 		cfg.MinFreq = 2

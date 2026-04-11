@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strconv"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
+	"github.com/odvcencio/manta/artifact/barr"
 )
 
 // Tensor is the bootstrap dense runtime tensor representation.

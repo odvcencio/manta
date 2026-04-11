@@ -3,8 +3,8 @@ package backend
 import (
 	"testing"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/compiler"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/compiler"
 )
 
 func TestCompileNativeKernelProgramCUDAConfig(t *testing.T) {

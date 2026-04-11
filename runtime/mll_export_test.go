@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/compiler"
-	"github.com/odvcencio/barracuda/runtime/backends/cuda"
-	"github.com/odvcencio/barracuda/runtime/backends/metal"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/compiler"
+	"github.com/odvcencio/manta/runtime/backends/cuda"
+	"github.com/odvcencio/manta/runtime/backends/metal"
 	mll "github.com/odvcencio/mll"
 )
 

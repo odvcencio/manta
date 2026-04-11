@@ -11,15 +11,29 @@ import (
 
 func getenv(name string, fallback string) string {
 	let value = os.Getenv(name)
-	if value == "" {
-		return fallback
+	if value != "" {
+		return value
 	}
-	return value
+	let legacy = legacyEnvName(name)
+	if legacy != "" {
+		let legacyValue = os.Getenv(legacy)
+		if legacyValue != "" {
+			return legacyValue
+		}
+	}
+	return fallback
 }
 
 func envEnabled(name string) bool {
-	let value = strings.ToLower(os.Getenv(name))
+	let value = strings.ToLower(getenv(name, ""))
 	return value == "1" || value == "true" || value == "yes"
+}
+
+func legacyEnvName(name string) string {
+	if strings.HasPrefix(name, "MANTA_") {
+		return "BARR_" + strings.TrimPrefix(name, "MANTA_")
+	}
+	return ""
 }
 
 func shell(dir string, name string, args []string) error {
@@ -43,7 +57,7 @@ func hasGoMod(dir string) bool {
 }
 
 func findRoot() (string, error) {
-	let explicit = os.Getenv("BARR_BENCH_ROOT")
+	let explicit = getenv("MANTA_BENCH_ROOT", "")
 	if hasGoMod(explicit) {
 		return explicit, nil
 	}
@@ -56,7 +70,7 @@ func findRoot() (string, error) {
 	if hasGoMod(cwd) {
 		return cwd, nil
 	}
-	return "", fmt.Errorf("could not find repo root; set BARR_BENCH_ROOT")
+	return "", fmt.Errorf("could not find repo root; set MANTA_BENCH_ROOT")
 }
 
 func copyMatching(pattern string, dst string) error {
@@ -86,19 +100,19 @@ func goBench(root string, pkg string, bench string, count string, benchtime stri
 }
 
 func modelSmoke(root string, assets string) error {
-	out, err := os.MkdirTemp("", "barracuda-model-bench-*")
+	out, err := os.MkdirTemp("", "manta-model-bench-*")
 	guard err == nil else return err
-	let modelName = getenv("BARR_BENCH_MODEL_NAME", "barracuda-embed-v0")
+	let modelName = getenv("MANTA_BENCH_MODEL_NAME", "manta-embed-v0")
 	err = copyMatching(filepath.Join(assets, modelName+".*"), out)
 	guard err == nil else return err
 
-	let epochs = getenv("BARR_BENCH_MODEL_EPOCHS", "1")
-	let batch = getenv("BARR_BENCH_MODEL_BATCH", "1024")
-	let lr = getenv("BARR_BENCH_MODEL_LR", "0.005")
-	let temp = getenv("BARR_BENCH_MODEL_TEMP", "0.05")
-	let evalEvery = getenv("BARR_BENCH_MODEL_EVAL_EVERY", "4")
-	let train = getenv("BARR_BENCH_MODEL_TRAIN", filepath.Join(assets, "train-mini.jsonl"))
-	let eval = getenv("BARR_BENCH_MODEL_EVAL", filepath.Join(assets, "eval-mini.jsonl"))
+	let epochs = getenv("MANTA_BENCH_MODEL_EPOCHS", "1")
+	let batch = getenv("MANTA_BENCH_MODEL_BATCH", "1024")
+	let lr = getenv("MANTA_BENCH_MODEL_LR", "0.005")
+	let temp = getenv("MANTA_BENCH_MODEL_TEMP", "0.05")
+	let evalEvery = getenv("MANTA_BENCH_MODEL_EVAL_EVERY", "4")
+	let train = getenv("MANTA_BENCH_MODEL_TRAIN", filepath.Join(assets, "train-mini.jsonl"))
+	let eval = getenv("MANTA_BENCH_MODEL_EVAL", filepath.Join(assets, "eval-mini.jsonl"))
 
 	step("Default model training smoke")
 	fmt.Println(f"output: {out}")
@@ -126,10 +140,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	let count = getenv("BARR_BENCH_COUNT", "5")
-	let benchtime = getenv("BARR_BENCH_TIME", "750ms")
-	let runtimeBench = getenv("BARR_BENCH_RUNTIME", "BenchmarkAccumulateInfoNCEContrastiveGrads128x64")
-	let cudaBench = getenv("BARR_BENCH_CUDA_REGEX", "BenchmarkCUDAContrastiveAccelerator256x64|BenchmarkHostContrastiveInfoNCE256x64")
+	let count = getenv("MANTA_BENCH_COUNT", "5")
+	let benchtime = getenv("MANTA_BENCH_TIME", "750ms")
+	let runtimeBench = getenv("MANTA_BENCH_RUNTIME", "BenchmarkAccumulateInfoNCEContrastiveGrads128x64")
+	let cudaBench = getenv("MANTA_BENCH_CUDA_REGEX", "BenchmarkCUDAContrastiveAccelerator256x64|BenchmarkHostContrastiveInfoNCE256x64")
 
 	let start = time.Now()
 	step("Go microbenchmarks")
@@ -139,7 +153,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if envEnabled("BARR_BENCH_CUDA") {
+	if envEnabled("MANTA_BENCH_CUDA") {
 		step("CUDA microbenchmarks")
 		err = goBench(root, "./runtime/backends/cuda", cudaBench, count, benchtime)
 		guard err == nil else {
@@ -148,7 +162,7 @@ func main() {
 		}
 	}
 
-	let assets = os.Getenv("BARR_BENCH_MODEL_ASSETS")
+	let assets = getenv("MANTA_BENCH_MODEL_ASSETS", "")
 	if assets != "" {
 		err = modelSmoke(root, assets)
 		guard err == nil else {

@@ -1,20 +1,20 @@
-# Barracuda
+# Manta
 
-Barracuda is an inference-first GPU language and runtime stack. It compiles `.bar` source into backend-neutral `.barr` execution plans for GPU-accelerated embedding, reranking, retrieval-time scoring, and decode-time inference. Write the model-facing compute once, then run it on NVIDIA (CUDA) or Apple Silicon (Metal) with the same artifact and the same entrypoint contract.
+Manta is an inference-first GPU language and runtime stack. It compiles `.bar` source into backend-neutral `.barr` execution plans for GPU-accelerated embedding, reranking, retrieval-time scoring, and decode-time inference. Write the model-facing compute once, then run it on NVIDIA (CUDA) or Apple Silicon (Metal) with the same artifact and the same entrypoint contract.
 
 - **Inference-first product surface** with `kernel` and `pipeline` abstractions
 - **Three-level IR pipeline**: HIR (typed) -> MIR (semantic) -> LIR (scheduled)
 - **Portable artifact format** (`.barr`): compile once, deploy anywhere
 - **Dual backend**: CUDA and Metal from the same source
 - **First-class KV cache**: `kv_cache` type with `kv_read`/`kv_write` for autoregressive decoding
-- **TurboQuant-native direction**: Barracuda is designed to consume and emit quantized tensors and quantized vectors without repacking through a separate framework
+- **TurboQuant-native direction**: Manta is designed to consume and emit quantized tensors and quantized vectors without repacking through a separate framework
 - **Schedule hints**: `tile`, `vector_width`, `subgroup`, memory classes -- backend-neutral, lowered late
 - **Hybrid runtime**: backend-native execution where promoted kernels exist, host reference execution where they do not yet
 - **Pure Go toolchain**: no Python, no C++ build dependencies
 
 ## Product direction
 
-The near-term target is an inference-first product surface for embedding, reranking, retrieval-time scoring, decode, and CorkScrewDB integration. Barracuda also owns the native training path needed to produce those default artifacts, so model authors do not need to train in Python, export through another format, and deploy through a separate runtime.
+The near-term target is an inference-first product surface for embedding, reranking, retrieval-time scoring, decode, and CorkScrewDB integration. Manta also owns the native training path needed to produce those default artifacts, so model authors do not need to train in Python, export through another format, and deploy through a separate runtime.
 
 That means the language and runtime should bias toward:
 
@@ -28,14 +28,14 @@ That means the language and runtime should bias toward:
 ## Install
 
 ```bash
-go install github.com/odvcencio/barracuda/cmd/barr@latest
+go install github.com/odvcencio/manta/cmd/barr@latest
 ```
 
 ## Quick Start
 
 Write a `.bar` source file:
 
-```barracuda
+```manta
 param token_embedding: f16[V, D] @weight("weights/token_embedding")
 param projection: f16[D, E] @weight("weights/projection")
 
@@ -73,13 +73,13 @@ barr demo tiny_select
 
 **Parameters** bind external weights with shape and dtype:
 
-```barracuda
+```manta
 param wq: f16[D, D] @weight("weights/wq")
 ```
 
 **Kernels** define fused compute regions:
 
-```barracuda
+```manta
 kernel l2_normalize(x: f16[T, E]) -> f16[T, E] {
     return normalize(x)
 }
@@ -87,7 +87,7 @@ kernel l2_normalize(x: f16[T, E]) -> f16[T, E] {
 
 **Pipelines** orchestrate steps including intrinsics, kernel calls, and KV cache operations:
 
-```barracuda
+```manta
 pipeline decode_step(x: f16[T, D], cache: kv_cache) -> f16[T, D] {
     let q = @matmul(x, wq)
     let q2 = rope(q)
@@ -110,7 +110,7 @@ pipeline decode_step(x: f16[T, D], cache: kv_cache) -> f16[T, D] {
 
 Dimensions are symbolic (`T`, `D`, `V`, `E`) and resolved at load time.
 
-Quantized inference dtypes such as `q4[...]` and `q8[...]` are part of the active Barracuda surface. The current bootstrap runtime can consume them directly for quantized scoring paths, and the next step is richer TurboQuant block-format coverage.
+Quantized inference dtypes such as `q4[...]` and `q8[...]` are part of the active Manta surface. The current bootstrap runtime can consume them directly for quantized scoring paths, and the next step is richer TurboQuant block-format coverage.
 
 ### Operations
 
@@ -141,7 +141,7 @@ Quantized inference dtypes such as `q4[...]` and `q8[...]` are part of the activ
 
 ### Statements
 
-```barracuda
+```manta
 let result = @matmul(x, w)    // local binding
 return softmax(result)         // return value
 kv_write(cache, value)         // expression statement (side effect)
@@ -222,10 +222,10 @@ Artifacts are validated on load: all referenced buffers, kernels, and entry poin
 
 ```go
 import (
-    "github.com/odvcencio/barracuda/artifact/barr"
-    "github.com/odvcencio/barracuda/runtime"
-    "github.com/odvcencio/barracuda/runtime/backends/cuda"
-    "github.com/odvcencio/barracuda/runtime/backends/metal"
+    "github.com/odvcencio/manta/artifact/barr"
+    "github.com/odvcencio/manta/runtime"
+    "github.com/odvcencio/manta/runtime/backends/cuda"
+    "github.com/odvcencio/manta/runtime/backends/metal"
 )
 
 rt := runtime.New(cuda.New(), metal.New())
@@ -245,7 +245,7 @@ output := result.Outputs["embeddings"]
 
 The runtime tries each backend in registration order. The first backend that can load the module is selected. Weight bindings are validated against the module's parameter declarations.
 
-For promoted kernel classes, the runtime can compile and launch backend-native kernels. Where a kernel shape has not been promoted yet, the backend still owns execution but may fall back to the host reference path. This keeps the runtime honest while Barracuda grows.
+For promoted kernel classes, the runtime can compile and launch backend-native kernels. Where a kernel shape has not been promoted yet, the backend still owns execution but may fall back to the host reference path. This keeps the runtime honest while Manta grows.
 
 ### Backend interface
 
@@ -280,7 +280,7 @@ Outputs also carry backend launch metadata such as the selected kernel entry, la
 
 ## Deployment targets
 
-Barracuda is being shaped around two concrete deployment targets:
+Manta is being shaped around two concrete deployment targets:
 
 1. standalone inference binaries written in Go
 2. CorkScrewDB as a runtime host for embedding, reranking, and quantized vector-aware scoring
@@ -300,7 +300,7 @@ and eventually:
 ## CLI
 
 ```
-barr compile <source.bar> [output.mll]             Compile .bar source to a Barracuda artifact
+barr compile <source.bar> [output.mll]             Compile .bar source to a Manta artifact
 barr init-model [flags] <artifact.mll>             Create the default quantized embedding training package
 barr train-corpus [flags] <artifact.mll> <corpus>  Train tokenizer, mine pairs, and fit the embedder
 barr train-embed [flags] <artifact.mll> <train>    Fit an initialized package on token or text JSONL
@@ -331,16 +331,16 @@ CUDA-backed runtime tests require a working CUDA device and should be run separa
 
 ## Benchmarks
 
-Barracuda keeps reproducible perf checks as Ferrous Wheel workflows.
+Manta keeps reproducible perf checks as Ferrous Wheel workflows.
 
 ```bash
-BARR_BENCH_ROOT=$PWD ferrous-wheel run scripts/bench.fw
-BARR_BENCH_ROOT=$PWD BARR_BENCH_CUDA=1 ferrous-wheel run scripts/bench.fw
-BARR_BENCH_ROOT=$PWD BARR_BENCH_MODEL_ASSETS=/path/to/assets/barracuda-embed-v0 ferrous-wheel run scripts/bench.fw
+MANTA_BENCH_ROOT=$PWD ferrous-wheel run scripts/bench.fw
+MANTA_BENCH_ROOT=$PWD MANTA_BENCH_CUDA=1 ferrous-wheel run scripts/bench.fw
+MANTA_BENCH_ROOT=$PWD MANTA_BENCH_MODEL_ASSETS=/path/to/assets/manta-embed-v0 ferrous-wheel run scripts/bench.fw
 ```
 
-Current `barracuda-embed-v0` CUDA smoke: `33328.94` train pairs/s on batch `256`, with grouped batched backward enabled by default. See `docs/benchmarks.md` for the full profile and the next perf targets.
+Current `manta-embed-v0` CUDA smoke: `33328.94` train pairs/s on batch `256`, with grouped batched backward enabled by default. See `docs/benchmarks.md` for the full profile and the next perf targets.
 
 ## License
 
-Barracuda is open source under the Apache License, Version 2.0. See `LICENSE` and `NOTICE`.
+Manta is open source under the Apache License, Version 2.0. See `LICENSE` and `NOTICE`.

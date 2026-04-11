@@ -580,11 +580,12 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 	"time"
 	"unsafe"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/runtime/backend"
 )
 
 const forwardQuantizeKernelSource = `
@@ -1351,12 +1352,22 @@ func (rt *deviceRuntime) synchronize() error {
 }
 
 func cudaEnvFlagEnabled(name string) bool {
-	switch os.Getenv(name) {
+	switch cudaEnv(name) {
 	case "1", "true", "TRUE", "yes", "YES":
 		return true
 	default:
 		return false
 	}
+}
+
+func cudaEnv(name string) string {
+	if value, ok := os.LookupEnv(name); ok {
+		return value
+	}
+	if strings.HasPrefix(name, "MANTA_") {
+		return os.Getenv("BARR_" + strings.TrimPrefix(name, "MANTA_"))
+	}
+	return ""
 }
 
 func (rt *deviceRuntime) runMatMul(inputs []*backend.Tensor, outputType barr.ValueType) (backend.StepDispatchResult, error) {
@@ -1639,7 +1650,7 @@ func (rt *deviceRuntime) runAccumulatedMatMulsWithBoundRights(lhsInputs []*backe
 	if err != nil {
 		return backend.StepDispatchResult{}, err
 	}
-	singleSync := !cudaEnvFlagEnabled("BARR_CUDA_DISABLE_ACCUMULATED_MATMUL_SINGLE_SYNC")
+	singleSync := !cudaEnvFlagEnabled("MANTA_CUDA_DISABLE_ACCUMULATED_MATMUL_SINGLE_SYNC")
 	bindings := make([]string, len(plans))
 	for i, plan := range plans {
 		runUploadedBytes += plan.uploadedBytes

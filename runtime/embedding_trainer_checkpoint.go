@@ -6,8 +6,8 @@ import (
 	"os"
 	"sort"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/runtime/backend"
 	mll "github.com/odvcencio/mll"
 )
 
@@ -214,7 +214,7 @@ func encodeEmbeddingCheckpointMLL(c EmbeddingTrainCheckpoint) ([]byte, error) {
 
 	head := mll.HeadSection{
 		Name:        strg.Intern(nonEmptyCheckpointName(c.Manifest.Name)),
-		Description: strg.Intern("Barracuda training checkpoint"),
+		Description: strg.Intern("Manta training checkpoint"),
 		Generation:  uint64(c.Step),
 		Metadata: []mll.HeadMetadataEntry{
 			headStringMeta(strg, "checkpoint_version", c.Version),
@@ -438,7 +438,7 @@ func nonEmptyCheckpointName(name string) string {
 	if name != "" {
 		return name
 	}
-	return "barracuda-train-checkpoint"
+	return "manta-train-checkpoint"
 }
 
 func mustBarrDTypeToMLL(dtype string) mll.DType {

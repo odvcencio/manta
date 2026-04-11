@@ -4,8 +4,8 @@
 
 ### Added
 
-- **Inference-first product direction**: Barracuda ships the narrowest useful product surface first: embedding, reranking, scoring, decode, quantized inference, and CorkScrewDB integration. Native training support is part of the stack so default models can be trained and shipped through the same artifact family.
-- **Embedding/reranker focus**: the repo spec now positions Barracuda around OSS embedding models, rerankers, retrieval-time scoring, quantized inference, and CorkScrewDB integration.
+- **Inference-first product direction**: Manta ships the narrowest useful product surface first: embedding, reranking, scoring, decode, quantized inference, and CorkScrewDB integration. Native training support is part of the stack so default models can be trained and shipped through the same artifact family.
+- **Embedding/reranker focus**: the repo spec now positions Manta around OSS embedding models, rerankers, retrieval-time scoring, quantized inference, and CorkScrewDB integration.
 - **TurboQuant-native direction**: the spec now calls out quantized tensor and quantized vector support as a first-class product target rather than an afterthought.
 - **Source language** (`.bar`): `param`, `kernel`, `pipeline` declarations with typed tensor shapes, symbolic dimensions, `kv_cache` type, `@weight` bindings, intrinsic calls (`@matmul`), built-in functions (gather, softmax, normalize, rmsnorm, rope, dequant, kv_read, kv_write), binary operators, `let` bindings, `return` statements
 - **Recursive descent parser** with lexer, span tracking, and diagnostic collection

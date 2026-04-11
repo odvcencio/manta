@@ -1,4 +1,4 @@
-module github.com/odvcencio/barracuda
+module github.com/odvcencio/manta
 
 go 1.25.1
 

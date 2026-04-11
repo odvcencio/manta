@@ -1,6 +1,6 @@
 package lir
 
-import "github.com/odvcencio/barracuda/artifact/barr"
+import "github.com/odvcencio/manta/artifact/barr"
 
 // Plan is the scheduled executable IR.
 type Plan struct {

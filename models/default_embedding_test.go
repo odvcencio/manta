@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	barruntime "github.com/odvcencio/barracuda/runtime"
+	barruntime "github.com/odvcencio/manta/runtime"
 )
 
 func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {

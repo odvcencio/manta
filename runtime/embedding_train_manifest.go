@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
+	"github.com/odvcencio/manta/artifact/barr"
 )
 
 const EmbeddingTrainManifestVersion = "barr/train-manifest/v0alpha1"
@@ -44,7 +44,7 @@ func ReadEmbeddingTrainManifestFile(path string) (EmbeddingTrainManifest, error)
 
 // WriteFile writes the training manifest as an authored MLL container.
 func (m EmbeddingTrainManifest) WriteFile(path string) error {
-	return writeAuthoredManifestMLL(path, "train_manifest", EmbeddingTrainManifestVersion, m.nameOrDefault(), "Barracuda training manifest", m.mllValues())
+	return writeAuthoredManifestMLL(path, "train_manifest", EmbeddingTrainManifestVersion, m.nameOrDefault(), "Manta training manifest", m.mllValues())
 }
 
 func (m EmbeddingTrainManifest) normalized() EmbeddingTrainManifest {

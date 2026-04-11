@@ -5,7 +5,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
+	"github.com/odvcencio/manta/artifact/barr"
 	mll "github.com/odvcencio/mll"
 )
 
@@ -65,7 +65,7 @@ func encodeAuthoredManifestMLL(kind, version, name, description string, values m
 		name = kind
 	}
 	if description == "" {
-		description = "Barracuda authored manifest"
+		description = "Manta authored manifest"
 	}
 
 	keys := make([]string, 0, len(values)+2)

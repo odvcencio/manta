@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/odvcencio/barracuda/compiler"
+	"github.com/odvcencio/manta/compiler"
 )
 
 func TestDefaultEmbeddingTrainManifestPath(t *testing.T) {

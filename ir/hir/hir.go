@@ -1,6 +1,6 @@
 package hir
 
-import "github.com/odvcencio/barracuda/syntax"
+import "github.com/odvcencio/manta/syntax"
 
 // Module is the source-oriented typed IR.
 type Module struct {

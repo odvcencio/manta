@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/odvcencio/barracuda/compiler"
-	barruntime "github.com/odvcencio/barracuda/runtime"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/compiler"
+	barruntime "github.com/odvcencio/manta/runtime"
+	"github.com/odvcencio/manta/runtime/backend"
 )
 
 func TestLoadWithCacheKeyReusesCompiledLoad(t *testing.T) {

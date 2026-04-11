@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
+	"github.com/odvcencio/manta/artifact/barr"
 )
 
-// ExecuteSymbolic runs the current Barracuda runtime path. The selected
+// ExecuteSymbolic runs the current Manta runtime path. The selected
 // backend resolves compiled variants at load time, and plan steps execute
 // through backend-owned dispatch where promoted kernels exist and through the
 // host/reference path where they do not yet.

@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
+	"github.com/odvcencio/manta/artifact/barr"
 )
 
 func TestMaterializeValueTensor(t *testing.T) {

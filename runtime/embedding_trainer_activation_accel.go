@@ -1,8 +1,8 @@
 package barruntime
 
 import (
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/runtime/backend"
 )
 
 type trainerActivationAccelMode struct {
@@ -11,12 +11,12 @@ type trainerActivationAccelMode struct {
 }
 
 func trainerActivationAccelModeFromEnv() trainerActivationAccelMode {
-	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_ACTIVATION_ACCEL") {
+	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_ACTIVATION_ACCEL") {
 		return trainerActivationAccelMode{}
 	}
-	full := trainEnvFlagEnabled("BARR_TRAIN_ENABLE_ACTIVATION_ACCEL")
-	softmax := full || trainEnvFlagEnabled("BARR_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL")
-	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL") {
+	full := trainEnvFlagEnabled("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL")
+	softmax := full || trainEnvFlagEnabled("MANTA_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL")
+	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL") {
 		softmax = false
 	}
 	return trainerActivationAccelMode{

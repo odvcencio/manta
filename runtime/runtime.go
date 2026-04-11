@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/runtime/backend"
 )
 
 // Runtime owns backend selection and module loading.
@@ -125,7 +125,7 @@ func (p *Program) MemoryPlan() *MemoryPlan {
 	return cloneMemoryPlan(p.memoryPlan)
 }
 
-// WithWeight binds a Barracuda param to runtime-managed data.
+// WithWeight binds a Manta param to runtime-managed data.
 func WithWeight(name string, data any) LoadOption {
 	return func(cfg *loadConfig) {
 		if cfg.weights == nil {

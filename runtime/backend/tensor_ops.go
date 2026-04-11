@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strconv"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
+	"github.com/odvcencio/manta/artifact/barr"
 )
 
 func executeStep(ctx context.Context, mod *barr.Module, entry barr.EntryPoint, step barr.Step, env map[string]Value, compiled map[string]CompiledKernel, dispatch KernelDispatcher, dispatchStep StepDispatcher, bindings map[string]int, kind barr.BackendKind) ([]Value, string, error) {

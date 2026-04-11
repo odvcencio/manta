@@ -6,8 +6,8 @@ import (
 	"os"
 	"sort"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/runtime/backend"
 	mll "github.com/odvcencio/mll"
 )
 
@@ -227,7 +227,7 @@ func encodeMemoryPlanMLL(plan MemoryPlan) ([]byte, error) {
 	strg.Intern("")
 	head := mll.HeadSection{
 		Name:        strg.Intern(plan.ModuleName),
-		Description: strg.Intern("Barracuda memory plan"),
+		Description: strg.Intern("Manta memory plan"),
 		Metadata: []mll.HeadMetadataEntry{
 			headStringMeta(strg, "memory_plan_version", plan.Version),
 			headStringMeta(strg, "backend", string(plan.Backend)),

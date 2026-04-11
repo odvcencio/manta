@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/odvcencio/barracuda/artifact/barr"
-	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/manta/artifact/barr"
+	"github.com/odvcencio/manta/runtime/backend"
 )
 
 const ScoreManifestVersion = "barr/score-manifest/v0alpha1"
@@ -60,7 +60,7 @@ func ResolveScoreManifestPath(barrPath string) string {
 
 // WriteFile writes the score manifest as an authored MLL container.
 func (m ScoreManifest) WriteFile(path string) error {
-	return writeAuthoredManifestMLL(path, "score_manifest", ScoreManifestVersion, m.nameOrDefault(), "Barracuda score manifest", m.mllValues())
+	return writeAuthoredManifestMLL(path, "score_manifest", ScoreManifestVersion, m.nameOrDefault(), "Manta score manifest", m.mllValues())
 }
 
 // LoadScore loads a score module with a validated serving manifest.

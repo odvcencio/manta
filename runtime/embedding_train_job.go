@@ -50,7 +50,7 @@ func TrainEmbeddingPackageFromContrastiveFiles(barrPath, trainPath, evalPath str
 	return summary, paths, nil
 }
 
-// TrainEmbeddingPackageFromTextContrastiveFiles reloads a packaged trainer, tokenizes text-pair JSONL with a Barracuda tokenizer file,
+// TrainEmbeddingPackageFromTextContrastiveFiles reloads a packaged trainer, tokenizes text-pair JSONL with a Manta tokenizer file,
 // fits it, and writes the updated package back.
 func TrainEmbeddingPackageFromTextContrastiveFiles(barrPath, tokenizerPath, trainPath, evalPath string, cfg EmbeddingTrainRunConfig) (EmbeddingTrainRunSummary, EmbeddingTrainPackagePaths, error) {
 	trainer, err := LoadEmbeddingTrainerPackage(barrPath)

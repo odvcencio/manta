@@ -1,6 +1,6 @@
 package syntax
 
-// File is the parsed Barracuda source module.
+// File is the parsed Manta source module.
 type File struct {
 	ModuleName  string
 	Source      []byte
