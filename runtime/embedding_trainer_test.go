@@ -248,6 +248,101 @@ func (a *countingMatMulAccelerator) Stats() backend.MatMulAcceleratorStats {
 }
 func (a *countingMatMulAccelerator) Close() {}
 
+type countingActivationAccelerator struct {
+	bindCalls              int
+	unbindCalls            int
+	geluBackwardCalls      int
+	softmaxBackwardCalls   int
+	layerNormBackwardCalls int
+	bound                  map[string]*backend.Tensor
+}
+
+func (a *countingActivationAccelerator) Backend() barr.BackendKind { return barr.BackendCUDA }
+
+func (a *countingActivationAccelerator) BindTensor(name string, tensor *backend.Tensor) error {
+	if a.bound == nil {
+		a.bound = map[string]*backend.Tensor{}
+	}
+	a.bindCalls++
+	a.bound[name] = tensor
+	return nil
+}
+
+func (a *countingActivationAccelerator) UnbindTensor(name string) error {
+	a.unbindCalls++
+	delete(a.bound, name)
+	return nil
+}
+
+func (a *countingActivationAccelerator) RunGELUBackwardMul(gradOut, preAct *backend.Tensor) (*backend.Tensor, error) {
+	a.geluBackwardCalls++
+	if gradOut == nil || preAct == nil {
+		return backend.NewTensorF32(nil, nil), nil
+	}
+	out := make([]float32, len(gradOut.F32))
+	for i := range out {
+		out[i] = gradOut.F32[i] * geluBackward(preAct.F32[i])
+	}
+	return backend.NewTensorF32(append([]int(nil), gradOut.Shape...), out), nil
+}
+
+func (a *countingActivationAccelerator) RunGELUBackwardMulWithBoundPreAct(gradOut *backend.Tensor, preActName string) (*backend.Tensor, error) {
+	preAct := a.bound[preActName]
+	return a.RunGELUBackwardMul(gradOut, preAct)
+}
+
+func (a *countingActivationAccelerator) RunSoftmaxBackwardRows(gradOut, probs *backend.Tensor) (*backend.Tensor, error) {
+	a.softmaxBackwardCalls++
+	if gradOut == nil || probs == nil || len(gradOut.Shape) != 2 {
+		return backend.NewTensorF32(nil, nil), nil
+	}
+	out := make([]float32, len(gradOut.F32))
+	rows, cols := gradOut.Shape[0], gradOut.Shape[1]
+	for row := 0; row < rows; row++ {
+		backwardSoftmaxRow(out[row*cols:(row+1)*cols], gradOut.F32[row*cols:(row+1)*cols], probs.F32[row*cols:(row+1)*cols])
+	}
+	return backend.NewTensorF32(append([]int(nil), gradOut.Shape...), out), nil
+}
+
+func (a *countingActivationAccelerator) RunSoftmaxBackwardRowsWithBoundProbs(gradOut *backend.Tensor, probsName string) (*backend.Tensor, error) {
+	probs := a.bound[probsName]
+	return a.RunSoftmaxBackwardRows(gradOut, probs)
+}
+
+func (a *countingActivationAccelerator) RunLayerNormBackwardRows(gradOut, normalized, pre *backend.Tensor) (*backend.Tensor, error) {
+	a.layerNormBackwardCalls++
+	if gradOut == nil || normalized == nil || pre == nil || len(gradOut.Shape) != 2 {
+		return backend.NewTensorF32(nil, nil), nil
+	}
+	out := make([]float32, len(gradOut.F32))
+	rows, cols := gradOut.Shape[0], gradOut.Shape[1]
+	for row := 0; row < rows; row++ {
+		backwardLayerNormRow(
+			out[row*cols:(row+1)*cols],
+			gradOut.F32[row*cols:(row+1)*cols],
+			normalized.F32[row*cols:(row+1)*cols],
+			pre.F32[row*cols:(row+1)*cols],
+		)
+	}
+	return backend.NewTensorF32(append([]int(nil), gradOut.Shape...), out), nil
+}
+
+func (a *countingActivationAccelerator) RunLayerNormBackwardRowsWithBoundInputs(gradOut *backend.Tensor, normalizedName, preName string) (*backend.Tensor, error) {
+	return a.RunLayerNormBackwardRows(gradOut, a.bound[normalizedName], a.bound[preName])
+}
+
+func (a *countingActivationAccelerator) Stats() backend.ActivationAcceleratorStats {
+	return backend.ActivationAcceleratorStats{
+		BindCalls:              int64(a.bindCalls),
+		GELUBackwardCalls:      int64(a.geluBackwardCalls),
+		SoftmaxBackwardCalls:   int64(a.softmaxBackwardCalls),
+		LayerNormBackwardCalls: int64(a.layerNormBackwardCalls),
+		BoundTensors:           int64(len(a.bound)),
+	}
+}
+
+func (a *countingActivationAccelerator) Close() {}
+
 func TestEmbeddingTrainerRejectsNonTrainableParams(t *testing.T) {
 	src := []byte(`
 param token_embedding: q8[V, D] @weight("weights/token_embedding")
@@ -1505,6 +1600,116 @@ func TestEmbeddingTrainerBatchedLayerNormBackwardAcceleratorMatchesHost(t *testi
 			)
 		}
 		assertTensorClose(t, backend.NewTensorF32([]int{2, 3}, got[batch]), []int{2, 3}, want)
+	}
+}
+
+func TestEmbeddingTrainerBatchedForwardSkipsUnusedActivationBindings(t *testing.T) {
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	matmul := &countingMatMulAccelerator{}
+	activation := &countingActivationAccelerator{}
+	trainer.forwardMatMul = matmul
+	trainer.activationAccel = activation
+	trainer.activationAccelFull = true
+	trainer.softmaxBackwardAccel = true
+
+	forward := trainer.prepareForwardWeights()
+	trainer.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	batch := []EmbeddingContrastiveExample{
+		{QueryTokens: []int32{0, 2}, PositiveTokens: []int32{0, 0}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}},
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 1}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}},
+	}
+	queries, positives, err := trainer.encodeContrastiveBatch(batch, forward, true)
+	if err != nil {
+		t.Fatalf("encode contrastive batch: %v", err)
+	}
+	defer trainer.releaseEncodedSequences(queries)
+	defer trainer.releaseEncodedSequences(positives)
+	if activation.bindCalls != 0 {
+		t.Fatalf("activation bind calls = %d, want 0 unused per-sequence activation binds in batched forward", activation.bindCalls)
+	}
+	if matmul.boundRightRuns == 0 {
+		t.Fatal("expected batched forward to keep using matmul acceleration")
+	}
+}
+
+func TestEmbeddingTrainerBatchedForwardSkipsSingletonActivationBindings(t *testing.T) {
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	trainer.forwardMatMul = &countingMatMulAccelerator{}
+	activation := &countingActivationAccelerator{}
+	trainer.activationAccel = activation
+	trainer.activationAccelFull = true
+	trainer.softmaxBackwardAccel = true
+
+	forward := trainer.prepareForwardWeights()
+	trainer.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	batch := []EmbeddingContrastiveExample{
+		{QueryTokens: []int32{0}, PositiveTokens: []int32{0, 0}, QueryMask: []int32{1}, PositiveMask: []int32{1, 1}},
+	}
+	queries, positives, err := trainer.encodeContrastiveBatch(batch, forward, true)
+	if err != nil {
+		t.Fatalf("encode contrastive batch: %v", err)
+	}
+	defer trainer.releaseEncodedSequences(queries)
+	defer trainer.releaseEncodedSequences(positives)
+	if activation.bindCalls != 0 {
+		t.Fatalf("activation bind calls = %d, want 0 unused singleton activation binds in batched forward", activation.bindCalls)
+	}
+}
+
+func TestEmbeddingTrainerBatchedForwardKeepsActivationBindingsWhenBatchedBackwardDisabled(t *testing.T) {
+	t.Setenv("MANTA_TRAIN_DISABLE_BATCHED_BACKWARD", "1")
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	trainer.forwardMatMul = &countingMatMulAccelerator{}
+	activation := &countingActivationAccelerator{}
+	trainer.activationAccel = activation
+	trainer.activationAccelFull = true
+	trainer.softmaxBackwardAccel = true
+
+	forward := trainer.prepareForwardWeights()
+	trainer.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	batch := []EmbeddingContrastiveExample{
+		{QueryTokens: []int32{0, 2}, PositiveTokens: []int32{0, 0}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}},
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 1}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}},
+	}
+	queries, positives, err := trainer.encodeContrastiveBatch(batch, forward, true)
+	if err != nil {
+		t.Fatalf("encode contrastive batch: %v", err)
+	}
+	defer trainer.releaseEncodedSequences(queries)
+	defer trainer.releaseEncodedSequences(positives)
+	if activation.bindCalls == 0 {
+		t.Fatal("expected activation bindings when batched backward is disabled")
+	}
+}
+
+func TestEmbeddingTrainerSingleForwardKeepsActivationBindings(t *testing.T) {
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
+	activation := &countingActivationAccelerator{}
+	trainer.activationAccel = activation
+	trainer.activationAccelFull = true
+	trainer.softmaxBackwardAccel = true
+
+	forward := trainer.prepareForwardWeights()
+	mask, err := trainer.prepareMask([]int32{0, 2}, nil)
+	if err != nil {
+		t.Fatalf("prepare mask: %v", err)
+	}
+	seq, err := trainer.encodeSequence([]int32{0, 2}, mask, forward.token, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, true)
+	if err != nil {
+		t.Fatalf("encode sequence: %v", err)
+	}
+	defer trainer.releaseEncodedSequenceBindings(seq)
+	if activation.bindCalls == 0 {
+		t.Fatal("expected single-sequence forward to keep activation bindings for bound backward paths")
 	}
 }
 

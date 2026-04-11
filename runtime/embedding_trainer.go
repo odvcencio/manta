@@ -568,6 +568,14 @@ func (t *EmbeddingTrainer) bindSequenceTensor(state *embeddingSequenceState, slo
 	return name
 }
 
+func (t *EmbeddingTrainer) bindSoftmaxActivationForBatchedForward() bool {
+	return !batchedBackwardEnabled() || !t.softmaxBackwardAccelEnabled()
+}
+
+func (t *EmbeddingTrainer) bindFullActivationForBatchedForward() bool {
+	return !batchedBackwardEnabled() || !t.fullActivationBackwardAccelEnabled()
+}
+
 func (t *EmbeddingTrainer) unbindSequenceTensor(name string) {
 	if t == nil || name == "" {
 		return
@@ -1400,6 +1408,8 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 	}
 	e := projection.Shape[1]
 	seqLen := len(states[0].tokens)
+	bindSoftmaxActivation := t.bindSoftmaxActivationForBatchedForward()
+	bindFullActivation := t.bindFullActivationForBatchedForward()
 	if seqLen == 0 {
 		return fmt.Errorf("tokens are empty")
 	}
@@ -1463,7 +1473,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 			}
 			softmaxRowsInPlace(state.attnScores, seqLen, seqLen)
 			if captureBindings {
-				state.attnScoresBinding = t.bindSequenceTensor(state, "scores", tensorF32View([]int{seqLen, seqLen}, state.attnScores), true, t.softmaxBackwardAccelEnabled())
+				state.attnScoresBinding = t.bindSequenceTensor(state, "scores", tensorF32View([]int{seqLen, seqLen}, state.attnScores), true, t.softmaxBackwardAccelEnabled() && bindSoftmaxActivation)
 			}
 		}
 		batchedMixed, batchedMixedOK := t.tryBatchedAttentionMixed(states, seqLen, d)
@@ -1511,7 +1521,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 						layerNormRow(state.hidden[base:base+d], state.attnResidual[base:base+d])
 					}
 					if captureBindings {
-						state.attnResidualBinding = t.bindSequenceTensor(state, "attn_residual", tensorF32View([]int{seqLen, d}, state.attnResidual), false, t.fullActivationBackwardAccelEnabled())
+						state.attnResidualBinding = t.bindSequenceTensor(state, "attn_residual", tensorF32View([]int{seqLen, d}, state.attnResidual), false, t.fullActivationBackwardAccelEnabled() && bindFullActivation)
 					}
 				} else {
 					copy(state.hidden, state.attnResidual)
@@ -1528,7 +1538,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 
 	for _, state := range states {
 		if captureBindings {
-			state.hiddenBinding = t.bindSequenceTensor(state, "hidden", tensorF32View([]int{seqLen, d}, state.hidden), true, t.fullActivationBackwardAccelEnabled() && t.attentionLayerNormEnabled())
+			state.hiddenBinding = t.bindSequenceTensor(state, "hidden", tensorF32View([]int{seqLen, d}, state.hidden), true, t.fullActivationBackwardAccelEnabled() && t.attentionLayerNormEnabled() && bindFullActivation)
 		}
 	}
 
@@ -1540,7 +1550,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 		})
 		for _, state := range states {
 			if captureBindings {
-				state.ffnHiddenBinding = t.bindSequenceTensor(state, "ffn_hidden", tensorF32View([]int{seqLen, h}, state.ffnHidden), false, t.fullActivationBackwardAccelEnabled())
+				state.ffnHiddenBinding = t.bindSequenceTensor(state, "ffn_hidden", tensorF32View([]int{seqLen, h}, state.ffnHidden), false, t.fullActivationBackwardAccelEnabled() && bindFullActivation)
 			}
 			for i, value := range state.ffnHidden {
 				state.activated[i] = geluForward(value)
@@ -1569,8 +1579,8 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 						layerNormRow(state.projected[base:base+e], state.ffnResidual[base:base+e])
 					}
 					if captureBindings {
-						state.ffnResidualBinding = t.bindSequenceTensor(state, "ffn_residual", tensorF32View([]int{seqLen, e}, state.ffnResidual), false, t.fullActivationBackwardAccelEnabled())
-						state.projectedBinding = t.bindSequenceTensor(state, "projected", tensorF32View([]int{seqLen, e}, state.projected), false, t.fullActivationBackwardAccelEnabled())
+						state.ffnResidualBinding = t.bindSequenceTensor(state, "ffn_residual", tensorF32View([]int{seqLen, e}, state.ffnResidual), false, t.fullActivationBackwardAccelEnabled() && bindFullActivation)
+						state.projectedBinding = t.bindSequenceTensor(state, "projected", tensorF32View([]int{seqLen, e}, state.projected), false, t.fullActivationBackwardAccelEnabled() && bindFullActivation)
 					}
 				} else {
 					copy(state.projected, state.ffnResidual)
