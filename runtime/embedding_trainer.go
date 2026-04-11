@@ -1278,6 +1278,18 @@ func concatenatedSharedLeftMatMulEnabled() bool {
 	}
 }
 
+func combinedAttentionVKGradMatMulEnabled() bool {
+	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_COMBINED_ATTENTION_VK_GRAD") {
+		return false
+	}
+	switch os.Getenv("BARR_TRAIN_COMBINED_ATTENTION_VK_GRAD") {
+	case "0", "false", "FALSE", "no", "NO":
+		return false
+	default:
+		return true
+	}
+}
+
 func batchedBackwardEnabled() bool {
 	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_BATCHED_BACKWARD") {
 		return false
@@ -3408,6 +3420,24 @@ func (t *EmbeddingTrainer) tryConcatenatedSharedLeftAccumulatedTransposeMatMuls(
 	return results, true
 }
 
+func (t *EmbeddingTrainer) tryCombinedAttentionValueKeyGradMatMul(attnScoreMatrices, gradMixedMatrices, gradPreSoftmaxMatrices, attnQMatrices [][]float32, seqLen, d int) ([][]float32, [][]float32, bool) {
+	if t == nil || !combinedAttentionVKGradMatMulEnabled() || len(attnScoreMatrices) == 0 || len(attnScoreMatrices) != len(gradMixedMatrices) || len(attnScoreMatrices) != len(gradPreSoftmaxMatrices) || len(attnScoreMatrices) != len(attnQMatrices) || seqLen == 0 || d == 0 {
+		return nil, nil, false
+	}
+	batches := len(attnScoreMatrices)
+	lhsMatrices := make([][]float32, 0, batches*2)
+	rhsMatrices := make([][]float32, 0, batches*2)
+	lhsMatrices = append(lhsMatrices, attnScoreMatrices...)
+	lhsMatrices = append(lhsMatrices, gradPreSoftmaxMatrices...)
+	rhsMatrices = append(rhsMatrices, gradMixedMatrices...)
+	rhsMatrices = append(rhsMatrices, attnQMatrices...)
+	out, ok := t.tryTrainerBatchedMatMulTranspose(lhsMatrices, seqLen, seqLen, rhsMatrices, seqLen, d, true, false)
+	if !ok || len(out) != batches*2 {
+		return nil, nil, false
+	}
+	return out[:batches], out[batches:], true
+}
+
 func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenceState, gradHiddenMatrices [][]float32, attentionQuery, attentionKey, attentionValue, attentionOutput *backend.Tensor, gradAttnQ, gradAttnK, gradAttnV, gradAttnO []float32, d int) ([][]float32, bool) {
 	if len(states) == 0 || len(states) != len(gradHiddenMatrices) || attentionQuery == nil || attentionKey == nil || attentionValue == nil || attentionOutput == nil {
 		return nil, false
@@ -3568,9 +3598,14 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 		}
 	}
 
-	batchedGradV, gradVOK := t.tryTrainerBatchedMatMulTranspose(attnScoreMatrices, seqLen, seqLen, gradMixedMatrices, seqLen, d, true, false)
+	batchedGradV, batchedGradK, combinedVKOK := t.tryCombinedAttentionValueKeyGradMatMul(attnScoreMatrices, gradMixedMatrices, gradPreSoftmaxMatrices, attnQMatrices, seqLen, d)
+	gradVOK := combinedVKOK
+	gradKOK := combinedVKOK
+	if !combinedVKOK {
+		batchedGradV, gradVOK = t.tryTrainerBatchedMatMulTranspose(attnScoreMatrices, seqLen, seqLen, gradMixedMatrices, seqLen, d, true, false)
+		batchedGradK, gradKOK = t.tryTrainerBatchedMatMulTranspose(gradPreSoftmaxMatrices, seqLen, seqLen, attnQMatrices, seqLen, d, true, false)
+	}
 	batchedGradQ, gradQOK := t.tryTrainerBatchedMatMulTranspose(gradPreSoftmaxMatrices, seqLen, seqLen, attnKMatrices, seqLen, d, false, false)
-	batchedGradK, gradKOK := t.tryTrainerBatchedMatMulTranspose(gradPreSoftmaxMatrices, seqLen, seqLen, attnQMatrices, seqLen, d, true, false)
 	for i, state := range states {
 		gradMixed := gradMixedMatrices[i]
 		gradPreSoftmaxFlat := gradPreSoftmaxMatrices[i]

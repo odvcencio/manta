@@ -39,8 +39,22 @@ func (a *countingMatMulAccelerator) RunMatMul(inputs []*backend.Tensor, outputTy
 			if rhs.Shape[2] > a.maxRunOutputCols {
 				a.maxRunOutputCols = rhs.Shape[2]
 			}
+			out := make([]float32, lhs.Shape[0]*lhs.Shape[1]*rhs.Shape[2])
+			for batch := 0; batch < lhs.Shape[0]; batch++ {
+				lhsBase := batch * lhs.Shape[1] * lhs.Shape[2]
+				rhsBase := batch * rhs.Shape[1] * rhs.Shape[2]
+				outBase := batch * lhs.Shape[1] * rhs.Shape[2]
+				fillHostMatMul(
+					lhs.F32[lhsBase:lhsBase+lhs.Shape[1]*lhs.Shape[2]],
+					lhs.Shape[1],
+					lhs.Shape[2],
+					rhs.F32[rhsBase:rhsBase+rhs.Shape[1]*rhs.Shape[2]],
+					rhs.Shape[2],
+					out[outBase:outBase+lhs.Shape[1]*rhs.Shape[2]],
+				)
+			}
 			return backend.StepDispatchResult{Outputs: []*backend.Tensor{
-				backend.NewTensorF32([]int{lhs.Shape[0], lhs.Shape[1], rhs.Shape[2]}, make([]float32, lhs.Shape[0]*lhs.Shape[1]*rhs.Shape[2])),
+				backend.NewTensorF32([]int{lhs.Shape[0], lhs.Shape[1], rhs.Shape[2]}, out),
 			}}, nil
 		}
 	}
@@ -61,8 +75,25 @@ func (a *countingMatMulAccelerator) RunMatMulWithTranspose(inputs []*backend.Ten
 			if outCols > a.maxRunOutputCols {
 				a.maxRunOutputCols = outCols
 			}
+			out := make([]float32, lhs.Shape[0]*outRows*outCols)
+			for batch := 0; batch < lhs.Shape[0]; batch++ {
+				lhsBase := batch * lhsRows * lhsCols
+				rhsBase := batch * rhsRows * rhsCols
+				outBase := batch * outRows * outCols
+				fillHostMatMulTranspose(
+					lhs.F32[lhsBase:lhsBase+lhsRows*lhsCols],
+					lhsRows,
+					lhsCols,
+					rhs.F32[rhsBase:rhsBase+rhsRows*rhsCols],
+					rhsRows,
+					rhsCols,
+					transposeLeft,
+					transposeRight,
+					out[outBase:outBase+outRows*outCols],
+				)
+			}
 			return backend.StepDispatchResult{Outputs: []*backend.Tensor{
-				backend.NewTensorF32([]int{lhs.Shape[0], outRows, outCols}, make([]float32, lhs.Shape[0]*outRows*outCols)),
+				backend.NewTensorF32([]int{lhs.Shape[0], outRows, outCols}, out),
 			}}, nil
 		}
 	}
@@ -1792,6 +1823,94 @@ func TestEmbeddingTrainerConcatenatedSharedLeftQKVGradCanBeDisabled(t *testing.T
 	}
 	if fake.maxSharedLeftRHS < 3 {
 		t.Fatalf("max shared-left rhs count = %d, want at least 3", fake.maxSharedLeftRHS)
+	}
+}
+
+func TestEmbeddingTrainerCombinedAttentionVKGradMatchesSeparateMatMuls(t *testing.T) {
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+
+	attnScores := [][]float32{
+		{
+			0.2, 0.8,
+			0.6, 0.4,
+		},
+		{
+			0.9, 0.1,
+			0.3, 0.7,
+		},
+	}
+	gradMixed := [][]float32{
+		{
+			1, -2,
+			3, 4,
+		},
+		{
+			-1, 0.5,
+			2, -3,
+		},
+	}
+	gradPreSoftmax := [][]float32{
+		{
+			0.5, -1,
+			2, 0.25,
+		},
+		{
+			1.5, 0.75,
+			-0.5, 3,
+		},
+	}
+	attnQ := [][]float32{
+		{
+			2, 1,
+			-1, 0.5,
+		},
+		{
+			0.25, -2,
+			1, 4,
+		},
+	}
+
+	gotV, gotK, ok := trainer.tryCombinedAttentionValueKeyGradMatMul(attnScores, gradMixed, gradPreSoftmax, attnQ, 2, 2)
+	if !ok {
+		t.Fatal("expected combined V/K gradient matmul to run")
+	}
+	if fake.maxRunBatches != 4 {
+		t.Fatalf("max run batches = %d, want 4 combined batches", fake.maxRunBatches)
+	}
+	for i := range attnScores {
+		wantV := make([]float32, 4)
+		fillHostMatMulTranspose(attnScores[i], 2, 2, gradMixed[i], 2, 2, true, false, wantV)
+		assertTensorClose(t, backend.NewTensorF32([]int{2, 2}, gotV[i]), []int{2, 2}, wantV)
+
+		wantK := make([]float32, 4)
+		fillHostMatMulTranspose(gradPreSoftmax[i], 2, 2, attnQ[i], 2, 2, true, false, wantK)
+		assertTensorClose(t, backend.NewTensorF32([]int{2, 2}, gotK[i]), []int{2, 2}, wantK)
+	}
+}
+
+func TestEmbeddingTrainerCombinedAttentionVKGradCanBeDisabled(t *testing.T) {
+	t.Setenv("BARR_TRAIN_DISABLE_COMBINED_ATTENTION_VK_GRAD", "1")
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	trainer.forwardMatMul = &countingMatMulAccelerator{}
+
+	_, _, ok := trainer.tryCombinedAttentionValueKeyGradMatMul(
+		[][]float32{{1, 0, 0, 1}},
+		[][]float32{{1, 2, 3, 4}},
+		[][]float32{{0.5, 0, 0, 0.5}},
+		[][]float32{{2, 0, 0, 2}},
+		2,
+		2,
+	)
+	if ok {
+		t.Fatal("expected combined V/K gradient matmul to be disabled")
 	}
 }
 
