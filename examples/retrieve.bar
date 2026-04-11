@@ -1,0 +1,9 @@
+param docs: q4[N, D] @weight("weights/docs")
+
+pipeline retrieve(query: f16[D]) -> (top_ids: i32[2], top_scores: f32[2], top_docs: q4[2, D]) {
+    let scores = cosine(query, docs)
+    let top_ids = topk(scores, 2)
+    let top_scores = gather(scores, top_ids)
+    let top_docs = gather(docs, top_ids)
+    return top_ids, top_scores, top_docs
+}

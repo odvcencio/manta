@@ -1,0 +1,8 @@
+param docs: q4[N, D] @weight("weights/docs")
+
+pipeline rerank(query: f16[D]) -> (top_ids: i32[2], top_scores: f32[2]) {
+    let scores = cosine(query, docs)
+    let top_ids = topk(scores, 2)
+    let top_scores = gather(scores, top_ids)
+    return top_ids, top_scores
+}

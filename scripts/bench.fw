@@ -1,0 +1,161 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+func getenv(name string, fallback string) string {
+	let value = os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func envEnabled(name string) bool {
+	let value = strings.ToLower(os.Getenv(name))
+	return value == "1" || value == "true" || value == "yes"
+}
+
+func shell(dir string, name string, args []string) error {
+	let cmd = exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func step(label string) {
+	fmt.Println(f"\n== {label} ==")
+}
+
+func hasGoMod(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "go.mod"))
+	return err == nil
+}
+
+func findRoot() (string, error) {
+	let explicit = os.Getenv("BARR_BENCH_ROOT")
+	if hasGoMod(explicit) {
+		return explicit, nil
+	}
+	let pwd = os.Getenv("PWD")
+	if hasGoMod(pwd) {
+		return pwd, nil
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasGoMod(cwd) {
+		return cwd, nil
+	}
+	return "", fmt.Errorf("could not find repo root; set BARR_BENCH_ROOT")
+}
+
+func copyMatching(pattern string, dst string) error {
+	files, err := filepath.Glob(pattern)
+	guard err == nil else return err
+	guard len(files) > 0 else return fmt.Errorf("no files matched %s", pattern)
+
+	for src in files {
+		data, err := os.ReadFile(src)
+		guard err == nil else return err
+		let out = filepath.Join(dst, filepath.Base(src))
+		err = os.WriteFile(out, data, 0o644)
+		guard err == nil else return err
+	}
+	return nil
+}
+
+func goBench(root string, pkg string, bench string, count string, benchtime string) error {
+	return shell(root, "go", []string{
+		"test", pkg,
+		"-run", "^$",
+		"-bench", bench,
+		"-benchmem",
+		"-count", count,
+		"-benchtime", benchtime,
+	})
+}
+
+func tranquilSmoke(root string, assets string) error {
+	out, err := os.MkdirTemp("", "barracuda-tranquil-bench-*")
+	guard err == nil else return err
+	err = copyMatching(filepath.Join(assets, "tranquil-v0.*"), out)
+	guard err == nil else return err
+
+	let epochs = getenv("BARR_BENCH_TRANQUIL_EPOCHS", "1")
+	let batch = getenv("BARR_BENCH_TRANQUIL_BATCH", "256")
+	let lr = getenv("BARR_BENCH_TRANQUIL_LR", "0.005")
+	let temp = getenv("BARR_BENCH_TRANQUIL_TEMP", "0.05")
+	let evalEvery = getenv("BARR_BENCH_TRANQUIL_EVAL_EVERY", "4")
+	let train = getenv("BARR_BENCH_TRANQUIL_TRAIN", filepath.Join(assets, "train-mini.jsonl"))
+	let eval = getenv("BARR_BENCH_TRANQUIL_EVAL", filepath.Join(assets, "eval-mini.jsonl"))
+
+	step("Tranquil training smoke")
+	fmt.Println(f"output: {out}")
+	err = shell(root, "/usr/bin/time", []string{
+		"-v",
+		"go", "run", "./cmd/barr", "train-embed",
+		"--epochs", epochs,
+		"--batch-size", batch,
+		"--lr", lr,
+		"--contrastive-loss", "infonce",
+		"--temperature", temp,
+		"--eval-every", evalEvery,
+		filepath.Join(out, "tranquil-v0.mll"),
+		train,
+		eval,
+	})
+	guard err == nil else return err
+	return shell(root, "go", []string{"run", "./cmd/barr", "inspect", filepath.Join(out, "tranquil-v0.mll")})
+}
+
+func main() {
+	root, err := findRoot()
+	guard err == nil else {
+		fmt.Println(f"failed to resolve benchmark root: {err}")
+		os.Exit(1)
+	}
+
+	let count = getenv("BARR_BENCH_COUNT", "5")
+	let benchtime = getenv("BARR_BENCH_TIME", "750ms")
+	let runtimeBench = getenv("BARR_BENCH_RUNTIME", "BenchmarkAccumulateInfoNCEContrastiveGrads128x64")
+	let cudaBench = getenv("BARR_BENCH_CUDA_REGEX", "BenchmarkCUDAContrastiveAccelerator256x64|BenchmarkHostContrastiveInfoNCE256x64")
+
+	let start = time.Now()
+	step("Go microbenchmarks")
+	err = goBench(root, "./runtime", runtimeBench, count, benchtime)
+	guard err == nil else {
+		fmt.Println(f"runtime benchmarks failed: {err}")
+		os.Exit(1)
+	}
+
+	if envEnabled("BARR_BENCH_CUDA") {
+		step("CUDA microbenchmarks")
+		err = goBench(root, "./runtime/backends/cuda", cudaBench, count, benchtime)
+		guard err == nil else {
+			fmt.Println(f"cuda benchmarks failed: {err}")
+			os.Exit(1)
+		}
+	}
+
+	let assets = os.Getenv("BARR_BENCH_TRANQUIL_ASSETS")
+	if assets != "" {
+		err = tranquilSmoke(root, assets)
+		guard err == nil else {
+			fmt.Println(f"tranquil smoke failed: {err}")
+			os.Exit(1)
+		}
+	}
+
+	let elapsed = time.Since(start).Round(time.Millisecond)
+	fmt.Println(f"\n== Done in {elapsed} ==")
+}

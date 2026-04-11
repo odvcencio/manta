@@ -1,0 +1,7 @@
+param docs: q4[N, D] @weight("weights/docs")
+
+pipeline select_scores(query: f16[D]) -> f32[2] {
+    let scores = cosine(query, docs)
+    let ids = topk(scores, 2)
+    return gather(scores, ids)
+}

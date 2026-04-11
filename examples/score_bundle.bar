@@ -1,0 +1,7 @@
+pipeline score(query: f16[D], docs: q4[N, D]) -> f32[N] {
+    return cosine(query, docs)
+}
+
+pipeline score_batch(queries: f16[Q, D], docs: q4[Q, N, D]) -> f32[Q, N] {
+    return cosine(queries, docs)
+}

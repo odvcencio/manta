@@ -1,0 +1,5 @@
+param docs: q4[N, D] @weight("weights/docs")
+
+pipeline score(query: f16[D]) -> f32[N] {
+    return cosine(query, docs)
+}

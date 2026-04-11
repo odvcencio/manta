@@ -1,0 +1,8 @@
+pipeline rerank_candidates_batch(queries: f16[Q, D], docs: q4[Q, N, D], candidate_ids: i64[Q, N]) -> (top_candidate_ids: i64[Q, 2], top_scores: f32[Q, 2], top_docs: q4[Q, 2, D]) {
+    let scores = cosine(queries, docs)
+    let top_indices = topk(scores, 2)
+    let top_candidate_ids = gather(candidate_ids, top_indices)
+    let top_scores = gather(scores, top_indices)
+    let top_docs = gather(docs, top_indices)
+    return top_candidate_ids, top_scores, top_docs
+}

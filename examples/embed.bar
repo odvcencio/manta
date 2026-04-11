@@ -1,0 +1,14 @@
+// Token embedding with L2 normalization.
+
+param token_embedding: f16[V, D] @weight("weights/token_embedding")
+param projection: f16[D, E] @weight("weights/projection")
+
+kernel l2_normalize(x: f16[T, E]) -> f16[T, E] {
+    return normalize(x)
+}
+
+pipeline embed(tokens: i32[T]) -> f16[T, E] {
+    let hidden = gather(token_embedding, tokens)
+    let projected = @matmul(hidden, projection)
+    return l2_normalize(projected)
+}

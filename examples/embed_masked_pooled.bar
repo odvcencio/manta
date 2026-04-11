@@ -1,0 +1,16 @@
+param token_embedding: f16[V, D] @weight("weights/token_embedding")
+param projection: f16[D, E] @weight("weights/projection")
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden = gather(token_embedding, tokens)
+    let projected = @matmul(hidden, projection)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let batch_hidden = gather(token_embedding, tokens)
+    let batch_projected = @matmul(batch_hidden, projection)
+    let batch_normalized = normalize(batch_projected)
+    return mean_pool(batch_normalized, attention_mask)
+}

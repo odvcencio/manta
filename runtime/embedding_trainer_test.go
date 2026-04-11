@@ -1,0 +1,2008 @@
+package barruntime
+
+import (
+	"context"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/odvcencio/barracuda/artifact/barr"
+	"github.com/odvcencio/barracuda/compiler"
+	"github.com/odvcencio/barracuda/runtime/backend"
+	"github.com/odvcencio/barracuda/runtime/backends/cuda"
+	"github.com/odvcencio/barracuda/runtime/backends/metal"
+)
+
+type countingMatMulAccelerator struct {
+	bindCalls      int
+	boundRightRuns int
+	bound          map[string]*backend.Tensor
+}
+
+func (a *countingMatMulAccelerator) Backend() barr.BackendKind { return barr.BackendCUDA }
+func (a *countingMatMulAccelerator) RunMatMul(inputs []*backend.Tensor, outputType barr.ValueType) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+func (a *countingMatMulAccelerator) RunMatMulWithTranspose(inputs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+func (a *countingMatMulAccelerator) BindMatrix(name string, tensor *backend.Tensor) error {
+	if a.bound == nil {
+		a.bound = map[string]*backend.Tensor{}
+	}
+	a.bindCalls++
+	a.bound[name] = tensor
+	return nil
+}
+func (a *countingMatMulAccelerator) UnbindMatrix(name string) error {
+	delete(a.bound, name)
+	return nil
+}
+func (a *countingMatMulAccelerator) RunMatMulWithBoundLeft(leftName string, rhs *backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+func (a *countingMatMulAccelerator) RunMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+	a.boundRightRuns++
+	return backend.StepDispatchResult{}, nil
+}
+func (a *countingMatMulAccelerator) Stats() backend.MatMulAcceleratorStats {
+	return backend.MatMulAcceleratorStats{
+		BindCalls:       int64(a.bindCalls),
+		BoundMatrices:   int64(len(a.bound)),
+		RunCalls:        int64(a.boundRightRuns),
+		BoundRightCalls: int64(a.boundRightRuns),
+	}
+}
+func (a *countingMatMulAccelerator) Close() {}
+
+func TestEmbeddingTrainerRejectsNonTrainableParams(t *testing.T) {
+	src := []byte(`
+param token_embedding: q8[V, D] @weight("weights/token_embedding")
+param projection: q8[D, E] @weight("weights/projection")
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "frozen_train_embed_q8"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	_, err = NewEmbeddingTrainer(bundle.Artifact, tinyMaskedEmbeddingManifest(), map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{3, 2}, []float32{
+			0.9, 0.1,
+			0.3, 0.7,
+			0.6, 0.4,
+		}),
+		"projection": backend.NewTensorF32([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+	}, EmbeddingTrainConfig{})
+	if err == nil {
+		t.Fatal("expected non-trainable param error")
+	}
+	if !strings.Contains(err.Error(), `not marked @trainable`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestEmbeddingTrainerTrainStepReducesLossAndExportsQuantizedWeights(t *testing.T) {
+	src := []byte(`
+param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
+param projection: q8[D, E] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_train_embed_q8"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	manifest := tinyMaskedEmbeddingManifest()
+	manifest.Name = "tiny_train_embed_q8"
+	trainer, err := NewEmbeddingTrainer(bundle.Artifact, manifest, map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			1, 1,
+		}),
+		"projection": backend.NewTensorF32([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+	}, EmbeddingTrainConfig{LearningRate: 0.2})
+	if err != nil {
+		t.Fatalf("new trainer: %v", err)
+	}
+
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{0}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+		{LeftTokens: []int32{1}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+		{LeftTokens: []int32{0}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: -1},
+		{LeftTokens: []int32{1}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: -1},
+	}
+
+	before, err := trainer.EvalBatch(batch)
+	if err != nil {
+		t.Fatalf("eval before: %v", err)
+	}
+	for i := 0; i < 32; i++ {
+		if _, err := trainer.TrainStep(batch); err != nil {
+			t.Fatalf("train step %d: %v", i, err)
+		}
+	}
+	after, err := trainer.EvalBatch(batch)
+	if err != nil {
+		t.Fatalf("eval after: %v", err)
+	}
+	if after.Loss >= before.Loss {
+		t.Fatalf("loss did not decrease: before=%f after=%f", before.Loss, after.Loss)
+	}
+
+	exported, err := trainer.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export weights: %v", err)
+	}
+	if got := exported["token_embedding"].DType; got != "q8" {
+		t.Fatalf("token_embedding export dtype = %q, want q8", got)
+	}
+	if got := exported["projection"].DType; got != "q8" {
+		t.Fatalf("projection export dtype = %q, want q8", got)
+	}
+
+	loadOpts, err := trainer.ExportLoadOptions()
+	if err != nil {
+		t.Fatalf("export load options: %v", err)
+	}
+	rt := New(cuda.New(), metal.New())
+	model, err := rt.LoadEmbedding(context.Background(), bundle.Artifact, manifest, loadOpts...)
+	if err != nil {
+		t.Fatalf("load trained model: %v", err)
+	}
+	result, err := model.Embed(context.Background(), []int32{0})
+	if err != nil {
+		t.Fatalf("embed trained model: %v", err)
+	}
+	if result.Embeddings == nil {
+		t.Fatal("expected embedding output")
+	}
+	if got := result.Embeddings.DType; got != "f16" {
+		t.Fatalf("embedding dtype = %q, want f16", got)
+	}
+}
+
+func TestEmbeddingTrainerTrainStepSupportsFFNGELUAndExportsQuantizedWeights(t *testing.T) {
+	src := []byte(`
+param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
+param ffn_up: q8[D, H] @weight("weights/ffn_up") @trainable
+param projection: q8[H, E] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let ffn_up_f = dequant(ffn_up)
+    let projection_f = dequant(projection)
+    let ffn_hidden = @matmul(hidden, ffn_up_f)
+    let activated = gelu(ffn_hidden)
+    let projected = @matmul(activated, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let ffn_up_f = dequant(ffn_up)
+    let projection_f = dequant(projection)
+    let ffn_hidden = @matmul(hidden, ffn_up_f)
+    let activated = gelu(ffn_hidden)
+    let projected = @matmul(activated, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_train_embed_ffn_q8"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	manifest := tinyMaskedEmbeddingManifest()
+	manifest.Name = "tiny_train_embed_ffn_q8"
+	manifest.HiddenProjectionParam = "ffn_up"
+	trainer, err := NewEmbeddingTrainer(bundle.Artifact, manifest, map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			1, 1,
+		}),
+		"ffn_up": backend.NewTensorF32([]int{2, 3}, []float32{
+			1, 0, 1,
+			0, 1, 1,
+		}),
+		"projection": backend.NewTensorF32([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			0.5, 0.5,
+		}),
+	}, EmbeddingTrainConfig{LearningRate: 0.05})
+	if err != nil {
+		t.Fatalf("new trainer: %v", err)
+	}
+
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{0}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+		{LeftTokens: []int32{1}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+		{LeftTokens: []int32{0}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: -1},
+		{LeftTokens: []int32{1}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: -1},
+	}
+
+	before, err := trainer.EvalBatch(batch)
+	if err != nil {
+		t.Fatalf("eval before: %v", err)
+	}
+	for i := 0; i < 32; i++ {
+		if _, err := trainer.TrainStep(batch); err != nil {
+			t.Fatalf("train step %d: %v", i, err)
+		}
+	}
+	after, err := trainer.EvalBatch(batch)
+	if err != nil {
+		t.Fatalf("eval after: %v", err)
+	}
+	if after.Loss >= before.Loss {
+		t.Fatalf("ffn loss did not decrease: before=%f after=%f", before.Loss, after.Loss)
+	}
+
+	exported, err := trainer.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export weights: %v", err)
+	}
+	if got := exported["token_embedding"].DType; got != "q8" {
+		t.Fatalf("token_embedding export dtype = %q, want q8", got)
+	}
+	if got := exported["ffn_up"].DType; got != "q8" {
+		t.Fatalf("ffn_up export dtype = %q, want q8", got)
+	}
+	if got := exported["projection"].DType; got != "q8" {
+		t.Fatalf("projection export dtype = %q, want q8", got)
+	}
+
+	loadOpts, err := trainer.ExportLoadOptions()
+	if err != nil {
+		t.Fatalf("export load options: %v", err)
+	}
+	rt := New(cuda.New(), metal.New())
+	model, err := rt.LoadEmbedding(context.Background(), bundle.Artifact, manifest, loadOpts...)
+	if err != nil {
+		t.Fatalf("load trained ffn model: %v", err)
+	}
+	result, err := model.Embed(context.Background(), []int32{0})
+	if err != nil {
+		t.Fatalf("embed trained ffn model: %v", err)
+	}
+	if result.Embeddings == nil {
+		t.Fatal("expected embedding output")
+	}
+	if got := result.Embeddings.DType; got != "f16" {
+		t.Fatalf("embedding dtype = %q, want f16", got)
+	}
+}
+
+func TestEmbeddingTrainerTrainStepSupportsAttentionAndExportsQuantizedWeights(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{0}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+		{LeftTokens: []int32{1}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+		{LeftTokens: []int32{0}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: -1},
+		{LeftTokens: []int32{1}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: -1},
+	}
+
+	before, err := trainer.EvalBatch(batch)
+	if err != nil {
+		t.Fatalf("eval before: %v", err)
+	}
+	for i := 0; i < 32; i++ {
+		if _, err := trainer.TrainStep(batch); err != nil {
+			t.Fatalf("train step %d: %v", i, err)
+		}
+	}
+	after, err := trainer.EvalBatch(batch)
+	if err != nil {
+		t.Fatalf("eval after: %v", err)
+	}
+	if after.Loss >= before.Loss {
+		t.Fatalf("attention loss did not decrease: before=%f after=%f", before.Loss, after.Loss)
+	}
+
+	exported, err := trainer.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export weights: %v", err)
+	}
+	for _, name := range []string{"token_embedding", "attn_q", "attn_k", "attn_v", "attn_o", "projection"} {
+		if got := exported[name].DType; got != "q8" {
+			t.Fatalf("%s export dtype = %q, want q8", name, got)
+		}
+	}
+}
+
+func TestEmbeddingTrainerEvaluatePairsImprovesSeparation(t *testing.T) {
+	src := []byte(`
+param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
+param projection: q8[D, E] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_train_embed_q8"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := tinyMaskedEmbeddingManifest()
+	manifest.Name = "tiny_train_embed_q8"
+	trainer, err := NewEmbeddingTrainer(bundle.Artifact, manifest, map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			1, 1,
+		}),
+		"projection": backend.NewTensorF32([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+	}, EmbeddingTrainConfig{LearningRate: 0.05})
+	if err != nil {
+		t.Fatalf("new trainer: %v", err)
+	}
+
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{0}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+		{LeftTokens: []int32{1}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+		{LeftTokens: []int32{0}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: -1},
+		{LeftTokens: []int32{1}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: -1},
+	}
+
+	before, err := trainer.EvaluatePairs(batch)
+	if err != nil {
+		t.Fatalf("eval before: %v", err)
+	}
+	for i := 0; i < 24; i++ {
+		if _, err := trainer.TrainStep(batch); err != nil {
+			t.Fatalf("train step %d: %v", i, err)
+		}
+	}
+	after, err := trainer.EvaluatePairs(batch)
+	if err != nil {
+		t.Fatalf("eval after: %v", err)
+	}
+	if after.ScoreMargin <= before.ScoreMargin {
+		t.Fatalf("score margin did not improve: before=%f after=%f", before.ScoreMargin, after.ScoreMargin)
+	}
+	if after.PairAccuracy < before.PairAccuracy {
+		t.Fatalf("pair accuracy regressed: before=%f after=%f", before.PairAccuracy, after.PairAccuracy)
+	}
+}
+
+func TestDefaultEmbeddingCheckpointPath(t *testing.T) {
+	got := DefaultEmbeddingCheckpointPath("/tmp/tiny_train_embed_q8.barr")
+	if want := "/tmp/tiny_train_embed_q8.embed-train.mll"; got != want {
+		t.Fatalf("checkpoint path = %q, want %q", got, want)
+	}
+}
+
+func TestEmbeddingTrainerCheckpointRoundTrip(t *testing.T) {
+	src := []byte(`
+param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
+param projection: q8[D, E] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_train_embed_q8"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := tinyMaskedEmbeddingManifest()
+	manifest.Name = "tiny_train_embed_q8"
+	cfg := EmbeddingTrainConfig{LearningRate: 0.05}
+	trainer, err := NewEmbeddingTrainer(bundle.Artifact, manifest, map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			1, 1,
+		}),
+		"projection": backend.NewTensorF32([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+	}, cfg)
+	if err != nil {
+		t.Fatalf("new trainer: %v", err)
+	}
+
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{0}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+		{LeftTokens: []int32{1}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+		{LeftTokens: []int32{0}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: -1},
+		{LeftTokens: []int32{1}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: -1},
+	}
+
+	for i := 0; i < 4; i++ {
+		if _, err := trainer.TrainStep(batch); err != nil {
+			t.Fatalf("train step %d: %v", i, err)
+		}
+	}
+	checkpoint, err := trainer.Checkpoint()
+	if err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if checkpoint.Step != 4 {
+		t.Fatalf("checkpoint step = %d, want 4", checkpoint.Step)
+	}
+	if checkpoint.TokenMoment1 == nil || checkpoint.TokenMoment2 == nil || checkpoint.ProjMoment1 == nil || checkpoint.ProjMoment2 == nil {
+		t.Fatal("expected optimizer moments in checkpoint")
+	}
+
+	path := filepath.Join(t.TempDir(), "tiny_train_embed_q8.embed-train.mll")
+	if err := checkpoint.WriteFile(path); err != nil {
+		t.Fatalf("write checkpoint: %v", err)
+	}
+	loaded, err := ReadEmbeddingTrainCheckpointFile(path)
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	restored, err := NewEmbeddingTrainerFromCheckpoint(bundle.Artifact, loaded)
+	if err != nil {
+		t.Fatalf("restore trainer: %v", err)
+	}
+
+	beforeA, err := trainer.EvalBatch(batch)
+	if err != nil {
+		t.Fatalf("eval original: %v", err)
+	}
+	beforeB, err := restored.EvalBatch(batch)
+	if err != nil {
+		t.Fatalf("eval restored: %v", err)
+	}
+	assertClose(t, beforeA.Loss, beforeB.Loss, 0.000001)
+	assertClose(t, beforeA.AverageScore, beforeB.AverageScore, 0.000001)
+
+	if _, err := trainer.TrainStep(batch); err != nil {
+		t.Fatalf("train original after restore: %v", err)
+	}
+	if _, err := restored.TrainStep(batch); err != nil {
+		t.Fatalf("train restored after restore: %v", err)
+	}
+	exportA, err := trainer.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export original: %v", err)
+	}
+	exportB, err := restored.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export restored: %v", err)
+	}
+	assertTensorClose(t, exportA["token_embedding"], exportB["token_embedding"].Shape, exportB["token_embedding"].F32)
+	assertTensorClose(t, exportA["projection"], exportB["projection"].Shape, exportB["projection"].F32)
+}
+
+func TestEmbeddingTrainerFFNCheckpointRoundTrip(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	batch := tinyEmbeddingPairDataset()
+
+	for i := 0; i < 4; i++ {
+		if _, err := trainer.TrainStep(batch); err != nil {
+			t.Fatalf("train step %d: %v", i, err)
+		}
+	}
+
+	checkpoint, err := trainer.Checkpoint()
+	if err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	restored, err := NewEmbeddingTrainerFromCheckpoint(trainer.module, checkpoint)
+	if err != nil {
+		t.Fatalf("restore checkpoint: %v", err)
+	}
+
+	if _, err := trainer.TrainStep(batch); err != nil {
+		t.Fatalf("continue original trainer: %v", err)
+	}
+	if _, err := restored.TrainStep(batch); err != nil {
+		t.Fatalf("continue restored trainer: %v", err)
+	}
+
+	exportA, err := trainer.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export original: %v", err)
+	}
+	exportB, err := restored.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export restored: %v", err)
+	}
+	assertTensorClose(t, exportA["token_embedding"], exportB["token_embedding"].Shape, exportB["token_embedding"].F32)
+	assertTensorClose(t, exportA["ffn_up"], exportB["ffn_up"].Shape, exportB["ffn_up"].F32)
+	assertTensorClose(t, exportA["projection"], exportB["projection"].Shape, exportB["projection"].F32)
+}
+
+func TestEmbeddingTrainerAttentionCheckpointRoundTrip(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+	batch := tinyEmbeddingPairDataset()
+
+	for i := 0; i < 4; i++ {
+		if _, err := trainer.TrainStep(batch); err != nil {
+			t.Fatalf("train step %d: %v", i, err)
+		}
+	}
+
+	checkpoint, err := trainer.Checkpoint()
+	if err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	restored, err := NewEmbeddingTrainerFromCheckpoint(trainer.module, checkpoint)
+	if err != nil {
+		t.Fatalf("restore checkpoint: %v", err)
+	}
+	t.Cleanup(restored.Close)
+
+	if _, err := trainer.TrainStep(batch); err != nil {
+		t.Fatalf("continue original trainer: %v", err)
+	}
+	if _, err := restored.TrainStep(batch); err != nil {
+		t.Fatalf("continue restored trainer: %v", err)
+	}
+
+	exportA, err := trainer.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export original: %v", err)
+	}
+	exportB, err := restored.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export restored: %v", err)
+	}
+	for _, name := range []string{"token_embedding", "attn_q", "attn_k", "attn_v", "attn_o", "projection"} {
+		assertTensorClose(t, exportA[name], exportB[name].Shape, exportB[name].F32)
+	}
+}
+
+func TestEmbeddingTrainerTrainStepSupportsEncoderResidualLayerNormAndExportsQuantizedWeights(t *testing.T) {
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.02)
+
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{0, 2}, RightTokens: []int32{1, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 0},
+		{LeftTokens: []int32{0, 0}, RightTokens: []int32{0, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 0.5},
+		{LeftTokens: []int32{1, 1}, RightTokens: []int32{1, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 0.5},
+		{LeftTokens: []int32{0, 1}, RightTokens: []int32{1, 0}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 0},
+	}
+	beforeMaster := map[string][]float32{
+		"token_embedding": append([]float32(nil), trainer.tokenEmbed.F32...),
+		"attn_q":          append([]float32(nil), trainer.attentionQuery.F32...),
+		"attn_k":          append([]float32(nil), trainer.attentionKey.F32...),
+		"attn_v":          append([]float32(nil), trainer.attentionValue.F32...),
+		"attn_o":          append([]float32(nil), trainer.attentionOutput.F32...),
+		"ffn_up":          append([]float32(nil), trainer.hiddenProjection.F32...),
+		"projection":      append([]float32(nil), trainer.projection.F32...),
+	}
+
+	before, err := trainer.EvalBatch(batch)
+	if err != nil {
+		t.Fatalf("eval before: %v", err)
+	}
+	for i := 0; i < 32; i++ {
+		if _, err := trainer.TrainStep(batch); err != nil {
+			t.Fatalf("train step %d: %v", i, err)
+		}
+	}
+	after, err := trainer.EvalBatch(batch)
+	if err != nil {
+		t.Fatalf("eval after: %v", err)
+	}
+	if after.Loss > before.Loss+0.000001 {
+		t.Fatalf("encoder loss regressed: before=%f after=%f", before.Loss, after.Loss)
+	}
+
+	exported, err := trainer.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export weights: %v", err)
+	}
+	for _, name := range []string{"token_embedding", "attn_q", "attn_k", "attn_v", "attn_o", "ffn_up", "projection"} {
+		if got := exported[name].DType; got != "q8" {
+			t.Fatalf("%s export dtype = %q, want q8", name, got)
+		}
+	}
+	changed := false
+	for _, name := range []string{"token_embedding", "attn_q", "attn_k", "attn_v", "attn_o", "ffn_up", "projection"} {
+		master := trainerMasterTensorByName(trainer, name)
+		for i, value := range master.F32 {
+			if abs32(value-beforeMaster[name][i]) > 1e-6 {
+				changed = true
+				break
+			}
+		}
+		if changed {
+			break
+		}
+	}
+	if !changed {
+		t.Fatal("expected encoder train step to update at least one exported weight tensor")
+	}
+}
+
+func TestEmbeddingTrainerTrainStepSupportsRepeatedEncoderAndExportsQuantizedWeights(t *testing.T) {
+	trainer := newTinyTrainableRepeatedEncoderEmbeddingTrainer(t, 0.02)
+	if got := trainer.encoderRepeats(); got != 2 {
+		t.Fatalf("encoder repeats = %d, want 2", got)
+	}
+
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{0, 2}, RightTokens: []int32{1, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 0},
+		{LeftTokens: []int32{0, 0}, RightTokens: []int32{0, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 0.5},
+		{LeftTokens: []int32{1, 1}, RightTokens: []int32{1, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 0.5},
+		{LeftTokens: []int32{0, 1}, RightTokens: []int32{1, 0}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 0},
+	}
+	before, err := trainer.EvalBatch(batch)
+	if err != nil {
+		t.Fatalf("eval before: %v", err)
+	}
+	beforeProjection := append([]float32(nil), trainer.projection.F32...)
+	for i := 0; i < 24; i++ {
+		if _, err := trainer.TrainStep(batch); err != nil {
+			t.Fatalf("train step %d: %v", i, err)
+		}
+	}
+	after, err := trainer.EvalBatch(batch)
+	if err != nil {
+		t.Fatalf("eval after: %v", err)
+	}
+	if after.Loss > before.Loss+0.000001 {
+		t.Fatalf("repeated encoder loss regressed: before=%f after=%f", before.Loss, after.Loss)
+	}
+	exported, err := trainer.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export weights: %v", err)
+	}
+	for _, name := range []string{"token_embedding", "attn_q", "attn_k", "attn_v", "attn_o", "ffn_up", "projection"} {
+		if got := exported[name].DType; got != "q8" {
+			t.Fatalf("%s export dtype = %q, want q8", name, got)
+		}
+	}
+	changed := false
+	for i, value := range trainer.projection.F32 {
+		if abs32(value-beforeProjection[i]) > 1e-6 {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		t.Fatal("expected repeated encoder train step to update projection weights")
+	}
+}
+
+func TestEmbeddingTrainerEncoderCheckpointRoundTrip(t *testing.T) {
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.02)
+	batch := tinyEncoderPairDataset()
+
+	for i := 0; i < 4; i++ {
+		if _, err := trainer.TrainStep(batch); err != nil {
+			t.Fatalf("train step %d: %v", i, err)
+		}
+	}
+
+	checkpoint, err := trainer.Checkpoint()
+	if err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	restored, err := NewEmbeddingTrainerFromCheckpoint(trainer.module, checkpoint)
+	if err != nil {
+		t.Fatalf("restore checkpoint: %v", err)
+	}
+	t.Cleanup(restored.Close)
+
+	if _, err := trainer.TrainStep(batch); err != nil {
+		t.Fatalf("continue original trainer: %v", err)
+	}
+	if _, err := restored.TrainStep(batch); err != nil {
+		t.Fatalf("continue restored trainer: %v", err)
+	}
+
+	exportA, err := trainer.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export original: %v", err)
+	}
+	exportB, err := restored.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export restored: %v", err)
+	}
+	for _, name := range []string{"token_embedding", "attn_q", "attn_k", "attn_v", "attn_o", "ffn_up", "projection"} {
+		assertTensorClose(t, exportA[name], exportB[name].Shape, exportB[name].F32)
+	}
+}
+
+func TestEmbeddingTrainerForwardMatMulAcceleratorMatchesHost(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul == nil {
+		t.Skip("no trainer matmul accelerator available")
+	}
+	if trainer.forwardBackend != barr.BackendCUDA && trainer.forwardBackend != barr.BackendMetal {
+		t.Fatalf("forward backend = %q, want cuda or metal", trainer.forwardBackend)
+	}
+	rhs := backend.NewTensorF32([]int{2, 3}, []float32{
+		1, 2, 3,
+		4, 5, 6,
+	})
+	got, ok := trainer.tryForwardMatMul([]float32{
+		1, 2,
+		3, 4,
+	}, 2, 2, rhs, 3)
+	if !ok {
+		t.Fatal("accelerated matmul was not used")
+	}
+	want := make([]float32, 6)
+	fillHostMatMul([]float32{
+		1, 2,
+		3, 4,
+	}, 2, 2, rhs.F32, 3, want)
+	assertTensorClose(t, backend.NewTensorF32([]int{2, 3}, got), []int{2, 3}, want)
+}
+
+func TestEmbeddingTrainerTransposedMatMulAcceleratorMatchesHost(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul == nil {
+		t.Skip("no trainer matmul accelerator available")
+	}
+	lhs := []float32{
+		1, 2, 3,
+		4, 5, 6,
+	}
+	rhs := []float32{
+		1, 0, 2, 1,
+		0, 1, 3, 2,
+	}
+	got, ok := trainer.tryTrainerMatMul(lhs, 2, 3, rhs, 2, 4, true, false)
+	if !ok {
+		t.Fatal("accelerated transposed matmul was not used")
+	}
+	want := make([]float32, 12)
+	fillHostMatMulTranspose(lhs, 2, 3, rhs, 2, 4, true, false, want)
+	assertTensorClose(t, backend.NewTensorF32([]int{3, 4}, got), []int{3, 4}, want)
+}
+
+func TestEmbeddingTrainerBoundRightMatMulMatchesHostAndRefreshes(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul == nil {
+		t.Skip("no trainer matmul accelerator available")
+	}
+	lhs := backend.NewTensorF32([]int{2, 2}, []float32{
+		1, 2,
+		3, 4,
+	})
+	rhsA := backend.NewTensorF32([]int{2, 3}, []float32{
+		1, 2, 3,
+		4, 5, 6,
+	})
+	if err := trainer.forwardMatMul.BindMatrix(trainer.projParam.Name, rhsA); err != nil {
+		t.Fatalf("bind rhsA: %v", err)
+	}
+	resultA, err := trainer.forwardMatMul.RunMatMulWithBoundRight(lhs, trainer.projParam.Name, barr.ValueType{
+		Kind: barr.ValueTensor,
+		Tensor: &barr.TensorType{
+			DType: "f32",
+		},
+	}, false, false)
+	if err != nil {
+		t.Fatalf("run bound rhsA: %v", err)
+	}
+	wantA := make([]float32, 6)
+	fillHostMatMul([]float32{
+		1, 2,
+		3, 4,
+	}, 2, 2, rhsA.F32, 3, wantA)
+	assertTensorClose(t, resultA.Outputs[0], []int{2, 3}, wantA)
+	if got := resultA.Metadata["rhs_binding"]; got != trainer.projParam.Name {
+		t.Fatalf("rhs_binding = %v, want %q", got, trainer.projParam.Name)
+	}
+
+	rhsB := backend.NewTensorF32([]int{2, 3}, []float32{
+		2, 0, 1,
+		1, 3, 2,
+	})
+	if err := trainer.forwardMatMul.BindMatrix(trainer.projParam.Name, rhsB); err != nil {
+		t.Fatalf("bind rhsB: %v", err)
+	}
+	resultB, err := trainer.forwardMatMul.RunMatMulWithBoundRight(lhs, trainer.projParam.Name, barr.ValueType{
+		Kind: barr.ValueTensor,
+		Tensor: &barr.TensorType{
+			DType: "f32",
+		},
+	}, false, false)
+	if err != nil {
+		t.Fatalf("run bound rhsB: %v", err)
+	}
+	wantB := make([]float32, 6)
+	fillHostMatMul([]float32{
+		1, 2,
+		3, 4,
+	}, 2, 2, rhsB.F32, 3, wantB)
+	assertTensorClose(t, resultB.Outputs[0], []int{2, 3}, wantB)
+}
+
+func TestEmbeddingTrainerBoundLeftMatMulMatchesHostAndRefreshes(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul == nil {
+		t.Skip("no trainer matmul accelerator available")
+	}
+	lhsA := backend.NewTensorF32([]int{2, 3}, []float32{
+		1, 2, 3,
+		4, 5, 6,
+	})
+	rhs := backend.NewTensorF32([]int{2, 2}, []float32{
+		1, 0,
+		2, 1,
+	})
+	if err := trainer.forwardMatMul.BindMatrix(trainer.hiddenParam.Name, lhsA); err != nil {
+		t.Fatalf("bind lhsA: %v", err)
+	}
+	resultA, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(trainer.hiddenParam.Name, rhs, barr.ValueType{
+		Kind: barr.ValueTensor,
+		Tensor: &barr.TensorType{
+			DType: "f32",
+		},
+	}, true, false)
+	if err != nil {
+		t.Fatalf("run bound lhsA: %v", err)
+	}
+	wantA := make([]float32, 6)
+	fillHostMatMulTranspose(lhsA.F32, 2, 3, rhs.F32, 2, 2, true, false, wantA)
+	assertTensorClose(t, resultA.Outputs[0], []int{3, 2}, wantA)
+	if got := resultA.Metadata["lhs_binding"]; got != trainer.hiddenParam.Name {
+		t.Fatalf("lhs_binding = %v, want %q", got, trainer.hiddenParam.Name)
+	}
+
+	lhsB := backend.NewTensorF32([]int{2, 3}, []float32{
+		2, 1, 0,
+		3, 2, 1,
+	})
+	if err := trainer.forwardMatMul.BindMatrix(trainer.hiddenParam.Name, lhsB); err != nil {
+		t.Fatalf("bind lhsB: %v", err)
+	}
+	resultB, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(trainer.hiddenParam.Name, rhs, barr.ValueType{
+		Kind: barr.ValueTensor,
+		Tensor: &barr.TensorType{
+			DType: "f32",
+		},
+	}, true, false)
+	if err != nil {
+		t.Fatalf("run bound lhsB: %v", err)
+	}
+	wantB := make([]float32, 6)
+	fillHostMatMulTranspose(lhsB.F32, 2, 3, rhs.F32, 2, 2, true, false, wantB)
+	assertTensorClose(t, resultB.Outputs[0], []int{3, 2}, wantB)
+}
+
+func TestEmbeddingTrainerOptimizerAcceleratorMatchesHostAdamW(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	if trainer.optimizerAccel == nil {
+		t.Skip("no trainer optimizer accelerator available")
+	}
+	paramA := backend.NewTensorF32([]int{2, 2}, []float32{
+		0.5, -0.25,
+		1.0, -0.75,
+	})
+	mom1A := backend.NewTensorF32([]int{2, 2}, []float32{
+		0.1, -0.05,
+		0.2, -0.1,
+	})
+	mom2A := backend.NewTensorF32([]int{2, 2}, []float32{
+		0.01, 0.02,
+		0.03, 0.04,
+	})
+	grad := []float32{
+		0.2, -0.1,
+		0.05, -0.15,
+	}
+	paramB := paramA.Clone()
+	mom1B := mom1A.Clone()
+	mom2B := mom2A.Clone()
+
+	cfg := trainer.optimizerUpdateConfig(0.5)
+	cfg.Step = 3
+	if err := trainer.optimizerAccel.ApplyUpdate(trainer.projParam.Name, cfg, paramA, mom1A, mom2A, backend.NewTensorF32([]int{2, 2}, grad)); err != nil {
+		t.Fatalf("accelerated optimizer update: %v", err)
+	}
+	if err := trainer.optimizerAccel.SyncState(trainer.projParam.Name, paramA, mom1A, mom2A, true); err != nil {
+		t.Fatalf("sync accelerated optimizer state: %v", err)
+	}
+	applyOptimizerUpdate(trainer.config, cfg.Step, paramB, mom1B, mom2B, grad, cfg.Scale)
+
+	assertTensorClose(t, paramA, paramB.Shape, paramB.F32)
+	assertTensorClose(t, mom1A, mom1B.Shape, mom1B.F32)
+	assertTensorClose(t, mom2A, mom2B.Shape, mom2B.F32)
+}
+
+func TestEmbeddingTrainerCheckpointSyncsResidentOptimizerMoments(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	if trainer.optimizerAccel == nil {
+		t.Skip("no trainer optimizer accelerator available")
+	}
+	batch := tinyEmbeddingPairDataset()
+
+	if _, err := trainer.TrainStep(batch); err != nil {
+		t.Fatalf("train step: %v", err)
+	}
+	allZero := true
+	for _, v := range trainer.projMom1.F32 {
+		if abs32(v) > 1e-9 {
+			allZero = false
+			break
+		}
+	}
+	if !allZero {
+		t.Fatal("expected resident optimizer path to defer host moment sync until checkpoint")
+	}
+
+	checkpoint, err := trainer.Checkpoint()
+	if err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if checkpoint.ProjMoment1 == nil || checkpoint.ProjMoment2 == nil {
+		t.Fatal("expected checkpoint to include projection moments")
+	}
+	nonZero := false
+	for i := range checkpoint.ProjMoment1.F32 {
+		if abs32(checkpoint.ProjMoment1.F32[i]) > 1e-9 || abs32(checkpoint.ProjMoment2.F32[i]) > 1e-9 {
+			nonZero = true
+			break
+		}
+	}
+	if !nonZero {
+		t.Fatal("expected checkpoint to sync resident optimizer moments")
+	}
+}
+
+func TestEmbeddingTrainerGELUBackwardAcceleratorMatchesHost(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	if trainer.activationAccel == nil {
+		t.Skip("no trainer activation accelerator available")
+	}
+	gradOut := []float32{
+		0.2, -0.1, 0.05,
+		-0.25, 0.4, -0.3,
+	}
+	preAct := []float32{
+		-1.0, -0.5, 0.0,
+		0.5, 1.0, 1.5,
+	}
+	got, ok := trainer.tryGELUBackwardMul(gradOut, preAct, 2, 3, "")
+	if !ok {
+		t.Fatal("accelerated gelu backward was not used")
+	}
+	want := make([]float32, len(gradOut))
+	for i := range want {
+		want[i] = gradOut[i] * geluBackward(preAct[i])
+	}
+	assertTensorClose(t, backend.NewTensorF32([]int{2, 3}, got), []int{2, 3}, want)
+}
+
+func TestEmbeddingTrainerSoftmaxBackwardAcceleratorMatchesHost(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+	if trainer.activationAccel == nil {
+		t.Skip("no trainer activation accelerator available")
+	}
+	gradOut := []float32{
+		0.3, -0.1,
+		-0.2, 0.4,
+	}
+	probs := []float32{
+		0.7, 0.3,
+		0.25, 0.75,
+	}
+	got, ok := trainer.trySoftmaxBackwardRows(gradOut, probs, 2, 2, "")
+	if !ok {
+		t.Fatal("accelerated softmax backward was not used")
+	}
+	want := make([]float32, len(gradOut))
+	for row := 0; row < 2; row++ {
+		backwardSoftmaxRow(want[row*2:(row+1)*2], gradOut[row*2:(row+1)*2], probs[row*2:(row+1)*2])
+	}
+	assertTensorClose(t, backend.NewTensorF32([]int{2, 2}, got), []int{2, 2}, want)
+}
+
+func TestEmbeddingTrainerLayerNormBackwardAcceleratorMatchesHost(t *testing.T) {
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
+	if trainer.activationAccel == nil {
+		t.Skip("no trainer activation accelerator available")
+	}
+	gradOut := []float32{
+		0.2, -0.1, 0.3,
+		-0.4, 0.25, 0.15,
+	}
+	pre := []float32{
+		1.2, -0.4, 0.1,
+		0.5, 1.0, -0.5,
+	}
+	normalized := make([]float32, len(pre))
+	for row := 0; row < 2; row++ {
+		layerNormRow(normalized[row*3:(row+1)*3], pre[row*3:(row+1)*3])
+	}
+	got, ok := trainer.tryLayerNormBackwardRows(gradOut, normalized, pre, 2, 3, "", "")
+	if !ok {
+		t.Fatal("accelerated layernorm backward was not used")
+	}
+	want := make([]float32, len(gradOut))
+	for row := 0; row < 2; row++ {
+		backwardLayerNormRow(
+			want[row*3:(row+1)*3],
+			gradOut[row*3:(row+1)*3],
+			normalized[row*3:(row+1)*3],
+			pre[row*3:(row+1)*3],
+		)
+	}
+	assertTensorClose(t, backend.NewTensorF32([]int{2, 3}, got), []int{2, 3}, want)
+}
+
+func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul == nil {
+		t.Skip("no trainer matmul accelerator available")
+	}
+	tokenForward := forwardTensorForParam(trainer.tokenParam, trainer.tokenEmbed, trainer.config.WeightBits)
+	attnQForward := forwardTensorForParam(trainer.attnQParam, trainer.attentionQuery, trainer.config.WeightBits)
+	attnKForward := forwardTensorForParam(trainer.attnKParam, trainer.attentionKey, trainer.config.WeightBits)
+	attnVForward := forwardTensorForParam(trainer.attnVParam, trainer.attentionValue, trainer.config.WeightBits)
+	attnOForward := forwardTensorForParam(trainer.attnOParam, trainer.attentionOutput, trainer.config.WeightBits)
+	projForward := forwardTensorForParam(trainer.projParam, trainer.projection, trainer.config.WeightBits)
+	trainer.primeForwardWeightResidency(attnQForward, attnKForward, attnVForward, attnOForward, nil, projForward)
+
+	mask, err := trainer.prepareMask([]int32{0, 2}, nil)
+	if err != nil {
+		t.Fatalf("prepare mask: %v", err)
+	}
+	state, err := trainer.encodeSequence([]int32{0, 2}, mask, tokenForward, attnQForward, attnKForward, attnVForward, attnOForward, nil, projForward, true)
+	if err != nil {
+		t.Fatalf("encode sequence: %v", err)
+	}
+	layer := state.finalLayer()
+	if layer == nil {
+		t.Fatal("expected final attention layer")
+	}
+	if layer.inputBinding == "" || layer.hiddenBinding == "" || layer.attnQBinding == "" || layer.attnKBinding == "" || layer.attnVBinding == "" || layer.attnScoresBinding == "" || layer.attnMixedBinding == "" {
+		t.Fatalf("expected attention activation bindings, got input=%q hidden=%q q=%q k=%q v=%q scores=%q mixed=%q", layer.inputBinding, layer.hiddenBinding, layer.attnQBinding, layer.attnKBinding, layer.attnVBinding, layer.attnScoresBinding, layer.attnMixedBinding)
+	}
+	result, err := trainer.forwardMatMul.RunMatMulWithBoundRight(
+		backend.NewTensorF32([]int{2, 2}, layer.attnQ),
+		layer.attnKBinding,
+		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "f32"}},
+		false,
+		true,
+	)
+	if err != nil {
+		t.Fatalf("run with bound attention key: %v", err)
+	}
+	wantScores := make([]float32, 4)
+	fillHostMatMulTranspose(layer.attnQ, 2, 2, layer.attnK, 2, 2, false, true, wantScores)
+	assertTensorClose(t, result.Outputs[0], []int{2, 2}, wantScores)
+	leftResult, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(
+		layer.inputBinding,
+		backend.NewTensorF32([]int{2, 2}, layer.attnQ),
+		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "f32"}},
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("run with bound input activation: %v", err)
+	}
+	wantGrad := make([]float32, 4)
+	fillHostMatMulTranspose(layer.input, 2, 2, layer.attnQ, 2, 2, true, false, wantGrad)
+	assertTensorClose(t, leftResult.Outputs[0], []int{2, 2}, wantGrad)
+	trainer.releaseEncodedSequenceBindings(state)
+	if layer.inputBinding != "" || layer.hiddenBinding != "" || layer.attnQBinding != "" || layer.attnKBinding != "" || layer.attnVBinding != "" || layer.attnScoresBinding != "" || layer.attnMixedBinding != "" {
+		t.Fatalf("expected bindings released, got input=%q hidden=%q q=%q k=%q v=%q scores=%q mixed=%q", layer.inputBinding, layer.hiddenBinding, layer.attnQBinding, layer.attnKBinding, layer.attnVBinding, layer.attnScoresBinding, layer.attnMixedBinding)
+	}
+	if _, err := trainer.forwardMatMul.RunMatMulWithBoundRight(
+		backend.NewTensorF32([]int{2, 2}, layer.attnQ),
+		"seq_missing_k",
+		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "f32"}},
+		false,
+		true,
+	); err == nil {
+		t.Fatal("expected missing bound-right activation error")
+	}
+	if _, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(
+		"seq_missing_input",
+		backend.NewTensorF32([]int{2, 2}, layer.attnQ),
+		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "f32"}},
+		true,
+		false,
+	); err == nil {
+		t.Fatal("expected missing bound-left activation error")
+	}
+}
+
+func TestEmbeddingTrainerFFNActivationsBindAndRelease(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul == nil {
+		t.Skip("no trainer matmul accelerator available")
+	}
+	tokenForward := forwardTensorForParam(trainer.tokenParam, trainer.tokenEmbed, trainer.config.WeightBits)
+	hiddenForward := forwardTensorForParam(trainer.hiddenParam, trainer.hiddenProjection, trainer.config.WeightBits)
+	projForward := forwardTensorForParam(trainer.projParam, trainer.projection, trainer.config.WeightBits)
+	trainer.primeForwardWeightResidency(nil, nil, nil, nil, hiddenForward, projForward)
+
+	mask, err := trainer.prepareMask([]int32{0, 2}, nil)
+	if err != nil {
+		t.Fatalf("prepare mask: %v", err)
+	}
+	state, err := trainer.encodeSequence([]int32{0, 2}, mask, tokenForward, nil, nil, nil, nil, hiddenForward, projForward, true)
+	if err != nil {
+		t.Fatalf("encode sequence: %v", err)
+	}
+	layer := state.finalLayer()
+	if layer == nil {
+		t.Fatal("expected final ffn layer")
+	}
+	if layer.inputBinding == "" || layer.hiddenBinding == "" || layer.activatedBinding == "" {
+		t.Fatalf("expected ffn activation bindings, got input=%q hidden=%q activated=%q", layer.inputBinding, layer.hiddenBinding, layer.activatedBinding)
+	}
+	result, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(
+		layer.activatedBinding,
+		backend.NewTensorF32([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "f32"}},
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("run with bound activated state: %v", err)
+	}
+	want := make([]float32, 6)
+	fillHostMatMulTranspose(layer.activated, 2, 3, []float32{
+		1, 0,
+		0, 1,
+	}, 2, 2, true, false, want)
+	assertTensorClose(t, result.Outputs[0], []int{3, 2}, want)
+	trainer.releaseEncodedSequenceBindings(state)
+	if layer.inputBinding != "" || layer.hiddenBinding != "" || layer.activatedBinding != "" {
+		t.Fatalf("expected ffn bindings released, got input=%q hidden=%q activated=%q", layer.inputBinding, layer.hiddenBinding, layer.activatedBinding)
+	}
+}
+
+func TestEmbeddingTrainerForwardWeightCacheReusesTensorsUntilUpdate(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+	first := trainer.prepareForwardWeights()
+	second := trainer.prepareForwardWeights()
+	if first == nil || second == nil {
+		t.Fatal("expected cached forward weights")
+	}
+	if first != second {
+		t.Fatal("expected prepareForwardWeights to reuse cached forward weight bundle")
+	}
+	if first.token != second.token || first.attnQ != second.attnQ || first.attnK != second.attnK || first.attnV != second.attnV || first.attnO != second.attnO || first.proj != second.proj {
+		t.Fatal("expected cached forward tensors to be reused")
+	}
+
+	trainer.applyOptimizerUpdate(trainer.projParam.Name, trainer.projection, trainer.projMom1, trainer.projMom2, make([]float32, len(trainer.projection.F32)), 1)
+
+	third := trainer.prepareForwardWeights()
+	if third == nil {
+		t.Fatal("expected forward weights after update")
+	}
+	if third != first {
+		t.Fatal("expected optimizer update to refresh cached forward weight bundle in place")
+	}
+	if third.proj != first.proj {
+		t.Fatal("expected projection forward tensor to be refreshed in place")
+	}
+}
+
+func TestEmbeddingTrainerPrimeForwardWeightResidencySkipsRedundantBinds(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+
+	forward := trainer.prepareForwardWeights()
+	trainer.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	firstCalls := fake.bindCalls
+	if firstCalls != 5 {
+		t.Fatalf("initial bind calls = %d, want 5", firstCalls)
+	}
+
+	trainer.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	if fake.bindCalls != firstCalls {
+		t.Fatalf("redundant bind calls = %d, want %d", fake.bindCalls, firstCalls)
+	}
+	stats := trainer.ForwardResidencyStats()
+	if stats.BindSkips != 1 {
+		t.Fatalf("bind skips = %d, want 1", stats.BindSkips)
+	}
+	if stats.MatMul.BindCalls != int64(firstCalls) {
+		t.Fatalf("backend bind calls = %d, want %d", stats.MatMul.BindCalls, firstCalls)
+	}
+
+	trainer.applyOptimizerUpdate(trainer.projParam.Name, trainer.projection, trainer.projMom1, trainer.projMom2, make([]float32, len(trainer.projection.F32)), 1)
+	forward = trainer.prepareForwardWeights()
+	trainer.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	if fake.bindCalls != firstCalls+5 {
+		t.Fatalf("rebind calls after invalidation = %d, want %d", fake.bindCalls, firstCalls+5)
+	}
+	stats = trainer.ForwardResidencyStats()
+	if stats.BindSkips != 1 {
+		t.Fatalf("bind skips after invalidation = %d, want 1", stats.BindSkips)
+	}
+	if stats.MatMul.BindCalls != int64(firstCalls+5) {
+		t.Fatalf("backend bind calls after invalidation = %d, want %d", stats.MatMul.BindCalls, firstCalls+5)
+	}
+}
+
+func TestEmbeddingTrainerEvaluatePairsSkipsSequenceBindingChurn(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{0, 2}, RightTokens: []int32{0, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 1},
+	}
+	if _, err := trainer.EvaluatePairs(batch); err != nil {
+		t.Fatalf("evaluate pairs: %v", err)
+	}
+	if fake.bindCalls != 5 {
+		t.Fatalf("bind calls = %d, want only 5 forward-weight binds", fake.bindCalls)
+	}
+	stats := trainer.ForwardResidencyStats()
+	if stats.MatMul.BindCalls != 5 {
+		t.Fatalf("forward residency bind calls = %d, want 5", stats.MatMul.BindCalls)
+	}
+}
+
+func TestEmbeddingTrainerTrainContrastiveStepEncodesEachSequenceOncePerBatch(t *testing.T) {
+	t.Setenv("BARR_TRAIN_BATCHED_FORWARD", "1")
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+	batch := []EmbeddingContrastiveExample{
+		{QueryTokens: []int32{0, 2}, PositiveTokens: []int32{0, 0}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}},
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 1}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}},
+		{QueryTokens: []int32{2, 0}, PositiveTokens: []int32{2, 2}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}},
+	}
+
+	if _, err := trainer.TrainContrastiveStep(batch); err != nil {
+		t.Fatalf("train contrastive step: %v", err)
+	}
+	if trainer.sequenceBindingID != 6 {
+		t.Fatalf("sequence binding count = %d, want 6 encoded sequences", trainer.sequenceBindingID)
+	}
+	if fake.boundRightRuns == 0 {
+		t.Fatalf("batched forward path did not attempt bound-right matmul")
+	}
+}
+
+func TestEmbeddingTrainerWriteEmbeddingPackage(t *testing.T) {
+	src := []byte(`
+param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
+param projection: q8[D, E] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_train_embed_q8"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := tinyMaskedEmbeddingManifest()
+	manifest.Name = "tiny_train_embed_q8"
+	trainer, err := NewEmbeddingTrainer(bundle.Artifact, manifest, map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			1, 1,
+		}),
+		"projection": backend.NewTensorF32([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+	}, EmbeddingTrainConfig{LearningRate: 0.05})
+	if err != nil {
+		t.Fatalf("new trainer: %v", err)
+	}
+	for i := 0; i < 8; i++ {
+		if _, err := trainer.TrainStep([]EmbeddingPairExample{
+			{LeftTokens: []int32{0}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+			{LeftTokens: []int32{0}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: -1},
+		}); err != nil {
+			t.Fatalf("train step %d: %v", i, err)
+		}
+	}
+
+	packagePath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.barr")
+	paths, err := trainer.WriteEmbeddingPackage(packagePath)
+	if err != nil {
+		t.Fatalf("write embedding package: %v", err)
+	}
+	if paths.ArtifactPath != packagePath {
+		t.Fatalf("artifact path = %q, want %q", paths.ArtifactPath, packagePath)
+	}
+	if paths.MemoryPlanPath != DefaultMemoryPlanPath(packagePath) {
+		t.Fatalf("memory plan path = %q, want %q", paths.MemoryPlanPath, DefaultMemoryPlanPath(packagePath))
+	}
+	if paths.PackageManifestPath != DefaultPackageManifestPath(packagePath) {
+		t.Fatalf("package manifest path = %q, want %q", paths.PackageManifestPath, DefaultPackageManifestPath(packagePath))
+	}
+
+	rt := New(cuda.New(), metal.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), packagePath)
+	if err != nil {
+		t.Fatalf("load embedding package: %v", err)
+	}
+	result, err := model.Embed(context.Background(), []int32{0})
+	if err != nil {
+		t.Fatalf("embed from written package: %v", err)
+	}
+	if result.Embeddings == nil {
+		t.Fatal("expected embeddings from written package")
+	}
+	if got := result.Embeddings.DType; got != "f16" {
+		t.Fatalf("embedding dtype = %q, want f16", got)
+	}
+	if model.MemoryPlan() == nil {
+		t.Fatal("expected memory plan on loaded model")
+	}
+}
+
+func TestEmbeddingTrainerWriteTrainingPackageAndReload(t *testing.T) {
+	src := []byte(`
+param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
+param projection: q8[D, E] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_train_embed_q8"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := tinyMaskedEmbeddingManifest()
+	manifest.Name = "tiny_train_embed_q8"
+	trainer, err := NewEmbeddingTrainer(bundle.Artifact, manifest, map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			1, 1,
+		}),
+		"projection": backend.NewTensorF32([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+	}, EmbeddingTrainConfig{LearningRate: 0.05})
+	if err != nil {
+		t.Fatalf("new trainer: %v", err)
+	}
+
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{0}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+		{LeftTokens: []int32{0}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: -1},
+	}
+	for i := 0; i < 6; i++ {
+		if _, err := trainer.TrainStep(batch); err != nil {
+			t.Fatalf("train step %d: %v", i, err)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "tiny_train_embed_q8.barr")
+	paths, err := trainer.WriteTrainingPackage(path)
+	if err != nil {
+		t.Fatalf("write training package: %v", err)
+	}
+	restored, err := LoadEmbeddingTrainerPackage(path)
+	if err != nil {
+		t.Fatalf("load training package: %v", err)
+	}
+	beforeA, err := trainer.EvaluatePairs(batch)
+	if err != nil {
+		t.Fatalf("eval original: %v", err)
+	}
+	beforeB, err := restored.EvaluatePairs(batch)
+	if err != nil {
+		t.Fatalf("eval restored: %v", err)
+	}
+	assertClose(t, beforeA.Loss, beforeB.Loss, 0.000001)
+	assertClose(t, beforeA.ScoreMargin, beforeB.ScoreMargin, 0.000001)
+	if paths.TrainManifestPath != DefaultEmbeddingTrainManifestPath(path) {
+		t.Fatalf("train manifest path = %q, want %q", paths.TrainManifestPath, DefaultEmbeddingTrainManifestPath(path))
+	}
+	if paths.CheckpointPath != DefaultEmbeddingCheckpointPath(path) {
+		t.Fatalf("checkpoint path = %q, want %q", paths.CheckpointPath, DefaultEmbeddingCheckpointPath(path))
+	}
+	if paths.MemoryPlanPath != DefaultMemoryPlanPath(path) {
+		t.Fatalf("memory plan path = %q, want %q", paths.MemoryPlanPath, DefaultMemoryPlanPath(path))
+	}
+	if paths.TrainProfilePath != DefaultEmbeddingTrainProfilePath(path) {
+		t.Fatalf("training profile path = %q, want %q", paths.TrainProfilePath, DefaultEmbeddingTrainProfilePath(path))
+	}
+	if paths.PackageManifestPath != DefaultPackageManifestPath(path) {
+		t.Fatalf("package manifest path = %q, want %q", paths.PackageManifestPath, DefaultPackageManifestPath(path))
+	}
+	profile, err := ReadEmbeddingTrainProfileFile(paths.TrainProfilePath)
+	if err != nil {
+		t.Fatalf("read training profile: %v", err)
+	}
+	if profile.Step != trainer.step {
+		t.Fatalf("training profile step = %d, want %d", profile.Step, trainer.step)
+	}
+	if restored.MemoryPlan() == nil {
+		t.Fatal("expected restored trainer memory plan")
+	}
+}
+
+func newTinyTrainableFFNEmbeddingTrainer(t *testing.T, learningRate float32) *EmbeddingTrainer {
+	t.Helper()
+	src := []byte(`
+param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
+param ffn_up: q8[D, H] @weight("weights/ffn_up") @trainable
+param projection: q8[H, E] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let ffn_up_f = dequant(ffn_up)
+    let projection_f = dequant(projection)
+    let ffn_hidden = @matmul(hidden, ffn_up_f)
+    let activated = gelu(ffn_hidden)
+    let projected = @matmul(activated, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let ffn_up_f = dequant(ffn_up)
+    let projection_f = dequant(projection)
+    let ffn_hidden = @matmul(hidden, ffn_up_f)
+    let activated = gelu(ffn_hidden)
+    let projected = @matmul(activated, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_train_embed_ffn_q8"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := tinyMaskedEmbeddingManifest()
+	manifest.Name = "tiny_train_embed_ffn_q8"
+	manifest.HiddenProjectionParam = "ffn_up"
+	trainer, err := NewEmbeddingTrainer(bundle.Artifact, manifest, map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			1, 1,
+		}),
+		"ffn_up": backend.NewTensorF32([]int{2, 3}, []float32{
+			1, 0, 1,
+			0, 1, 1,
+		}),
+		"projection": backend.NewTensorF32([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			0.5, 0.5,
+		}),
+	}, EmbeddingTrainConfig{LearningRate: learningRate})
+	if err != nil {
+		t.Fatalf("new trainer: %v", err)
+	}
+	t.Cleanup(trainer.Close)
+	return trainer
+}
+
+func newTinyTrainableAttentionEmbeddingTrainer(t *testing.T, learningRate float32) *EmbeddingTrainer {
+	t.Helper()
+	src := []byte(`
+param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
+param attn_q: q8[D, D] @weight("weights/attn_q") @trainable
+param attn_k: q8[D, D] @weight("weights/attn_k") @trainable
+param attn_v: q8[D, D] @weight("weights/attn_v") @trainable
+param attn_o: q8[D, D] @weight("weights/attn_o") @trainable
+param projection: q8[D, E] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let wq_f = dequant(attn_q)
+    let wk_f = dequant(attn_k)
+    let wv_f = dequant(attn_v)
+    let wo_f = dequant(attn_o)
+    let projection_f = dequant(projection)
+    let q = @matmul(hidden, wq_f)
+    let k = @matmul(hidden, wk_f)
+    let v = @matmul(hidden, wv_f)
+    let kt = transpose(k)
+    let scores = @matmul(q, kt)
+    let probs = softmax(scores)
+    let mixed = @matmul(probs, v)
+    let attended = @matmul(mixed, wo_f)
+    let projected = @matmul(attended, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let wq_f = dequant(attn_q)
+    let wk_f = dequant(attn_k)
+    let wv_f = dequant(attn_v)
+    let wo_f = dequant(attn_o)
+    let projection_f = dequant(projection)
+    let q = @matmul(hidden, wq_f)
+    let k = @matmul(hidden, wk_f)
+    let v = @matmul(hidden, wv_f)
+    let kt = transpose(k)
+    let scores = @matmul(q, kt)
+    let probs = softmax(scores)
+    let mixed = @matmul(probs, v)
+    let attended = @matmul(mixed, wo_f)
+    let projected = @matmul(attended, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_train_embed_attn_q8"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := tinyMaskedEmbeddingManifest()
+	manifest.Name = "tiny_train_embed_attn_q8"
+	manifest.AttentionQueryParam = "attn_q"
+	manifest.AttentionKeyParam = "attn_k"
+	manifest.AttentionValueParam = "attn_v"
+	manifest.AttentionOutputParam = "attn_o"
+	trainer, err := NewEmbeddingTrainer(bundle.Artifact, manifest, map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			1, 1,
+		}),
+		"attn_q": backend.NewTensorF32([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+		"attn_k": backend.NewTensorF32([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+		"attn_v": backend.NewTensorF32([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+		"attn_o": backend.NewTensorF32([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+		"projection": backend.NewTensorF32([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+	}, EmbeddingTrainConfig{LearningRate: learningRate})
+	if err != nil {
+		t.Fatalf("new trainer: %v", err)
+	}
+	t.Cleanup(trainer.Close)
+	return trainer
+}
+
+func newTinyTrainableEncoderEmbeddingTrainer(t *testing.T, learningRate float32) *EmbeddingTrainer {
+	t.Helper()
+	src := []byte(`
+param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
+param attn_q: q8[D, D] @weight("weights/attn_q") @trainable
+param attn_k: q8[D, D] @weight("weights/attn_k") @trainable
+param attn_v: q8[D, D] @weight("weights/attn_v") @trainable
+param attn_o: q8[D, D] @weight("weights/attn_o") @trainable
+param ffn_up: q8[D, H] @weight("weights/ffn_up") @trainable
+param projection: q8[H, D] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let wq_f = dequant(attn_q)
+    let wk_f = dequant(attn_k)
+    let wv_f = dequant(attn_v)
+    let wo_f = dequant(attn_o)
+    let ffn_up_f = dequant(ffn_up)
+    let projection_f = dequant(projection)
+    let q = @matmul(hidden, wq_f)
+    let k = @matmul(hidden, wk_f)
+    let v = @matmul(hidden, wv_f)
+    let kt = transpose(k)
+    let scores = @matmul(q, kt)
+    let probs = softmax(scores)
+    let mixed = @matmul(probs, v)
+    let attended = @matmul(mixed, wo_f)
+    let attn_hidden = layernorm(attended + hidden)
+    let ffn_hidden = @matmul(attn_hidden, ffn_up_f)
+    let activated = gelu(ffn_hidden)
+    let projected = @matmul(activated, projection_f)
+    let encoded = layernorm(projected + attn_hidden)
+    let normalized = normalize(encoded)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, D] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let wq_f = dequant(attn_q)
+    let wk_f = dequant(attn_k)
+    let wv_f = dequant(attn_v)
+    let wo_f = dequant(attn_o)
+    let ffn_up_f = dequant(ffn_up)
+    let projection_f = dequant(projection)
+    let q = @matmul(hidden, wq_f)
+    let k = @matmul(hidden, wk_f)
+    let v = @matmul(hidden, wv_f)
+    let kt = transpose(k)
+    let scores = @matmul(q, kt)
+    let probs = softmax(scores)
+    let mixed = @matmul(probs, v)
+    let attended = @matmul(mixed, wo_f)
+    let attn_hidden = layernorm(attended + hidden)
+    let ffn_hidden = @matmul(attn_hidden, ffn_up_f)
+    let activated = gelu(ffn_hidden)
+    let projected = @matmul(activated, projection_f)
+    let encoded = layernorm(projected + attn_hidden)
+    let normalized = normalize(encoded)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_train_embed_encoder_q8"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := tinyMaskedEmbeddingManifest()
+	manifest.Name = "tiny_train_embed_encoder_q8"
+	manifest.AttentionQueryParam = "attn_q"
+	manifest.AttentionKeyParam = "attn_k"
+	manifest.AttentionValueParam = "attn_v"
+	manifest.AttentionOutputParam = "attn_o"
+	manifest.AttentionResidual = true
+	manifest.AttentionLayerNorm = true
+	manifest.HiddenProjectionParam = "ffn_up"
+	manifest.FFNResidual = true
+	manifest.FFNLayerNorm = true
+	trainer, err := NewEmbeddingTrainer(bundle.Artifact, manifest, map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{3, 3}, []float32{
+			0.9, 0.1, 0.2,
+			0.2, 0.8, 0.3,
+			0.6, 0.4, 0.7,
+		}),
+		"attn_q": backend.NewTensorF32([]int{3, 3}, []float32{
+			0.9, 0.1, 0.0,
+			0.1, 0.8, 0.1,
+			0.0, 0.2, 0.9,
+		}),
+		"attn_k": backend.NewTensorF32([]int{3, 3}, []float32{
+			0.8, 0.2, 0.1,
+			0.0, 0.9, 0.1,
+			0.1, 0.1, 0.8,
+		}),
+		"attn_v": backend.NewTensorF32([]int{3, 3}, []float32{
+			0.7, 0.2, 0.1,
+			0.2, 0.7, 0.2,
+			0.1, 0.3, 0.8,
+		}),
+		"attn_o": backend.NewTensorF32([]int{3, 3}, []float32{
+			0.6, 0.2, 0.2,
+			0.2, 0.7, 0.1,
+			0.1, 0.2, 0.7,
+		}),
+		"ffn_up": backend.NewTensorF32([]int{3, 4}, []float32{
+			0.7, 0.1, 0.4, 0.2,
+			0.2, 0.8, 0.5, 0.3,
+			0.4, 0.3, 0.7, 0.6,
+		}),
+		"projection": backend.NewTensorF32([]int{4, 3}, []float32{
+			0.6, 0.2, 0.2,
+			0.3, 0.5, 0.2,
+			0.2, 0.3, 0.5,
+			0.4, 0.1, 0.5,
+		}),
+	}, EmbeddingTrainConfig{LearningRate: learningRate})
+	if err != nil {
+		t.Fatalf("new trainer: %v", err)
+	}
+	t.Cleanup(trainer.Close)
+	return trainer
+}
+
+func newTinyTrainableRepeatedEncoderEmbeddingTrainer(t *testing.T, learningRate float32) *EmbeddingTrainer {
+	t.Helper()
+	src := []byte(`
+param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
+param attn_q: q8[D, D] @weight("weights/attn_q") @trainable
+param attn_k: q8[D, D] @weight("weights/attn_k") @trainable
+param attn_v: q8[D, D] @weight("weights/attn_v") @trainable
+param attn_o: q8[D, D] @weight("weights/attn_o") @trainable
+param ffn_up: q8[D, H] @weight("weights/ffn_up") @trainable
+param projection: q8[H, D] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let wq_f = dequant(attn_q)
+    let wk_f = dequant(attn_k)
+    let wv_f = dequant(attn_v)
+    let wo_f = dequant(attn_o)
+    let ffn_up_f = dequant(ffn_up)
+    let projection_f = dequant(projection)
+
+    let q1 = @matmul(hidden, wq_f)
+    let k1 = @matmul(hidden, wk_f)
+    let v1 = @matmul(hidden, wv_f)
+    let kt1 = transpose(k1)
+    let scores1 = @matmul(q1, kt1)
+    let probs1 = softmax(scores1)
+    let mixed1 = @matmul(probs1, v1)
+    let attended1 = @matmul(mixed1, wo_f)
+    let attn_hidden1 = layernorm(attended1 + hidden)
+    let ffn_hidden1 = @matmul(attn_hidden1, ffn_up_f)
+    let activated1 = gelu(ffn_hidden1)
+    let projected1 = @matmul(activated1, projection_f)
+    let encoded1 = layernorm(projected1 + attn_hidden1)
+
+    let q2 = @matmul(encoded1, wq_f)
+    let k2 = @matmul(encoded1, wk_f)
+    let v2 = @matmul(encoded1, wv_f)
+    let kt2 = transpose(k2)
+    let scores2 = @matmul(q2, kt2)
+    let probs2 = softmax(scores2)
+    let mixed2 = @matmul(probs2, v2)
+    let attended2 = @matmul(mixed2, wo_f)
+    let attn_hidden2 = layernorm(attended2 + encoded1)
+    let ffn_hidden2 = @matmul(attn_hidden2, ffn_up_f)
+    let activated2 = gelu(ffn_hidden2)
+    let projected2 = @matmul(activated2, projection_f)
+    let encoded2 = layernorm(projected2 + attn_hidden2)
+    let normalized = normalize(encoded2)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, D] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let wq_f = dequant(attn_q)
+    let wk_f = dequant(attn_k)
+    let wv_f = dequant(attn_v)
+    let wo_f = dequant(attn_o)
+    let ffn_up_f = dequant(ffn_up)
+    let projection_f = dequant(projection)
+
+    let q1 = @matmul(hidden, wq_f)
+    let k1 = @matmul(hidden, wk_f)
+    let v1 = @matmul(hidden, wv_f)
+    let kt1 = transpose(k1)
+    let scores1 = @matmul(q1, kt1)
+    let probs1 = softmax(scores1)
+    let mixed1 = @matmul(probs1, v1)
+    let attended1 = @matmul(mixed1, wo_f)
+    let attn_hidden1 = layernorm(attended1 + hidden)
+    let ffn_hidden1 = @matmul(attn_hidden1, ffn_up_f)
+    let activated1 = gelu(ffn_hidden1)
+    let projected1 = @matmul(activated1, projection_f)
+    let encoded1 = layernorm(projected1 + attn_hidden1)
+
+    let q2 = @matmul(encoded1, wq_f)
+    let k2 = @matmul(encoded1, wk_f)
+    let v2 = @matmul(encoded1, wv_f)
+    let kt2 = transpose(k2)
+    let scores2 = @matmul(q2, kt2)
+    let probs2 = softmax(scores2)
+    let mixed2 = @matmul(probs2, v2)
+    let attended2 = @matmul(mixed2, wo_f)
+    let attn_hidden2 = layernorm(attended2 + encoded1)
+    let ffn_hidden2 = @matmul(attn_hidden2, ffn_up_f)
+    let activated2 = gelu(ffn_hidden2)
+    let projected2 = @matmul(activated2, projection_f)
+    let encoded2 = layernorm(projected2 + attn_hidden2)
+    let normalized = normalize(encoded2)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_train_embed_encoder_q8x2"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := tinyMaskedEmbeddingManifest()
+	manifest.Name = "tiny_train_embed_encoder_q8x2"
+	manifest.AttentionQueryParam = "attn_q"
+	manifest.AttentionKeyParam = "attn_k"
+	manifest.AttentionValueParam = "attn_v"
+	manifest.AttentionOutputParam = "attn_o"
+	manifest.AttentionResidual = true
+	manifest.AttentionLayerNorm = true
+	manifest.HiddenProjectionParam = "ffn_up"
+	manifest.FFNResidual = true
+	manifest.FFNLayerNorm = true
+	manifest.EncoderRepeats = 2
+	trainer, err := NewEmbeddingTrainer(bundle.Artifact, manifest, map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{3, 3}, []float32{
+			0.9, 0.1, 0.2,
+			0.2, 0.8, 0.3,
+			0.6, 0.4, 0.7,
+		}),
+		"attn_q": backend.NewTensorF32([]int{3, 3}, []float32{
+			0.9, 0.1, 0.0,
+			0.1, 0.8, 0.1,
+			0.0, 0.2, 0.9,
+		}),
+		"attn_k": backend.NewTensorF32([]int{3, 3}, []float32{
+			0.8, 0.2, 0.1,
+			0.0, 0.9, 0.1,
+			0.1, 0.2, 0.8,
+		}),
+		"attn_v": backend.NewTensorF32([]int{3, 3}, []float32{
+			0.7, 0.1, 0.2,
+			0.2, 0.7, 0.1,
+			0.1, 0.3, 0.8,
+		}),
+		"attn_o": backend.NewTensorF32([]int{3, 3}, []float32{
+			0.8, 0.0, 0.2,
+			0.1, 0.9, 0.0,
+			0.2, 0.1, 0.8,
+		}),
+		"ffn_up": backend.NewTensorF32([]int{3, 4}, []float32{
+			0.6, 0.2, 0.1, 0.3,
+			0.1, 0.7, 0.2, 0.2,
+			0.2, 0.1, 0.8, 0.4,
+		}),
+		"projection": backend.NewTensorF32([]int{4, 3}, []float32{
+			0.7, 0.1, 0.2,
+			0.2, 0.6, 0.1,
+			0.1, 0.2, 0.8,
+			0.3, 0.1, 0.5,
+		}),
+	}, EmbeddingTrainConfig{LearningRate: learningRate})
+	if err != nil {
+		t.Fatalf("new repeated encoder trainer: %v", err)
+	}
+	t.Cleanup(trainer.Close)
+	return trainer
+}
+
+func abs32(v float32) float32 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func trainerMasterTensorByName(trainer *EmbeddingTrainer, name string) *backend.Tensor {
+	switch name {
+	case "token_embedding":
+		return trainer.tokenEmbed
+	case "attn_q":
+		return trainer.attentionQuery
+	case "attn_k":
+		return trainer.attentionKey
+	case "attn_v":
+		return trainer.attentionValue
+	case "attn_o":
+		return trainer.attentionOutput
+	case "ffn_up":
+		return trainer.hiddenProjection
+	case "projection":
+		return trainer.projection
+	default:
+		return nil
+	}
+}

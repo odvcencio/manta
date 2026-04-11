@@ -1,0 +1,63 @@
+param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
+param attn_q: q8[D, D] @weight("weights/attn_q") @trainable
+param attn_k: q8[D, D] @weight("weights/attn_k") @trainable
+param attn_v: q8[D, D] @weight("weights/attn_v") @trainable
+param attn_o: q8[D, D] @weight("weights/attn_o") @trainable
+param ffn_up: q8[D, H] @weight("weights/ffn_up") @trainable
+param projection: q8[H, D] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let wq_f = dequant(attn_q)
+    let wk_f = dequant(attn_k)
+    let wv_f = dequant(attn_v)
+    let wo_f = dequant(attn_o)
+    let ffn_up_f = dequant(ffn_up)
+    let projection_f = dequant(projection)
+
+    let q = @matmul(hidden, wq_f)
+    let k = @matmul(hidden, wk_f)
+    let v = @matmul(hidden, wv_f)
+    let kt = transpose(k)
+    let scores = @matmul(q, kt)
+    let probs = softmax(scores)
+    let mixed = @matmul(probs, v)
+    let attended = @matmul(mixed, wo_f)
+    let attn_hidden = layernorm(attended + hidden)
+
+    let ffn_hidden = @matmul(attn_hidden, ffn_up_f)
+    let activated = gelu(ffn_hidden)
+    let projected = @matmul(activated, projection_f)
+    let encoded = layernorm(projected + attn_hidden)
+    let normalized = normalize(encoded)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, D] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let wq_f = dequant(attn_q)
+    let wk_f = dequant(attn_k)
+    let wv_f = dequant(attn_v)
+    let wo_f = dequant(attn_o)
+    let ffn_up_f = dequant(ffn_up)
+    let projection_f = dequant(projection)
+
+    let q = @matmul(hidden, wq_f)
+    let k = @matmul(hidden, wk_f)
+    let v = @matmul(hidden, wv_f)
+    let kt = transpose(k)
+    let scores = @matmul(q, kt)
+    let probs = softmax(scores)
+    let mixed = @matmul(probs, v)
+    let attended = @matmul(mixed, wo_f)
+    let attn_hidden = layernorm(attended + hidden)
+
+    let ffn_hidden = @matmul(attn_hidden, ffn_up_f)
+    let activated = gelu(ffn_hidden)
+    let projected = @matmul(activated, projection_f)
+    let encoded = layernorm(projected + attn_hidden)
+    let normalized = normalize(encoded)
+    return mean_pool(normalized, attention_mask)
+}

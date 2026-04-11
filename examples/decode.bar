@@ -1,0 +1,11 @@
+// Single-step autoregressive decode with KV cache.
+
+param wq: f16[D, D] @weight("weights/wq")
+
+pipeline decode_step(x: f16[T, D], cache: kv_cache) -> f16[T, D] {
+    let q = @matmul(x, wq)
+    let q2 = rope(q)
+    let past = kv_read(cache)
+    kv_write(cache, q2)
+    return softmax(q2 + past)
+}

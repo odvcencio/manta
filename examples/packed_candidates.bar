@@ -1,0 +1,8 @@
+pipeline rerank_candidates_packed(query: f16[D], docs: q4[N, D], candidate_ids: i64[N]) -> candidate_pack[2, D] {
+    let scores = cosine(query, docs)
+    let top_indices = topk(scores, 2)
+    let top_candidate_ids = gather(candidate_ids, top_indices)
+    let top_scores = gather(scores, top_indices)
+    let top_docs = gather(docs, top_indices)
+    return pack_candidates(top_candidate_ids, top_scores, top_docs)
+}
