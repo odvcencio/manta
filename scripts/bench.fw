@@ -93,7 +93,7 @@ func modelSmoke(root string, assets string) error {
 	guard err == nil else return err
 
 	let epochs = getenv("BARR_BENCH_MODEL_EPOCHS", "1")
-	let batch = getenv("BARR_BENCH_MODEL_BATCH", "256")
+	let batch = getenv("BARR_BENCH_MODEL_BATCH", "512")
 	let lr = getenv("BARR_BENCH_MODEL_LR", "0.005")
 	let temp = getenv("BARR_BENCH_MODEL_TEMP", "0.05")
 	let evalEvery = getenv("BARR_BENCH_MODEL_EVAL_EVERY", "4")
