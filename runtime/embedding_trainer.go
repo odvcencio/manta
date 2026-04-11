@@ -3140,8 +3140,7 @@ func (t *EmbeddingTrainer) tryBatchedBoundRightMatMul(lhsMatrices [][]float32, r
 	perMatrix := len(out) / len(lhsMatrices)
 	result := make([][]float32, len(lhsMatrices))
 	for i := range result {
-		result[i] = make([]float32, perMatrix)
-		copy(result[i], out[i*perMatrix:(i+1)*perMatrix])
+		result[i] = out[i*perMatrix : (i+1)*perMatrix]
 	}
 	return result, true
 }

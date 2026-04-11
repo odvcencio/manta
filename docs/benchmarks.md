@@ -51,7 +51,7 @@ The current reference smoke uses:
 Latest local CUDA result:
 
 ```text
-throughput: elapsed=6.219s examples/s=741.00 pairs/s=716624.65 train_examples/s=690.69 train_pairs/s=707265.87 eval_examples/s=1775.70 eval_pairs/s=909159.16 optimizer_steps/s=0.67
+throughput: elapsed=5.977s examples/s=770.92 pairs/s=745564.70 train_examples/s=725.08 train_pairs/s=742477.76 eval_examples/s=1560.04 eval_pairs/s=798742.94 optimizer_steps/s=0.71
 accelerators: forward=cuda optimizer=cuda activation=host contrastive=cuda
 profile delta: matmul_bind_calls=30 matmul_runs=16464 matmul_run_upload_mb=4173.15 matmul_run_download_mb=2208.41 optimizer_updates=28 activation_calls=0 contrastive_calls=4
 ```
@@ -79,6 +79,7 @@ The training hot path moved as follows on the same mini smoke:
 | Batch-512 benchmark smoke | `177192.16` | `28848` |
 | Batch-1024 default benchmark smoke | `407407.98` | `16464` |
 | Disable sequence matmul bindings by default | `707265.87` | `16464` |
+| Return grouped bound-right outputs as views | `742477.76` | `16464` |
 
 The main wins came from grouping real text batches by sequence length during backward, coalescing parameter-gradient matmuls into taller `X^T*dY` operations, grouping contrastive forward sequences by exact token length inside each original batch, promoting rank-3 x rank-3 CUDA matmul to `cublasSgemmStridedBatched`, allowing strided-batched matmul to handle transpose flags directly, and increasing the effective contrastive batch. The forward grouping keeps the full in-batch negative set intact and avoids padding, so attention math does not change.
 
@@ -88,10 +89,10 @@ Batch size is now the largest exposed training knob. On the same 4096-example mi
 
 | Batch | Run steps | Train examples/s | Train pairs/s | Matmul runs | Max RSS |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| `512` | `8` | `557.29` | `285329.93` | `28848` | `1.02 GB` |
-| `1024` | `4` | `690.69` | `707265.87` | `16464` | `1.51 GB` |
-| `2048` | `2` | `781.06` | `1599602.65` | `9408` | `2.51 GB` |
-| `4096` | `1` | `727.91` | `2981533.93` | `5616` | `4.50 GB` |
+| `512` | `8` | `558.19` | `285791.12` | `28848` | `1.02 GB` |
+| `1024` | `4` | `725.08` | `742477.76` | `16464` | `1.51 GB` |
+| `2048` | `2` | `820.54` | `1680463.06` | `9408` | `2.51 GB` |
+| `4096` | `1` | `741.49` | `3037152.08` | `5616` | `4.47 GB` |
 
 Batch 2048 is a useful ceiling or large-corpus setting, but it halves optimizer steps on this mini smoke. Batch 4096 is one update and regresses example throughput despite very high pair throughput. Batch 1024 is the benchmark default because it keeps multiple updates in the smoke and captures most of the real throughput win.
 
