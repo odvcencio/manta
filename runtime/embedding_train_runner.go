@@ -48,10 +48,13 @@ type EmbeddingTrainWorkload struct {
 	ActualEvalPasses     int
 	PlannedTrainPairs    int64
 	ActualTrainPairs     int64
+	ActualTrainExamples  int64
 	PlannedEvalPairs     int64
 	ActualEvalPairs      int64
+	ActualEvalExamples   int64
 	PlannedTotalPairs    int64
 	ActualTotalPairs     int64
+	ActualTotalExamples  int64
 }
 
 // EmbeddingTrainRunSummary summarizes a full train/eval run.
@@ -60,6 +63,7 @@ type EmbeddingTrainRunSummary struct {
 	Workload        EmbeddingTrainWorkload
 	EpochsCompleted int
 	StepsCompleted  int
+	StepsRun        int
 	BestEpoch       int
 	BestStep        int
 	FinalTrain      EmbeddingTrainMetrics
@@ -111,6 +115,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 	}
 	rng := rand.New(rand.NewSource(cfg.Seed))
 	runStart := time.Now()
+	startStep := t.step
 	summary := EmbeddingTrainRunSummary{
 		Config:       cfg,
 		StartProfile: t.TrainProfile(),
@@ -145,6 +150,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 		summary.EpochsCompleted = epoch
 		summary.Workload.CompletedEpochs = epoch
 		summary.Workload.ActualTrainPairs += int64(trainMetrics.BatchSize)
+		summary.Workload.ActualTrainExamples += int64(trainMetrics.BatchSize)
 
 		if len(evalSet) > 0 && epoch%cfg.EvalEveryEpoch == 0 {
 			evalStart := time.Now()
@@ -155,6 +161,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 			summary.EvalDuration += time.Since(evalStart)
 			summary.Workload.ActualEvalPasses++
 			summary.Workload.ActualEvalPairs += int64(len(evalSet))
+			summary.Workload.ActualEvalExamples += int64(len(evalSet))
 			record.Eval = cloneEvalMetrics(evalMetrics)
 			summary.LastEval = cloneEvalMetrics(evalMetrics)
 			if !haveBest || betterEvalMetrics(evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta) {
@@ -182,6 +189,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 	}
 
 	summary.StepsCompleted = t.step
+	summary.StepsRun = t.step - startStep
 	preRestoreEndProfile := t.TrainProfile()
 	restoreStartProfile := EmbeddingTrainProfile{}
 	restored := false
@@ -202,6 +210,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 		summary.EvalDuration += time.Since(evalStart)
 		summary.Workload.ActualEvalPasses++
 		summary.Workload.ActualEvalPairs += int64(len(evalSet))
+		summary.Workload.ActualEvalExamples += int64(len(evalSet))
 		summary.FinalEval = cloneEvalMetrics(finalEval)
 		if summary.BestEval == nil {
 			summary.BestEval = cloneEvalMetrics(finalEval)
@@ -224,6 +233,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
 	}
 	summary.Workload.ActualTotalPairs = summary.Workload.ActualTrainPairs + summary.Workload.ActualEvalPairs
+	summary.Workload.ActualTotalExamples = summary.Workload.ActualTrainExamples + summary.Workload.ActualEvalExamples
 	summary.Elapsed = time.Since(runStart)
 	return summary, nil
 }
@@ -262,6 +272,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 	}
 	rng := rand.New(rand.NewSource(cfg.Seed))
 	runStart := time.Now()
+	startStep := t.step
 	summary := EmbeddingTrainRunSummary{
 		Config:       cfg,
 		StartProfile: t.TrainProfile(),
@@ -294,6 +305,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		summary.EpochsCompleted = epoch
 		summary.Workload.CompletedEpochs = epoch
 		summary.Workload.ActualTrainPairs += int64(trainMetrics.BatchSize)
+		summary.Workload.ActualTrainExamples += int64(contrastiveUsableExampleCount(len(indices), cfg.BatchSize))
 
 		if len(evalSet) > 0 && epoch%cfg.EvalEveryEpoch == 0 {
 			evalStart := time.Now()
@@ -304,6 +316,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 			summary.EvalDuration += time.Since(evalStart)
 			summary.Workload.ActualEvalPasses++
 			summary.Workload.ActualEvalPairs += int64(len(evalSet) * len(evalSet))
+			summary.Workload.ActualEvalExamples += int64(len(evalSet))
 			record.Eval = cloneEvalMetrics(evalMetrics)
 			summary.LastEval = cloneEvalMetrics(evalMetrics)
 			if !haveBest || betterEvalMetrics(evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta) {
@@ -331,6 +344,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 	}
 
 	summary.StepsCompleted = t.step
+	summary.StepsRun = t.step - startStep
 	preRestoreEndProfile := t.TrainProfile()
 	restoreStartProfile := EmbeddingTrainProfile{}
 	restored := false
@@ -351,6 +365,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		summary.EvalDuration += time.Since(evalStart)
 		summary.Workload.ActualEvalPasses++
 		summary.Workload.ActualEvalPairs += int64(len(evalSet) * len(evalSet))
+		summary.Workload.ActualEvalExamples += int64(len(evalSet))
 		summary.FinalEval = cloneEvalMetrics(finalEval)
 		if summary.BestEval == nil {
 			summary.BestEval = cloneEvalMetrics(finalEval)
@@ -373,6 +388,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
 	}
 	summary.Workload.ActualTotalPairs = summary.Workload.ActualTrainPairs + summary.Workload.ActualEvalPairs
+	summary.Workload.ActualTotalExamples = summary.Workload.ActualTrainExamples + summary.Workload.ActualEvalExamples
 	summary.Elapsed = time.Since(runStart)
 	return summary, nil
 }
@@ -440,6 +456,24 @@ func batchCount(total, batchSize, minBatch int) int {
 		count++
 	}
 	return count
+}
+
+func contrastiveUsableExampleCount(total, batchSize int) int {
+	if total <= 0 || batchSize <= 1 {
+		return 0
+	}
+	used := 0
+	for start := 0; start < total; start += batchSize {
+		end := start + batchSize
+		if end > total {
+			end = total
+		}
+		if end-start < 2 {
+			break
+		}
+		used += end - start
+	}
+	return used
 }
 
 func contrastiveBatchWork(total, batchSize int) (int, int64) {

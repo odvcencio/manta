@@ -42,7 +42,7 @@ The current reference smoke uses:
 - max sequence length: `256`
 - train set: `4096` contrastive examples
 - eval set: `512` contrastive examples
-- batch size: `512`
+- batch size: `1024`
 - loss: InfoNCE
 - temperature: `0.05`
 - learning rate: `0.005`
@@ -51,12 +51,18 @@ The current reference smoke uses:
 Latest local CUDA result:
 
 ```text
-throughput: elapsed=12.414s pairs/s=190053.33 train_pairs/s=173560.62 eval_pairs/s=792624.86
+throughput: elapsed=10.624s examples/s=433.72 pairs/s=419453.87 train_examples/s=397.86 train_pairs/s=407407.98 eval_examples/s=1554.90 eval_pairs/s=796108.60 optimizer_steps/s=0.39
 accelerators: forward=cuda optimizer=cuda activation=host contrastive=cuda
-profile delta: matmul_bind_calls=131126 matmul_runs=28848 matmul_run_upload_mb=4140.19 matmul_run_download_mb=2272.91 optimizer_updates=56 activation_calls=0 contrastive_calls=8
+profile delta: matmul_bind_calls=131102 matmul_runs=16464 matmul_run_upload_mb=4156.24 matmul_run_download_mb=2208.41 optimizer_updates=28 activation_calls=0 contrastive_calls=4
 ```
 
-This is the promoted default benchmark path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, strided-batched cuBLAS for grouped attention matmuls, rank-3 transpose support for grouped attention backward, and batch-512 contrastive training. The larger batch keeps the full in-batch negative set intact, improves contrastive signal, halves optimizer/contrastive calls on this smoke, and reduces per-pair orchestration overhead. The CLI/runtime default remains conservative until Barracuda has an adaptive CPU/GPU batch policy.
+This is the promoted default benchmark path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, strided-batched cuBLAS for grouped attention matmuls, rank-3 transpose support for grouped attention backward, and batch-1024 contrastive training. The larger batch keeps the full in-batch negative set intact, improves contrastive signal, cuts optimizer/contrastive calls on this smoke, and reduces per-pair orchestration overhead. The CLI/runtime default remains conservative until Barracuda has an adaptive CPU/GPU batch policy.
+
+Read the throughput line with both lenses:
+
+- `train_examples/s` measures actual encoder training throughput.
+- `train_pairs/s` measures in-batch contrastive work and grows roughly with `batch^2`.
+- `optimizer_steps/s` protects the benchmark from hiding that very large batches reduce update count on small datasets.
 
 ## Recent Perf Delta
 
@@ -70,25 +76,38 @@ The training hot path moved as follows on the same mini smoke:
 | Exact-length grouped forward default | `35856.58` | `140056` |
 | Strided-batched grouped attention | `42594.29` | `107552` |
 | Rank-3 transpose batched attention backward | `82262.50` | `50208` |
-| Batch-512 default benchmark smoke | `173560.62` | `28848` |
+| Batch-512 benchmark smoke | `177192.16` | `28848` |
+| Batch-1024 default benchmark smoke | `407407.98` | `16464` |
 
 The main wins came from grouping real text batches by sequence length during backward, coalescing parameter-gradient matmuls into taller `X^T*dY` operations, grouping contrastive forward sequences by exact token length inside each original batch, promoting rank-3 x rank-3 CUDA matmul to `cublasSgemmStridedBatched`, allowing strided-batched matmul to handle transpose flags directly, and increasing the effective contrastive batch. The forward grouping keeps the full in-batch negative set intact and avoids padding, so attention math does not change.
+
+## Batch Sweep
+
+Batch size is now the largest exposed training knob. On the same 4096-example mini smoke:
+
+| Batch | Run steps | Train examples/s | Train pairs/s | Matmul runs | Max RSS |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| `512` | `8` | `346.08` | `177192.16` | `28848` | `1.08 GB` |
+| `1024` | `4` | `397.86` | `407407.98` | `16464` | `1.62 GB` |
+| `2048` | `2` | `402.98` | `825309.13` | `9408` | `2.63 GB` |
+
+Batch 2048 is a useful ceiling or large-corpus setting, but it only improves example throughput by about `1.3%` over 1024 on this mini smoke while halving optimizer steps. Batch 1024 is the benchmark default because it keeps multiple updates in the smoke and captures most of the real throughput win.
 
 ## How Much Faster Can It Get?
 
 The current profile still shows the next bottleneck is backend transfer/orchestration, not raw math:
 
 ```text
-MatMulRuns ~= 28848 per 4096-example mini smoke at batch 512
-RunUploadedBytes ~= 4.14 GiB
-RunDownloadedBytes ~= 2.27 GiB
+MatMulRuns ~= 16464 per 4096-example mini smoke at batch 1024
+RunUploadedBytes ~= 4.16 GiB
+RunDownloadedBytes ~= 2.21 GiB
 ```
 
 Reasonable next targets:
 
-- `180k-240k train pairs/s`: keep the batch-512 path stable while reducing host materialization inside same-length groups.
-- `240k-320k train pairs/s`: keep forward/backward intermediates device-resident across full layer groups and move optimizer/activation state through the same device-resident path.
-- `320k+ train pairs/s`: persistent device-resident training steps with fused attention/FFN backward and fewer per-layer dispatches.
+- `430-500 train_examples/s`: reduce host materialization and launch overhead inside same-length groups.
+- `500-650 train_examples/s`: keep forward/backward intermediates device-resident across full layer groups and move optimizer/activation state through the same device-resident path.
+- `650+ train_examples/s`: persistent device-resident training steps with fused attention/FFN backward and fewer per-layer dispatches.
 
 The practical ceiling for this tiny model is dominated by orchestration and host-device transfer, not raw GEMM throughput. Larger models will shift more time into actual math, but the same device-residency work is still required to get high GPU utilization.
 

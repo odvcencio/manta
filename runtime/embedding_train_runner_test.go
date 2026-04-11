@@ -193,14 +193,27 @@ func TestEmbeddingTrainerFitContrastiveTracksWorkloadAndTiming(t *testing.T) {
 	if summary.Workload.ActualTrainPairs != expected.PlannedTrainPairs {
 		t.Fatalf("actual train pairs = %d, want %d", summary.Workload.ActualTrainPairs, expected.PlannedTrainPairs)
 	}
+	if summary.Workload.ActualTrainExamples != int64(len(trainSet)) {
+		t.Fatalf("actual train examples = %d, want %d", summary.Workload.ActualTrainExamples, len(trainSet))
+	}
 	if summary.Workload.ActualEvalPairs != expected.PlannedEvalPairs {
 		t.Fatalf("actual eval pairs = %d, want %d", summary.Workload.ActualEvalPairs, expected.PlannedEvalPairs)
+	}
+	expectedEvalExamples := int64(len(trainSet) * expected.PlannedEvalPasses)
+	if summary.Workload.ActualEvalExamples != expectedEvalExamples {
+		t.Fatalf("actual eval examples = %d, want %d", summary.Workload.ActualEvalExamples, expectedEvalExamples)
 	}
 	if summary.Workload.ActualTotalPairs != summary.Workload.ActualTrainPairs+summary.Workload.ActualEvalPairs {
 		t.Fatalf("actual total pairs = %d, want %d", summary.Workload.ActualTotalPairs, summary.Workload.ActualTrainPairs+summary.Workload.ActualEvalPairs)
 	}
+	if summary.Workload.ActualTotalExamples != summary.Workload.ActualTrainExamples+summary.Workload.ActualEvalExamples {
+		t.Fatalf("actual total examples = %d, want %d", summary.Workload.ActualTotalExamples, summary.Workload.ActualTrainExamples+summary.Workload.ActualEvalExamples)
+	}
 	if summary.Workload.ActualEvalPasses != expected.PlannedEvalPasses {
 		t.Fatalf("actual eval passes = %d, want %d", summary.Workload.ActualEvalPasses, expected.PlannedEvalPasses)
+	}
+	if summary.StepsRun != expected.TrainBatchesPerEpoch {
+		t.Fatalf("run steps = %d, want %d", summary.StepsRun, expected.TrainBatchesPerEpoch)
 	}
 	if summary.Elapsed <= 0 {
 		t.Fatalf("elapsed = %s, want > 0", summary.Elapsed)

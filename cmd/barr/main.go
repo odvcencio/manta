@@ -564,7 +564,7 @@ func runTrainEmbed(args []string) error {
 	if tokenizerPath != "" {
 		fmt.Printf("tokenizer: %s\n", tokenizerPath)
 	}
-	fmt.Printf("epochs: %d, steps: %d, best_epoch: %d, best_step: %d\n", summary.EpochsCompleted, summary.StepsCompleted, summary.BestEpoch, summary.BestStep)
+	fmt.Printf("epochs: %d, steps: %d, run_steps: %d, best_epoch: %d, best_step: %d\n", summary.EpochsCompleted, summary.StepsCompleted, summary.StepsRun, summary.BestEpoch, summary.BestStep)
 	fmt.Printf("final train: loss=%.6f avg_score=%.6f batch=%d\n", summary.FinalTrain.Loss, summary.FinalTrain.AverageScore, summary.FinalTrain.BatchSize)
 	if summary.FinalEval != nil {
 		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f top1=%.6f mean_rank=%.3f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.Top1Accuracy, summary.FinalEval.MeanPositiveRank, summary.FinalEval.PairCount)
@@ -663,16 +663,35 @@ func formatTrainWorkload(workload barruntime.EmbeddingTrainWorkload) string {
 
 func formatTrainThroughput(summary barruntime.EmbeddingTrainRunSummary) string {
 	parts := []string{fmt.Sprintf("elapsed=%s", summary.Elapsed.Round(time.Millisecond))}
+	if rate := itemsPerSecond(summary.Workload.ActualTotalExamples, summary.Elapsed); rate > 0 {
+		parts = append(parts, fmt.Sprintf("examples/s=%.2f", rate))
+	}
 	if rate := pairsPerSecond(summary.Workload.ActualTotalPairs, summary.Elapsed); rate > 0 {
 		parts = append(parts, fmt.Sprintf("pairs/s=%.2f", rate))
+	}
+	if rate := itemsPerSecond(summary.Workload.ActualTrainExamples, summary.TrainDuration); rate > 0 {
+		parts = append(parts, fmt.Sprintf("train_examples/s=%.2f", rate))
 	}
 	if rate := pairsPerSecond(summary.Workload.ActualTrainPairs, summary.TrainDuration); rate > 0 {
 		parts = append(parts, fmt.Sprintf("train_pairs/s=%.2f", rate))
 	}
+	if rate := itemsPerSecond(summary.Workload.ActualEvalExamples, summary.EvalDuration); rate > 0 {
+		parts = append(parts, fmt.Sprintf("eval_examples/s=%.2f", rate))
+	}
 	if rate := pairsPerSecond(summary.Workload.ActualEvalPairs, summary.EvalDuration); rate > 0 {
 		parts = append(parts, fmt.Sprintf("eval_pairs/s=%.2f", rate))
 	}
+	if rate := itemsPerSecond(int64(summary.StepsRun), summary.TrainDuration); rate > 0 {
+		parts = append(parts, fmt.Sprintf("optimizer_steps/s=%.2f", rate))
+	}
 	return strings.Join(parts, " ")
+}
+
+func itemsPerSecond(items int64, elapsed time.Duration) float64 {
+	if items <= 0 || elapsed <= 0 {
+		return 0
+	}
+	return float64(items) / elapsed.Seconds()
 }
 
 func pairsPerSecond(pairs int64, elapsed time.Duration) float64 {
@@ -775,11 +794,13 @@ func runTrainCorpus(args []string) error {
 	if paths.EvalPairsPath != "" {
 		fmt.Printf("eval pairs: %s\n", paths.EvalPairsPath)
 	}
-	fmt.Printf("epochs: %d, steps: %d, best_epoch: %d, best_step: %d\n", summary.EpochsCompleted, summary.StepsCompleted, summary.BestEpoch, summary.BestStep)
+	fmt.Printf("epochs: %d, steps: %d, run_steps: %d, best_epoch: %d, best_step: %d\n", summary.EpochsCompleted, summary.StepsCompleted, summary.StepsRun, summary.BestEpoch, summary.BestStep)
 	fmt.Printf("final train: loss=%.6f avg_score=%.6f batch=%d\n", summary.FinalTrain.Loss, summary.FinalTrain.AverageScore, summary.FinalTrain.BatchSize)
 	if summary.FinalEval != nil {
 		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f top1=%.6f mean_rank=%.3f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.Top1Accuracy, summary.FinalEval.MeanPositiveRank, summary.FinalEval.PairCount)
 	}
+	fmt.Printf("workload: %s\n", formatTrainWorkload(summary.Workload))
+	fmt.Printf("throughput: %s\n", formatTrainThroughput(summary))
 	fmt.Printf("accelerators: forward=%s optimizer=%s activation=%s contrastive=%s\n",
 		displayTrainBackend(summary.EndProfile.ForwardBackend),
 		displayTrainBackend(summary.EndProfile.OptimizerBackend),

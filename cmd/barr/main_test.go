@@ -6,12 +6,46 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/odvcencio/barracuda/artifact/barr"
 	"github.com/odvcencio/barracuda/compiler"
 	barruntime "github.com/odvcencio/barracuda/runtime"
 	mll "github.com/odvcencio/mll"
 )
+
+func TestFormatTrainThroughputIncludesExamplePairAndStepRates(t *testing.T) {
+	summary := barruntime.EmbeddingTrainRunSummary{
+		Workload: barruntime.EmbeddingTrainWorkload{
+			ActualTotalExamples: 100,
+			ActualTotalPairs:    10000,
+			ActualTrainExamples: 80,
+			ActualTrainPairs:    8000,
+			ActualEvalExamples:  20,
+			ActualEvalPairs:     2000,
+		},
+		Elapsed:       10 * time.Second,
+		TrainDuration: 4 * time.Second,
+		EvalDuration:  2 * time.Second,
+		StepsRun:      8,
+	}
+
+	output := formatTrainThroughput(summary)
+	for _, want := range []string{
+		"elapsed=10s",
+		"examples/s=10.00",
+		"pairs/s=1000.00",
+		"train_examples/s=20.00",
+		"train_pairs/s=2000.00",
+		"eval_examples/s=10.00",
+		"eval_pairs/s=1000.00",
+		"optimizer_steps/s=2.00",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("throughput output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
 
 func TestRunInitTrainCreatesTrainingPackage(t *testing.T) {
 	path := writeTrainableArtifact(t)
