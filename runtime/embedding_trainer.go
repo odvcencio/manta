@@ -111,6 +111,7 @@ type EmbeddingTrainer struct {
 	forwardDirty         bool
 	forwardNeedsBind     bool
 	forwardBindSkips     int64
+	scratchF32           [][]float32
 }
 
 type embeddingSequenceState struct {
@@ -2408,18 +2409,59 @@ func tensorF32View(shape []int, data []float32) *backend.Tensor {
 	}
 }
 
+func (t *EmbeddingTrainer) scratchFloat32(slot, elements int) []float32 {
+	if elements <= 0 {
+		return nil
+	}
+	if t == nil {
+		return make([]float32, elements)
+	}
+	for len(t.scratchF32) <= slot {
+		t.scratchF32 = append(t.scratchF32, nil)
+	}
+	buf := t.scratchF32[slot]
+	if cap(buf) < elements {
+		buf = make([]float32, elements)
+	} else {
+		buf = buf[:elements]
+	}
+	t.scratchF32[slot] = buf
+	return buf
+}
+
+func (t *EmbeddingTrainer) flattenFixedFloat32MatricesScratch(slot int, matrices [][]float32, perMatrix int) ([]float32, bool) {
+	if len(matrices) == 0 || perMatrix <= 0 {
+		return nil, false
+	}
+	out := t.scratchFloat32(slot, len(matrices)*perMatrix)
+	if !flattenFixedFloat32MatricesInto(out, matrices, perMatrix) {
+		return nil, false
+	}
+	return out, true
+}
+
 func flattenFixedFloat32Matrices(matrices [][]float32, perMatrix int) ([]float32, bool) {
 	if len(matrices) == 0 || perMatrix <= 0 {
 		return nil, false
 	}
 	out := make([]float32, len(matrices)*perMatrix)
+	if !flattenFixedFloat32MatricesInto(out, matrices, perMatrix) {
+		return nil, false
+	}
+	return out, true
+}
+
+func flattenFixedFloat32MatricesInto(out []float32, matrices [][]float32, perMatrix int) bool {
+	if len(out) != len(matrices)*perMatrix {
+		return false
+	}
 	for i, matrix := range matrices {
 		if len(matrix) != perMatrix {
-			return nil, false
+			return false
 		}
 		copy(out[i*perMatrix:(i+1)*perMatrix], matrix)
 	}
-	return out, true
+	return true
 }
 
 func splitFloat32Views(out []float32, parts int) ([][]float32, bool) {
@@ -2493,11 +2535,11 @@ func (t *EmbeddingTrainer) tryTrainerBatchedMatMulTranspose(lhsMatrices [][]floa
 		return nil, false
 	}
 	batches := len(lhsMatrices)
-	lhsBatch, ok := flattenFixedFloat32Matrices(lhsMatrices, lhsRows*lhsCols)
+	lhsBatch, ok := t.flattenFixedFloat32MatricesScratch(0, lhsMatrices, lhsRows*lhsCols)
 	if !ok {
 		return nil, false
 	}
-	rhsBatch, ok := flattenFixedFloat32Matrices(rhsMatrices, rhsRows*rhsCols)
+	rhsBatch, ok := t.flattenFixedFloat32MatricesScratch(1, rhsMatrices, rhsRows*rhsCols)
 	if !ok {
 		return nil, false
 	}
@@ -3313,7 +3355,7 @@ func (t *EmbeddingTrainer) tryBatchedBoundRightMatMul(lhsMatrices [][]float32, r
 		return nil, false
 	}
 	totalRows := len(lhsMatrices) * rows
-	batched, ok := flattenFixedFloat32Matrices(lhsMatrices, rows*cols)
+	batched, ok := t.flattenFixedFloat32MatricesScratch(0, lhsMatrices, rows*cols)
 	if !ok {
 		return nil, false
 	}
@@ -3329,11 +3371,11 @@ func (t *EmbeddingTrainer) tryAccumulatedTransposeMatMul(lhsMatrices, rhsMatrice
 		return nil, false
 	}
 	totalRows := len(lhsMatrices) * rows
-	lhsBatch, ok := flattenFixedFloat32Matrices(lhsMatrices, rows*lhsCols)
+	lhsBatch, ok := t.flattenFixedFloat32MatricesScratch(0, lhsMatrices, rows*lhsCols)
 	if !ok {
 		return nil, false
 	}
-	rhsBatch, ok := flattenFixedFloat32Matrices(rhsMatrices, rows*rhsCols)
+	rhsBatch, ok := t.flattenFixedFloat32MatricesScratch(1, rhsMatrices, rows*rhsCols)
 	if !ok {
 		return nil, false
 	}
@@ -3352,7 +3394,7 @@ func (t *EmbeddingTrainer) trySharedLeftAccumulatedTransposeMatMuls(lhsMatrices 
 		return nil, false
 	}
 	totalRows := len(lhsMatrices) * rows
-	lhsBatch, ok := flattenFixedFloat32Matrices(lhsMatrices, rows*lhsCols)
+	lhsBatch, ok := t.flattenFixedFloat32MatricesScratch(0, lhsMatrices, rows*lhsCols)
 	if !ok {
 		return nil, false
 	}
@@ -3396,12 +3438,12 @@ func (t *EmbeddingTrainer) tryConcatenatedSharedLeftAccumulatedTransposeMatMuls(
 		return nil, false
 	}
 	totalRows := len(lhsMatrices) * rows
-	lhsBatch, ok := flattenFixedFloat32Matrices(lhsMatrices, rows*lhsCols)
+	lhsBatch, ok := t.flattenFixedFloat32MatricesScratch(0, lhsMatrices, rows*lhsCols)
 	if !ok {
 		return nil, false
 	}
 	combinedCols := len(rhsMatrixSets) * rhsCols
-	rhsBatch := make([]float32, totalRows*combinedCols)
+	rhsBatch := t.scratchFloat32(1, totalRows*combinedCols)
 	for setIndex, rhsMatrices := range rhsMatrixSets {
 		if len(rhsMatrices) != len(lhsMatrices) {
 			return nil, false
@@ -3468,15 +3510,15 @@ func (t *EmbeddingTrainer) tryAccumulatedAttentionInputGradMatMul(gradQMatrices,
 		}
 	}
 	perMatrix := seqLen * d
-	gradQBatch, ok := flattenFixedFloat32Matrices(gradQMatrices, perMatrix)
+	gradQBatch, ok := t.flattenFixedFloat32MatricesScratch(0, gradQMatrices, perMatrix)
 	if !ok {
 		return nil, false
 	}
-	gradKBatch, ok := flattenFixedFloat32Matrices(gradKMatrices, perMatrix)
+	gradKBatch, ok := t.flattenFixedFloat32MatricesScratch(1, gradKMatrices, perMatrix)
 	if !ok {
 		return nil, false
 	}
-	gradVBatch, ok := flattenFixedFloat32Matrices(gradVMatrices, perMatrix)
+	gradVBatch, ok := t.flattenFixedFloat32MatricesScratch(2, gradVMatrices, perMatrix)
 	if !ok {
 		return nil, false
 	}
@@ -4257,11 +4299,11 @@ func (t *EmbeddingTrainer) tryBatchedSoftmaxBackwardRows(gradOutMatrices, probsM
 		return nil, false
 	}
 	perMatrix := rows * cols
-	gradOut, ok := flattenFixedFloat32Matrices(gradOutMatrices, perMatrix)
+	gradOut, ok := t.flattenFixedFloat32MatricesScratch(0, gradOutMatrices, perMatrix)
 	if !ok {
 		return nil, false
 	}
-	probs, ok := flattenFixedFloat32Matrices(probsMatrices, perMatrix)
+	probs, ok := t.flattenFixedFloat32MatricesScratch(1, probsMatrices, perMatrix)
 	if !ok {
 		return nil, false
 	}
@@ -4277,11 +4319,11 @@ func (t *EmbeddingTrainer) tryBatchedGELUBackwardMul(gradOutMatrices, preActMatr
 		return nil, false
 	}
 	perMatrix := rows * cols
-	gradOut, ok := flattenFixedFloat32Matrices(gradOutMatrices, perMatrix)
+	gradOut, ok := t.flattenFixedFloat32MatricesScratch(0, gradOutMatrices, perMatrix)
 	if !ok {
 		return nil, false
 	}
-	preAct, ok := flattenFixedFloat32Matrices(preActMatrices, perMatrix)
+	preAct, ok := t.flattenFixedFloat32MatricesScratch(1, preActMatrices, perMatrix)
 	if !ok {
 		return nil, false
 	}
@@ -4297,15 +4339,15 @@ func (t *EmbeddingTrainer) tryBatchedLayerNormBackwardRows(gradOutMatrices, norm
 		return nil, false
 	}
 	perMatrix := rows * cols
-	gradOut, ok := flattenFixedFloat32Matrices(gradOutMatrices, perMatrix)
+	gradOut, ok := t.flattenFixedFloat32MatricesScratch(0, gradOutMatrices, perMatrix)
 	if !ok {
 		return nil, false
 	}
-	normalized, ok := flattenFixedFloat32Matrices(normalizedMatrices, perMatrix)
+	normalized, ok := t.flattenFixedFloat32MatricesScratch(1, normalizedMatrices, perMatrix)
 	if !ok {
 		return nil, false
 	}
-	pre, ok := flattenFixedFloat32Matrices(preMatrices, perMatrix)
+	pre, ok := t.flattenFixedFloat32MatricesScratch(2, preMatrices, perMatrix)
 	if !ok {
 		return nil, false
 	}
