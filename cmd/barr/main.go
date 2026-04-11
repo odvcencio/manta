@@ -525,6 +525,7 @@ func runTrainEmbed(args []string) error {
 	var selectMetric string
 	var minDelta float64
 	var restoreBest bool
+	var lengthBucketBatches bool
 	var tokenizerPath string
 	var planOnly bool
 	var learningRate float64
@@ -539,6 +540,7 @@ func runTrainEmbed(args []string) error {
 	fs.StringVar(&selectMetric, "select-metric", "top1_accuracy", "selection metric: top1_accuracy, score_margin, pair_accuracy, or loss")
 	fs.Float64Var(&minDelta, "min-delta", 0, "minimum eval improvement to count as better")
 	fs.BoolVar(&restoreBest, "restore-best", true, "restore best checkpoint at end")
+	fs.BoolVar(&lengthBucketBatches, "length-bucket-batches", false, "cluster contrastive batches by token length to improve batched GPU training")
 	fs.StringVar(&tokenizerPath, "tokenizer", "", "path to tokenizer JSON for text-pair datasets")
 	fs.BoolVar(&planOnly, "plan-only", false, "print planned workload and exit without training")
 	fs.Float64Var(&learningRate, "lr", 0, "override package learning rate for this run")
@@ -578,6 +580,7 @@ func runTrainEmbed(args []string) error {
 		SelectMetric:          selectMetric,
 		MinDelta:              float32(minDelta),
 		RestoreBest:           restoreBest,
+		LengthBucketBatches:   lengthBucketBatches,
 		LearningRate:          float32(learningRate),
 		ContrastiveLoss:       contrastiveLoss,
 		Temperature:           float32(temperature),
@@ -758,6 +761,7 @@ func runTrainCorpus(args []string) error {
 	var selectMetric string
 	var minDelta float64
 	var restoreBest bool
+	var lengthBucketBatches bool
 	var tokenizerPath string
 	var vocabSize int
 	var minFreq int
@@ -778,6 +782,7 @@ func runTrainCorpus(args []string) error {
 	fs.StringVar(&selectMetric, "select-metric", "top1_accuracy", "selection metric: top1_accuracy, score_margin, pair_accuracy, or loss")
 	fs.Float64Var(&minDelta, "min-delta", 0, "minimum eval improvement to count as better")
 	fs.BoolVar(&restoreBest, "restore-best", true, "restore best checkpoint at end")
+	fs.BoolVar(&lengthBucketBatches, "length-bucket-batches", false, "cluster contrastive batches by token length to improve batched GPU training")
 	fs.StringVar(&tokenizerPath, "tokenizer", "", "output tokenizer path")
 	fs.IntVar(&vocabSize, "vocab-size", 0, "tokenizer vocab size override")
 	fs.IntVar(&minFreq, "min-freq", 2, "minimum pair frequency for tokenizer merges")
@@ -825,6 +830,7 @@ func runTrainCorpus(args []string) error {
 			SelectMetric:          selectMetric,
 			MinDelta:              float32(minDelta),
 			RestoreBest:           restoreBest,
+			LengthBucketBatches:   lengthBucketBatches,
 			LearningRate:          float32(learningRate),
 			ContrastiveLoss:       contrastiveLoss,
 			Temperature:           float32(temperature),

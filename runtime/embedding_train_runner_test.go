@@ -229,6 +229,30 @@ func TestEmbeddingTrainerFitContrastiveTracksWorkloadAndTiming(t *testing.T) {
 	}
 }
 
+func TestBucketContrastiveOrderByLengthSortsWithinWindows(t *testing.T) {
+	trainSet := []EmbeddingContrastiveExample{
+		{QueryTokens: make([]int32, 8), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 1), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 7), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 2), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 6), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 3), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 5), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 4), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 9), PositiveTokens: make([]int32, 1)},
+	}
+	order := []int{0, 1, 2, 3, 4, 5, 6, 7, 8}
+
+	bucketContrastiveOrderByLength(trainSet, order, 2)
+
+	want := []int{1, 3, 5, 7, 6, 4, 2, 0, 8}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("order[%d] = %d, want %d (full order %v)", i, order[i], want[i], order)
+		}
+	}
+}
+
 func TestEmbeddingTrainerFitContrastiveUsesFinalEvalAsBestWhenNoEpochEvalRuns(t *testing.T) {
 	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
 	trainSet := tinyEmbeddingContrastiveDataset()

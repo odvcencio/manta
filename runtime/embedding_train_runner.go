@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"sort"
 	"time"
 )
 
@@ -18,6 +19,7 @@ type EmbeddingTrainRunConfig struct {
 	SelectMetric          string
 	MinDelta              float32
 	RestoreBest           bool
+	LengthBucketBatches   bool
 	LearningRate          float32
 	ContrastiveLoss       string
 	Temperature           float32
@@ -289,6 +291,9 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 			rng.Shuffle(len(indices), func(i, j int) {
 				indices[i], indices[j] = indices[j], indices[i]
 			})
+		}
+		if cfg.LengthBucketBatches {
+			bucketContrastiveOrderByLength(trainSet, indices, cfg.BatchSize)
 		}
 		trainStart := time.Now()
 		trainMetrics, err := t.runContrastiveEpoch(trainSet, indices, cfg.BatchSize)
@@ -595,6 +600,36 @@ func (t *EmbeddingTrainer) restoreCheckpoint(checkpoint EmbeddingTrainCheckpoint
 	}
 	*t = *restored
 	return nil
+}
+
+func bucketContrastiveOrderByLength(trainSet []EmbeddingContrastiveExample, order []int, batchSize int) {
+	if len(trainSet) == 0 || len(order) < 2 || batchSize <= 1 {
+		return
+	}
+	windowSize := batchSize * 4
+	if windowSize < batchSize {
+		windowSize = batchSize
+	}
+	for start := 0; start < len(order); start += windowSize {
+		end := start + windowSize
+		if end > len(order) {
+			end = len(order)
+		}
+		window := order[start:end]
+		sort.SliceStable(window, func(i, j int) bool {
+			left := contrastiveExampleSortLength(trainSet[window[i]])
+			right := contrastiveExampleSortLength(trainSet[window[j]])
+			return left < right
+		})
+	}
+}
+
+func contrastiveExampleSortLength(example EmbeddingContrastiveExample) int {
+	length := len(example.QueryTokens)
+	if len(example.PositiveTokens) > length {
+		length = len(example.PositiveTokens)
+	}
+	return length
 }
 
 func expandContrastiveExamples(examples []EmbeddingContrastiveExample) []EmbeddingPairExample {
