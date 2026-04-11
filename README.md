@@ -332,3 +332,7 @@ BARR_BENCH_ROOT=$PWD BARR_BENCH_TRANQUIL_ASSETS=/path/to/corkscrewdb/assets/tran
 ```
 
 Current `tranquil-v0` CUDA smoke: `33328.94` train pairs/s on batch `256`, with grouped batched backward enabled by default. See `docs/benchmarks.md` for the full profile and the next perf targets.
+
+## License
+
+Barracuda is open source under the Apache License, Version 2.0. See `LICENSE` and `NOTICE`.
