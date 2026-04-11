@@ -1597,7 +1597,7 @@ func (t *EmbeddingTrainer) fillBatchedForwardQKVMatMul(states []*embeddingSequen
 		}
 	}
 	perInput := rows * width
-	batchedLHS := make([]float32, len(states)*perInput)
+	batchedLHS := t.scratchFloat32(3, len(states)*perInput)
 	for i, state := range states {
 		if state == nil || len(state.input) != perInput || len(state.attnQ) != perInput || len(state.attnK) != perInput || len(state.attnV) != perInput {
 			return false
@@ -1639,7 +1639,7 @@ func (t *EmbeddingTrainer) fillBatchedForwardWeightMatMul(states []*embeddingSeq
 	}
 	if t != nil && t.forwardMatMul != nil {
 		perInput := rows * inner
-		batchedLHS := make([]float32, len(states)*perInput)
+		batchedLHS := t.scratchFloat32(3, len(states)*perInput)
 		valid := true
 		for i, state := range states {
 			data := lhs(state)
