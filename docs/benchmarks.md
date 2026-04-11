@@ -51,12 +51,12 @@ The current reference smoke uses:
 Latest local CUDA result:
 
 ```text
-throughput: elapsed=5.348s examples/s=861.59 pairs/s=833252.27 train_examples/s=806.41 train_pairs/s=825766.14 eval_examples/s=1903.73 eval_pairs/s=974707.71 optimizer_steps/s=0.79
+throughput: elapsed=5.139s examples/s=896.74 pairs/s=867250.60 train_examples/s=845.15 train_pairs/s=865437.87 eval_examples/s=1752.73 eval_pairs/s=897395.54 optimizer_steps/s=0.83
 accelerators: forward=cuda optimizer=cuda activation=host contrastive=cuda
 profile delta: matmul_bind_calls=30 matmul_runs=13644 matmul_run_upload_mb=3727.56 matmul_run_download_mb=2000.00 optimizer_updates=28 activation_calls=0 contrastive_calls=4
 ```
 
-This is the promoted default benchmark path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, strided-batched cuBLAS for grouped attention matmuls, rank-3 transpose support for grouped attention backward, batch-1024 contrastive training, sequence matmul bindings disabled by default, Q/K/V forward projection coalescing through a multi-bound-right CUDA path, Q/K/V attention-gradient accumulation through one concatenated shared-left GEMM, combined V/K attention backward gradients in one doubled-batch GEMM, Q/K/V input-gradient accumulation into one resident-right output download, and grouped activation-backward helpers kept behind the activation accelerator flag. The larger batch keeps the full in-batch negative set intact, improves contrastive signal, cuts optimizer/contrastive calls on this smoke, and reduces per-pair orchestration overhead. Disabling per-sequence matmul bindings trades a small upload increase for a large reduction in backend binding churn. Q/K/V coalescing preserves per-weight residency and quantization while uploading each shared left-hand activation once across query/key/value projections. Concatenated shared-left attention-gradient coalescing computes `input^T*[dQ|dK|dV]` as one standard GEMM, then splits the result back into the Q/K/V weight gradients. V/K gradient coalescing computes `scores^T*dMixed` and `dPreSoftmax^T*Q` in a single strided-batched dispatch because both use the same transpose shape. Input-gradient coalescing computes `dQ*Wq^T + dK*Wk^T + dV*Wv^T` against resident Q/K/V weights and downloads the accumulated result once. The CLI/runtime default remains conservative until Barracuda has an adaptive CPU/GPU batch policy.
+This is the promoted default benchmark path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, strided-batched cuBLAS for grouped attention matmuls, rank-3 transpose support for grouped attention backward, batch-1024 contrastive training, sequence matmul bindings disabled by default, Q/K/V forward projection coalescing through a multi-bound-right CUDA path, Q/K/V attention-gradient accumulation through one concatenated shared-left GEMM, combined V/K attention backward gradients in one doubled-batch GEMM, Q/K/V input-gradient accumulation into one resident-right output download with one CUDA sync per accumulated group, and grouped activation-backward helpers kept behind the activation accelerator flag. The larger batch keeps the full in-batch negative set intact, improves contrastive signal, cuts optimizer/contrastive calls on this smoke, and reduces per-pair orchestration overhead. Disabling per-sequence matmul bindings trades a small upload increase for a large reduction in backend binding churn. Q/K/V coalescing preserves per-weight residency and quantization while uploading each shared left-hand activation once across query/key/value projections. Concatenated shared-left attention-gradient coalescing computes `input^T*[dQ|dK|dV]` as one standard GEMM, then splits the result back into the Q/K/V weight gradients. V/K gradient coalescing computes `scores^T*dMixed` and `dPreSoftmax^T*Q` in a single strided-batched dispatch because both use the same transpose shape. Input-gradient coalescing computes `dQ*Wq^T + dK*Wk^T + dV*Wv^T` against resident Q/K/V weights, synchronizes once after the accumulated cuBLAS calls, and downloads the accumulated result once. The CLI/runtime default remains conservative until Barracuda has an adaptive CPU/GPU batch policy.
 
 Read the throughput line with both lenses:
 
@@ -83,10 +83,11 @@ The training hot path moved as follows on the same mini smoke:
 | Concatenate shared-left Q/K/V gradient matmul | `762372.72` | `15336` |
 | Combine attention V/K gradient matmuls | `803746.93` | `14772` |
 | Accumulate Q/K/V input gradients with resident weights | `825766.14` | `13644` |
+| Single-sync accumulated Q/K/V input gradients | `865437.87` | `13644` |
 
 The main wins came from grouping real text batches by sequence length during backward, coalescing parameter-gradient matmuls into taller `X^T*dY` operations, grouping contrastive forward sequences by exact token length inside each original batch, promoting rank-3 x rank-3 CUDA matmul to `cublasSgemmStridedBatched`, allowing strided-batched matmul to handle transpose flags directly, and increasing the effective contrastive batch. The forward grouping keeps the full in-batch negative set intact and avoids padding, so attention math does not change.
 
-The Q/K/V multi-bound-right path is transfer progress: it reduces matmul run uploads from `4173.15 MB` to `3727.56 MB` while preserving each weight's resident quantized form. The concatenated shared-left gradient path and combined V/K gradient path are dispatch-count wins on top of that. Accumulated input gradients keep the Q/K/V weights resident and reduce matmul run downloads from `2208.41 MB` to `2000.00 MB`. Batch-1024 A/B measured `806.41 train_examples/s`, `825766.14 train_pairs/s`, and `13644` matmul runs by default versus `737.85 train_examples/s`, `755554.14 train_pairs/s`, and `14772` matmul runs with `BARR_TRAIN_DISABLE_ACCUMULATED_ATTENTION_INPUT_GRAD=1`.
+The Q/K/V multi-bound-right path is transfer progress: it reduces matmul run uploads from `4173.15 MB` to `3727.56 MB` while preserving each weight's resident quantized form. The concatenated shared-left gradient path and combined V/K gradient path are dispatch-count wins on top of that. Accumulated input gradients keep the Q/K/V weights resident and reduce matmul run downloads from `2208.41 MB` to `2000.00 MB`. Single-sync accumulation removes the redundant per-term CUDA syncs inside that primitive while keeping the same transfer profile. Batch-1024 A/B measured `845.15 train_examples/s`, `865437.87 train_pairs/s`, and `13644` matmul runs by default versus `748.52 train_examples/s`, `766485.96 train_pairs/s`, and `13644` matmul runs with `BARR_CUDA_DISABLE_ACCUMULATED_MATMUL_SINGLE_SYNC=1`.
 
 ## Batch Sweep
 
@@ -95,7 +96,7 @@ Batch size is now the largest exposed training knob. On the same 4096-example mi
 | Batch | Run steps | Train examples/s | Train pairs/s | Matmul runs | Max RSS |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | `512` | `8` | `558.19` | `285791.12` | `28848` | `1.02 GB` |
-| `1024` | `4` | `806.41` | `825766.14` | `13644` | `1.52 GB` |
+| `1024` | `4` | `845.15` | `865437.87` | `13644` | `1.52 GB` |
 | `2048` | `2` | `827.20` | `1694107.56` | `9408` | `2.50 GB` |
 | `4096` | `1` | `741.49` | `3037152.08` | `5616` | `4.47 GB` |
 
@@ -113,9 +114,9 @@ RunDownloadedBytes ~= 2.00 GiB
 
 Reasonable next targets:
 
-- `750-850 train_examples/s`: reduce host materialization and launch overhead inside same-length groups.
-- `850-1000 train_examples/s`: keep forward/backward intermediates device-resident across full layer groups and move optimizer/activation state through the same device-resident path.
-- `1000+ train_examples/s`: persistent device-resident training steps with fused attention/FFN backward and fewer per-layer dispatches.
+- `850-1000 train_examples/s`: reduce host materialization and launch overhead inside same-length groups.
+- `1000+ train_examples/s`: keep forward/backward intermediates device-resident across full layer groups and move optimizer/activation state through the same device-resident path.
+- `1200+ train_examples/s`: persistent device-resident training steps with fused attention/FFN backward and fewer per-layer dispatches.
 
 The practical ceiling for this tiny model is dominated by orchestration and host-device transfer, not raw GEMM throughput. Larger models will shift more time into actual math, but the same device-residency work is still required to get high GPU utilization.
 
@@ -168,6 +169,12 @@ BARR_TRAIN_DISABLE_ACCUMULATED_ATTENTION_INPUT_GRAD=1
 ```
 
 Disables only the accumulated Q/K/V attention input-gradient path. This returns to three resident right-hand matmuls for `dQ*Wq^T`, `dK*Wk^T`, and `dV*Wv^T`, followed by host accumulation.
+
+```bash
+BARR_CUDA_DISABLE_ACCUMULATED_MATMUL_SINGLE_SYNC=1
+```
+
+Disables CUDA single-sync accumulation inside the backend accumulated resident-right matmul primitive. This keeps the same logical training path but synchronizes after each accumulated cuBLAS term, which is useful for A/B testing backend launch overhead.
 
 ```bash
 BARR_TRAIN_ENABLE_ACTIVATION_ACCEL=1

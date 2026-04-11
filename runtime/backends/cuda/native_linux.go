@@ -338,6 +338,20 @@ static int barrCudaMemcpyDtoH(BarrCudaRuntime* rt, void* dst, CUdeviceptr src, s
 	return 0;
 }
 
+static int barrCudaSynchronize(BarrCudaRuntime* rt, char** err) {
+	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
+	if (cuRes != CUDA_SUCCESS) {
+		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
+		return 1;
+	}
+	cuRes = cuCtxSynchronize();
+	if (cuRes != CUDA_SUCCESS) {
+		*err = barr_dup_cu_error("cuCtxSynchronize", cuRes);
+		return 1;
+	}
+	return 0;
+}
+
 static int barrCudaReadFloat32(BarrCudaRuntime* rt, CUdeviceptr src, int elementIndex, float* out, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
@@ -442,7 +456,7 @@ static int barrCudaLaunchContrastiveGrad(BarrCudaRuntime* rt, BarrCudaKernel* ke
 	return barrCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int barrCudaMatMulCublasWithBeta(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, float betaValue, char** err) {
+static int barrCudaMatMulCublasWithBetaNoSync(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, float betaValue, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -481,12 +495,14 @@ static int barrCudaMatMulCublasWithBeta(BarrCudaRuntime* rt, CUdeviceptr lhs, CU
 		*err = barr_dup_cublas_error("cublasSgemm", blasRes);
 		return 1;
 	}
-	cuRes = cuCtxSynchronize();
-	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxSynchronize", cuRes);
+	return 0;
+}
+
+static int barrCudaMatMulCublasWithBeta(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, float betaValue, char** err) {
+	if (barrCudaMatMulCublasWithBetaNoSync(rt, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, transposeLeft, transposeRight, betaValue, err) != 0) {
 		return 1;
 	}
-	return 0;
+	return barrCudaSynchronize(rt, err);
 }
 
 static int barrCudaMatMulCublas(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
@@ -563,6 +579,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"time"
 	"unsafe"
 
@@ -1276,6 +1293,22 @@ func (rt *deviceRuntime) matMulCublasWithBeta(lhs, rhs, out0 C.CUdeviceptr, lhsR
 	return nil
 }
 
+func (rt *deviceRuntime) matMulCublasWithBetaNoSync(lhs, rhs, out0 C.CUdeviceptr, lhsRows, lhsCols, rhsRows, rhsCols C.int, transposeLeft, transposeRight bool, beta float32) error {
+	var errStr *C.char
+	var left C.int
+	var right C.int
+	if transposeLeft {
+		left = 1
+	}
+	if transposeRight {
+		right = 1
+	}
+	if C.barrCudaMatMulCublasWithBetaNoSync(rt.ptr, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, left, right, C.float(beta), &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
 func (rt *deviceRuntime) matMulCublasStridedBatched(lhs, rhs, out0 C.CUdeviceptr, batches, lhsRows, lhsCols, rhsRows, rhsCols C.int, transposeLeft, transposeRight bool) error {
 	var errStr *C.char
 	var left C.int
@@ -1307,6 +1340,23 @@ func cStringError(value *C.char) error {
 	}
 	defer C.barrCudaFreeCString(value)
 	return errors.New(C.GoString(value))
+}
+
+func (rt *deviceRuntime) synchronize() error {
+	var errStr *C.char
+	if C.barrCudaSynchronize(rt.ptr, &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func cudaEnvFlagEnabled(name string) bool {
+	switch os.Getenv(name) {
+	case "1", "true", "TRUE", "yes", "YES":
+		return true
+	default:
+		return false
+	}
 }
 
 func (rt *deviceRuntime) runMatMul(inputs []*backend.Tensor, outputType barr.ValueType) (backend.StepDispatchResult, error) {
@@ -1589,6 +1639,7 @@ func (rt *deviceRuntime) runAccumulatedMatMulsWithBoundRights(lhsInputs []*backe
 	if err != nil {
 		return backend.StepDispatchResult{}, err
 	}
+	singleSync := !cudaEnvFlagEnabled("BARR_CUDA_DISABLE_ACCUMULATED_MATMUL_SINGLE_SYNC")
 	bindings := make([]string, len(plans))
 	for i, plan := range plans {
 		runUploadedBytes += plan.uploadedBytes
@@ -1601,9 +1652,20 @@ func (rt *deviceRuntime) runAccumulatedMatMulsWithBoundRights(lhsInputs []*backe
 		if i > 0 {
 			beta = 1
 		}
-		if err := rt.matMulCublasWithBeta(lhsBuf, plan.resident.ptr, outBuf, C.int(plan.lhsRows), C.int(plan.lhsCols), C.int(plan.rhsRows), C.int(plan.rhsCols), transposeLeft, transposeRight, beta); err != nil {
+		if singleSync {
+			err = rt.matMulCublasWithBetaNoSync(lhsBuf, plan.resident.ptr, outBuf, C.int(plan.lhsRows), C.int(plan.lhsCols), C.int(plan.rhsRows), C.int(plan.rhsCols), transposeLeft, transposeRight, beta)
+		} else {
+			err = rt.matMulCublasWithBeta(lhsBuf, plan.resident.ptr, outBuf, C.int(plan.lhsRows), C.int(plan.lhsCols), C.int(plan.rhsRows), C.int(plan.rhsCols), transposeLeft, transposeRight, beta)
+		}
+		if err != nil {
 			return backend.StepDispatchResult{}, err
 		}
+	}
+	if singleSync {
+		err = rt.synchronize()
+	}
+	if err != nil {
+		return backend.StepDispatchResult{}, err
 	}
 	if err := rt.downloadFloat32(outHost, outBuf); err != nil {
 		return backend.StepDispatchResult{}, err
@@ -1627,6 +1689,7 @@ func (rt *deviceRuntime) runAccumulatedMatMulsWithBoundRights(lhsInputs []*backe
 			"accumulated_bound_rights":  true,
 			"accumulated_cublas_calls":  len(plans),
 			"accumulated_download_once": true,
+			"accumulated_single_sync":   singleSync,
 		},
 	}, nil
 }
