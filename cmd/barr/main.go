@@ -521,6 +521,7 @@ func runTrainEmbed(args []string) error {
 	var shuffle bool
 	var seed int64
 	var evalEvery int
+	var evalEverySteps int
 	var patience int
 	var selectMetric string
 	var minDelta float64
@@ -529,6 +530,7 @@ func runTrainEmbed(args []string) error {
 	var progressEvery int
 	var tokenizerPath string
 	var planOnly bool
+	var evalOnly bool
 	var learningRate float64
 	var contrastiveLoss string
 	var temperature float64
@@ -537,14 +539,16 @@ func runTrainEmbed(args []string) error {
 	fs.BoolVar(&shuffle, "shuffle", true, "shuffle training set each epoch")
 	fs.Int64Var(&seed, "seed", 1, "shuffle seed")
 	fs.IntVar(&evalEvery, "eval-every", 1, "evaluate every N epochs")
+	fs.IntVar(&evalEverySteps, "eval-every-steps", 0, "evaluate every N optimizer steps within an epoch (0 disables)")
 	fs.IntVar(&patience, "patience", 3, "early stopping patience in evals")
-	fs.StringVar(&selectMetric, "select-metric", "top1_accuracy", "selection metric: top1_accuracy, score_margin, pair_accuracy, or loss")
+	fs.StringVar(&selectMetric, "select-metric", "top1_accuracy", "selection metric: top1_accuracy, top5_accuracy, top10_accuracy, mrr, mean_rank, score_margin, pair_accuracy, or loss")
 	fs.Float64Var(&minDelta, "min-delta", 0, "minimum eval improvement to count as better")
 	fs.BoolVar(&restoreBest, "restore-best", true, "restore best checkpoint at end")
 	fs.BoolVar(&lengthBucketBatches, "length-bucket-batches", false, "cluster contrastive batches by token length to improve batched GPU training")
 	fs.IntVar(&progressEvery, "progress-every", 0, "print training progress every N optimizer steps (0 disables)")
 	fs.StringVar(&tokenizerPath, "tokenizer", "", "path to tokenizer JSON for text-pair datasets")
 	fs.BoolVar(&planOnly, "plan-only", false, "print planned workload and exit without training")
+	fs.BoolVar(&evalOnly, "eval-only", false, "evaluate the package without running optimizer steps")
 	fs.Float64Var(&learningRate, "lr", 0, "override package learning rate for this run")
 	fs.StringVar(&contrastiveLoss, "contrastive-loss", "", "override package contrastive loss: pair_mse or infonce")
 	fs.Float64Var(&temperature, "temperature", 0, "override package contrastive softmax temperature")
@@ -562,6 +566,9 @@ func runTrainEmbed(args []string) error {
 	}
 	if progressEvery < 0 {
 		return fmt.Errorf("progress-every must be non-negative")
+	}
+	if evalEverySteps < 0 {
+		return fmt.Errorf("eval-every-steps must be non-negative")
 	}
 	path := fs.Arg(0)
 	trainPath := fs.Arg(1)
@@ -581,6 +588,7 @@ func runTrainEmbed(args []string) error {
 		Shuffle:               shuffle,
 		Seed:                  seed,
 		EvalEveryEpoch:        evalEvery,
+		EvalEverySteps:        evalEverySteps,
 		EarlyStoppingPatience: patience,
 		SelectMetric:          selectMetric,
 		MinDelta:              float32(minDelta),
@@ -590,6 +598,7 @@ func runTrainEmbed(args []string) error {
 		ContrastiveLoss:       contrastiveLoss,
 		Temperature:           float32(temperature),
 		ProgressEverySteps:    progressEvery,
+		EvalOnly:              evalOnly,
 	}
 	if progressEvery > 0 {
 		runConfig.Progress = printTrainProgress
@@ -617,14 +626,18 @@ func runTrainEmbed(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("trained package %q\n", path)
+	if evalOnly {
+		fmt.Printf("evaluated package %q\n", path)
+	} else {
+		fmt.Printf("trained package %q\n", path)
+	}
 	if tokenizerPath != "" {
 		fmt.Printf("tokenizer: %s\n", tokenizerPath)
 	}
 	fmt.Printf("epochs: %d, steps: %d, run_steps: %d, best_epoch: %d, best_step: %d\n", summary.EpochsCompleted, summary.StepsCompleted, summary.StepsRun, summary.BestEpoch, summary.BestStep)
 	fmt.Printf("final train: loss=%.6f avg_score=%.6f batch=%d\n", summary.FinalTrain.Loss, summary.FinalTrain.AverageScore, summary.FinalTrain.BatchSize)
 	if summary.FinalEval != nil {
-		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f top1=%.6f mean_rank=%.3f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.Top1Accuracy, summary.FinalEval.MeanPositiveRank, summary.FinalEval.PairCount)
+		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f top1=%.6f top5=%.6f top10=%.6f mrr=%.6f mean_rank=%.3f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.Top1Accuracy, summary.FinalEval.Top5Accuracy, summary.FinalEval.Top10Accuracy, summary.FinalEval.MeanReciprocalRank, summary.FinalEval.MeanPositiveRank, summary.FinalEval.PairCount)
 	}
 	fmt.Printf("workload: %s\n", formatTrainWorkload(summary.Workload))
 	fmt.Printf("throughput: %s\n", formatTrainThroughput(summary))
@@ -787,6 +800,7 @@ func runTrainCorpus(args []string) error {
 	var shuffle bool
 	var seed int64
 	var evalEvery int
+	var evalEverySteps int
 	var patience int
 	var selectMetric string
 	var minDelta float64
@@ -809,8 +823,9 @@ func runTrainCorpus(args []string) error {
 	fs.BoolVar(&shuffle, "shuffle", true, "shuffle training set each epoch")
 	fs.Int64Var(&seed, "seed", 1, "shuffle/mining seed")
 	fs.IntVar(&evalEvery, "eval-every", 1, "evaluate every N epochs")
+	fs.IntVar(&evalEverySteps, "eval-every-steps", 0, "evaluate every N optimizer steps within an epoch (0 disables)")
 	fs.IntVar(&patience, "patience", 3, "early stopping patience in evals")
-	fs.StringVar(&selectMetric, "select-metric", "top1_accuracy", "selection metric: top1_accuracy, score_margin, pair_accuracy, or loss")
+	fs.StringVar(&selectMetric, "select-metric", "top1_accuracy", "selection metric: top1_accuracy, top5_accuracy, top10_accuracy, mrr, mean_rank, score_margin, pair_accuracy, or loss")
 	fs.Float64Var(&minDelta, "min-delta", 0, "minimum eval improvement to count as better")
 	fs.BoolVar(&restoreBest, "restore-best", true, "restore best checkpoint at end")
 	fs.BoolVar(&lengthBucketBatches, "length-bucket-batches", false, "cluster contrastive batches by token length to improve batched GPU training")
@@ -841,6 +856,9 @@ func runTrainCorpus(args []string) error {
 	if progressEvery < 0 {
 		return fmt.Errorf("progress-every must be non-negative")
 	}
+	if evalEverySteps < 0 {
+		return fmt.Errorf("eval-every-steps must be non-negative")
+	}
 	path := fs.Arg(0)
 	corpusPath := fs.Arg(1)
 	runConfig := barruntime.EmbeddingTrainRunConfig{
@@ -849,6 +867,7 @@ func runTrainCorpus(args []string) error {
 		Shuffle:               shuffle,
 		Seed:                  seed,
 		EvalEveryEpoch:        evalEvery,
+		EvalEverySteps:        evalEverySteps,
 		EarlyStoppingPatience: patience,
 		SelectMetric:          selectMetric,
 		MinDelta:              float32(minDelta),
@@ -888,7 +907,7 @@ func runTrainCorpus(args []string) error {
 	fmt.Printf("epochs: %d, steps: %d, run_steps: %d, best_epoch: %d, best_step: %d\n", summary.EpochsCompleted, summary.StepsCompleted, summary.StepsRun, summary.BestEpoch, summary.BestStep)
 	fmt.Printf("final train: loss=%.6f avg_score=%.6f batch=%d\n", summary.FinalTrain.Loss, summary.FinalTrain.AverageScore, summary.FinalTrain.BatchSize)
 	if summary.FinalEval != nil {
-		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f top1=%.6f mean_rank=%.3f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.Top1Accuracy, summary.FinalEval.MeanPositiveRank, summary.FinalEval.PairCount)
+		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f top1=%.6f top5=%.6f top10=%.6f mrr=%.6f mean_rank=%.3f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.Top1Accuracy, summary.FinalEval.Top5Accuracy, summary.FinalEval.Top10Accuracy, summary.FinalEval.MeanReciprocalRank, summary.FinalEval.MeanPositiveRank, summary.FinalEval.PairCount)
 	}
 	fmt.Printf("workload: %s\n", formatTrainWorkload(summary.Workload))
 	fmt.Printf("throughput: %s\n", formatTrainThroughput(summary))

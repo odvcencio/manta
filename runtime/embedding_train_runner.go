@@ -15,10 +15,12 @@ type EmbeddingTrainRunConfig struct {
 	Shuffle               bool
 	Seed                  int64
 	EvalEveryEpoch        int
+	EvalEverySteps        int
 	EarlyStoppingPatience int
 	SelectMetric          string
 	MinDelta              float32
 	RestoreBest           bool
+	EvalOnly              bool
 	LengthBucketBatches   bool
 	LearningRate          float32
 	ContrastiveLoss       string
@@ -121,6 +123,9 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 	}
 	if cfg.EvalEveryEpoch <= 0 {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("eval_every_epoch must be positive")
+	}
+	if cfg.EvalEverySteps < 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("eval_every_steps must be non-negative")
 	}
 	if cfg.EarlyStoppingPatience < 0 {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("early_stopping_patience must be non-negative")
@@ -269,18 +274,27 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 	if t == nil {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("embedding trainer is not initialized")
 	}
-	if len(trainSet) == 0 {
-		return EmbeddingTrainRunSummary{}, fmt.Errorf("training dataset is empty")
-	}
 	cfg = normalizedTrainRunConfig(cfg)
-	if cfg.Epochs <= 0 {
-		return EmbeddingTrainRunSummary{}, fmt.Errorf("epochs must be positive")
-	}
-	if cfg.BatchSize <= 1 {
-		return EmbeddingTrainRunSummary{}, fmt.Errorf("batch_size must be at least 2 for contrastive training")
+	if cfg.EvalOnly {
+		if len(evalSet) == 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval dataset is empty")
+		}
+	} else {
+		if len(trainSet) == 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("training dataset is empty")
+		}
+		if cfg.Epochs <= 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("epochs must be positive")
+		}
+		if cfg.BatchSize <= 1 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("batch_size must be at least 2 for contrastive training")
+		}
 	}
 	if cfg.EvalEveryEpoch <= 0 {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("eval_every_epoch must be positive")
+	}
+	if cfg.EvalEverySteps < 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("eval_every_steps must be non-negative")
 	}
 	if cfg.EarlyStoppingPatience < 0 {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("early_stopping_patience must be non-negative")
@@ -295,11 +309,6 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		return EmbeddingTrainRunSummary{}, err
 	}
 
-	indices := make([]int, len(trainSet))
-	for i := range indices {
-		indices[i] = i
-	}
-	rng := rand.New(rand.NewSource(cfg.Seed))
 	runStart := time.Now()
 	startStep := t.step
 	summary := EmbeddingTrainRunSummary{
@@ -307,11 +316,67 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		StartProfile: t.TrainProfile(),
 		Workload:     EstimateContrastiveTrainWorkload(len(trainSet), len(evalSet), cfg),
 	}
+	if cfg.EvalOnly {
+		evalStart := time.Now()
+		finalEval, err := t.EvaluateContrastive(evalSet)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval: %w", err)
+		}
+		summary.EvalDuration = time.Since(evalStart)
+		summary.StepsCompleted = t.step
+		summary.FinalEval = cloneEvalMetrics(finalEval)
+		summary.LastEval = cloneEvalMetrics(finalEval)
+		summary.BestEval = cloneEvalMetrics(finalEval)
+		summary.BestStep = t.step
+		summary.Workload.ActualEvalPasses = 1
+		summary.Workload.ActualEvalPairs = int64(len(evalSet) * len(evalSet))
+		summary.Workload.ActualEvalExamples = int64(len(evalSet))
+		summary.EndProfile = t.TrainProfile()
+		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
+		summary.Workload.ActualTotalPairs = summary.Workload.ActualEvalPairs
+		summary.Workload.ActualTotalExamples = summary.Workload.ActualEvalExamples
+		summary.Elapsed = time.Since(runStart)
+		return summary, nil
+	}
+
+	indices := make([]int, len(trainSet))
+	for i := range indices {
+		indices[i] = i
+	}
+	rng := rand.New(rand.NewSource(cfg.Seed))
 	var (
 		bestCheckpoint EmbeddingTrainCheckpoint
 		haveBest       bool
 		noImproveEvals int
 	)
+	recordEval := func(epoch int) (*EmbeddingEvalMetrics, bool, error) {
+		evalStart := time.Now()
+		evalMetrics, err := t.EvaluateContrastive(evalSet)
+		if err != nil {
+			return nil, false, err
+		}
+		summary.EvalDuration += time.Since(evalStart)
+		summary.Workload.ActualEvalPasses++
+		summary.Workload.ActualEvalPairs += int64(len(evalSet) * len(evalSet))
+		summary.Workload.ActualEvalExamples += int64(len(evalSet))
+		summary.LastEval = cloneEvalMetrics(evalMetrics)
+		improved := false
+		if !haveBest || betterEvalMetrics(evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta) {
+			bestCheckpoint, err = t.Checkpoint()
+			if err != nil {
+				return nil, false, err
+			}
+			haveBest = true
+			improved = true
+			summary.BestEval = cloneEvalMetrics(evalMetrics)
+			summary.BestEpoch = epoch
+			summary.BestStep = t.step
+			noImproveEvals = 0
+		} else {
+			noImproveEvals++
+		}
+		return cloneEvalMetrics(evalMetrics), improved, nil
+	}
 
 	for epoch := 1; epoch <= cfg.Epochs; epoch++ {
 		if cfg.Shuffle {
@@ -323,7 +388,19 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 			bucketContrastiveOrderByLength(trainSet, indices, cfg.BatchSize)
 		}
 		trainStart := time.Now()
-		trainMetrics, err := t.runContrastiveEpoch(trainSet, indices, cfg.BatchSize, cfg, epoch, runStart)
+		var afterBatch contrastiveEpochBatchHook
+		if len(evalSet) > 0 && cfg.EvalEverySteps > 0 {
+			afterBatch = func(progress EmbeddingTrainProgress) error {
+				if progress.Batch <= 0 || progress.Batch%cfg.EvalEverySteps != 0 {
+					return nil
+				}
+				if _, _, err := recordEval(epoch); err != nil {
+					return fmt.Errorf("step %d eval: %w", progress.Step, err)
+				}
+				return nil
+			}
+		}
+		trainMetrics, err := t.runContrastiveEpoch(trainSet, indices, cfg.BatchSize, cfg, epoch, runStart, afterBatch)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d: %w", epoch, err)
 		}
@@ -340,30 +417,13 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		summary.Workload.ActualTrainExamples += int64(contrastiveUsableExampleCount(len(indices), cfg.BatchSize))
 
 		if len(evalSet) > 0 && epoch%cfg.EvalEveryEpoch == 0 {
-			evalStart := time.Now()
-			evalMetrics, err := t.EvaluateContrastive(evalSet)
+			evalMetrics, improved, err := recordEval(epoch)
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d eval: %w", epoch, err)
 			}
-			summary.EvalDuration += time.Since(evalStart)
-			summary.Workload.ActualEvalPasses++
-			summary.Workload.ActualEvalPairs += int64(len(evalSet) * len(evalSet))
-			summary.Workload.ActualEvalExamples += int64(len(evalSet))
-			record.Eval = cloneEvalMetrics(evalMetrics)
-			summary.LastEval = cloneEvalMetrics(evalMetrics)
-			if !haveBest || betterEvalMetrics(evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta) {
-				bestCheckpoint, err = t.Checkpoint()
-				if err != nil {
-					return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d checkpoint: %w", epoch, err)
-				}
-				haveBest = true
-				record.Improved = true
-				summary.BestEval = cloneEvalMetrics(evalMetrics)
-				summary.BestEpoch = epoch
-				summary.BestStep = t.step
-				noImproveEvals = 0
-			} else {
-				noImproveEvals++
+			record.Eval = evalMetrics
+			record.Improved = improved
+			if !improved {
 				if cfg.EarlyStoppingPatience > 0 && noImproveEvals >= cfg.EarlyStoppingPatience {
 					summary.StoppedEarly = true
 					summary.History = append(summary.History, record)
@@ -432,6 +492,13 @@ func EstimatePairwiseTrainWorkload(trainExamples, evalExamples int, cfg Embeddin
 	evalPasses := plannedEvalPassCount(evalExamples, cfg.Epochs, cfg.EvalEveryEpoch)
 	trainPairsPerEpoch := int64(trainExamples)
 	evalPairsPerPass := int64(evalExamples)
+	if cfg.EvalOnly {
+		batches = 0
+		trainPairsPerEpoch = 0
+		if evalExamples > 0 {
+			evalPasses = 1
+		}
+	}
 	return EmbeddingTrainWorkload{
 		TrainMode:            "pairwise",
 		EvalMode:             workloadEvalMode(evalExamples, "pairwise"),
@@ -455,6 +522,16 @@ func EstimateContrastiveTrainWorkload(trainExamples, evalExamples int, cfg Embed
 	batches, trainPairsPerEpoch := contrastiveBatchWork(trainExamples, cfg.BatchSize)
 	evalPairsPerPass := contrastiveEvalPairs(evalExamples)
 	evalPasses := plannedEvalPassCount(evalExamples, cfg.Epochs, cfg.EvalEveryEpoch)
+	if cfg.EvalEverySteps > 0 && evalExamples > 0 {
+		evalPasses += (batches / cfg.EvalEverySteps) * cfg.Epochs
+	}
+	if cfg.EvalOnly {
+		batches = 0
+		trainPairsPerEpoch = 0
+		if evalExamples > 0 {
+			evalPasses = 1
+		}
+	}
 	return EmbeddingTrainWorkload{
 		TrainMode:            "contrastive",
 		EvalMode:             workloadEvalMode(evalExamples, "contrastive"),
@@ -602,7 +679,9 @@ func (t *EmbeddingTrainer) runEpoch(trainSet []EmbeddingPairExample, order []int
 	}, nil
 }
 
-func (t *EmbeddingTrainer) runContrastiveEpoch(trainSet []EmbeddingContrastiveExample, order []int, batchSize int, cfg EmbeddingTrainRunConfig, epoch int, runStart time.Time) (EmbeddingTrainMetrics, error) {
+type contrastiveEpochBatchHook func(EmbeddingTrainProgress) error
+
+func (t *EmbeddingTrainer) runContrastiveEpoch(trainSet []EmbeddingContrastiveExample, order []int, batchSize int, cfg EmbeddingTrainRunConfig, epoch int, runStart time.Time, afterBatch contrastiveEpochBatchHook) (EmbeddingTrainMetrics, error) {
 	totalLoss := float32(0)
 	totalScore := float32(0)
 	totalExamples := 0
@@ -632,7 +711,7 @@ func (t *EmbeddingTrainer) runContrastiveEpoch(trainSet []EmbeddingContrastiveEx
 		totalTrainExamples += end - start
 		totalPairs += int64(metrics.BatchSize)
 		batchIndex++
-		maybeReportTrainProgress(cfg, EmbeddingTrainProgress{
+		progress := EmbeddingTrainProgress{
 			Epoch:              epoch,
 			Batch:              batchIndex,
 			Batches:            totalBatches,
@@ -645,7 +724,13 @@ func (t *EmbeddingTrainer) runContrastiveEpoch(trainSet []EmbeddingContrastiveEx
 			Loss:               metrics.Loss,
 			AverageScore:       metrics.AverageScore,
 			Elapsed:            time.Since(runStart),
-		})
+		}
+		maybeReportTrainProgress(cfg, progress)
+		if afterBatch != nil {
+			if err := afterBatch(progress); err != nil {
+				return EmbeddingTrainMetrics{}, err
+			}
+		}
 	}
 	if totalExamples == 0 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("training epoch has no usable contrastive batches")
@@ -737,7 +822,9 @@ func expandContrastiveExamples(examples []EmbeddingContrastiveExample) []Embeddi
 }
 
 func normalizedTrainRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConfig {
-	if cfg.Epochs == 0 {
+	if cfg.EvalOnly {
+		cfg.Epochs = 0
+	} else if cfg.Epochs == 0 {
 		cfg.Epochs = 1
 	}
 	if cfg.BatchSize == 0 {
@@ -786,7 +873,7 @@ func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) e
 
 func validTrainSelectionMetric(metric string) bool {
 	switch metric {
-	case "loss", "pair_accuracy", "score_margin", "top1_accuracy":
+	case "loss", "pair_accuracy", "score_margin", "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr", "mean_positive_rank", "mean_rank":
 		return true
 	default:
 		return false
@@ -821,15 +908,29 @@ func betterEvalMetrics(current, best EmbeddingEvalMetrics, metric string, minDel
 				return true
 			}
 		}
-	case "top1_accuracy":
-		if current.Top1Accuracy > best.Top1Accuracy+primaryDelta {
+	case "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr":
+		currentRankMetric := evalRankMetric(current, metric)
+		bestRankMetric := evalRankMetric(best, metric)
+		if currentRankMetric > bestRankMetric+primaryDelta {
 			return true
 		}
-		if math.Abs(float64(current.Top1Accuracy-best.Top1Accuracy)) <= eps {
+		if math.Abs(float64(currentRankMetric-bestRankMetric)) <= eps {
 			if current.ScoreMargin > best.ScoreMargin+float32(eps) {
 				return true
 			}
 			if math.Abs(float64(current.ScoreMargin-best.ScoreMargin)) <= eps && current.Loss < best.Loss-float32(eps) {
+				return true
+			}
+		}
+	case "mean_positive_rank", "mean_rank":
+		if current.MeanPositiveRank < best.MeanPositiveRank-primaryDelta {
+			return true
+		}
+		if math.Abs(float64(current.MeanPositiveRank-best.MeanPositiveRank)) <= eps {
+			if current.Top1Accuracy > best.Top1Accuracy+float32(eps) {
+				return true
+			}
+			if math.Abs(float64(current.Top1Accuracy-best.Top1Accuracy)) <= eps && current.ScoreMargin > best.ScoreMargin+float32(eps) {
 				return true
 			}
 		}
@@ -847,6 +948,19 @@ func betterEvalMetrics(current, best EmbeddingEvalMetrics, metric string, minDel
 		}
 	}
 	return false
+}
+
+func evalRankMetric(metrics EmbeddingEvalMetrics, metric string) float32 {
+	switch metric {
+	case "top5_accuracy":
+		return metrics.Top5Accuracy
+	case "top10_accuracy":
+		return metrics.Top10Accuracy
+	case "mrr":
+		return metrics.MeanReciprocalRank
+	default:
+		return metrics.Top1Accuracy
+	}
 }
 
 func cloneEvalMetrics(metrics EmbeddingEvalMetrics) *EmbeddingEvalMetrics {

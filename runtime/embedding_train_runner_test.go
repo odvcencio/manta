@@ -270,6 +270,61 @@ func TestEmbeddingTrainerFitContrastiveReportsProgress(t *testing.T) {
 	}
 }
 
+func TestEmbeddingTrainerFitContrastiveEvalOnlyDoesNotTrain(t *testing.T) {
+	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
+	evalSet := tinyEmbeddingContrastiveDataset()
+
+	summary, err := trainer.FitContrastive(nil, evalSet, EmbeddingTrainRunConfig{EvalOnly: true})
+	if err != nil {
+		t.Fatalf("fit contrastive eval-only: %v", err)
+	}
+	if summary.EpochsCompleted != 0 {
+		t.Fatalf("epochs completed = %d, want 0", summary.EpochsCompleted)
+	}
+	if summary.StepsRun != 0 {
+		t.Fatalf("steps run = %d, want 0", summary.StepsRun)
+	}
+	if summary.FinalEval == nil {
+		t.Fatal("expected final eval metrics")
+	}
+	if summary.Workload.PlannedTrainPairs != 0 || summary.Workload.ActualTrainPairs != 0 {
+		t.Fatalf("train pairs planned/actual = %d/%d, want 0/0", summary.Workload.PlannedTrainPairs, summary.Workload.ActualTrainPairs)
+	}
+	if summary.Workload.PlannedEvalPasses != 1 || summary.Workload.ActualEvalPasses != 1 {
+		t.Fatalf("eval passes planned/actual = %d/%d, want 1/1", summary.Workload.PlannedEvalPasses, summary.Workload.ActualEvalPasses)
+	}
+}
+
+func TestEmbeddingTrainerFitContrastiveEvaluatesWithinEpoch(t *testing.T) {
+	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
+	trainSet := tinyEmbeddingContrastiveDataset()
+
+	summary, err := trainer.FitContrastive(trainSet, trainSet, EmbeddingTrainRunConfig{
+		Epochs:         1,
+		BatchSize:      2,
+		Shuffle:        false,
+		EvalEveryEpoch: 99,
+		EvalEverySteps: 1,
+		SelectMetric:   "mrr",
+		RestoreBest:    true,
+	})
+	if err != nil {
+		t.Fatalf("fit contrastive: %v", err)
+	}
+	if summary.Workload.PlannedEvalPasses != 2 || summary.Workload.ActualEvalPasses != 2 {
+		t.Fatalf("eval passes planned/actual = %d/%d, want 2/2", summary.Workload.PlannedEvalPasses, summary.Workload.ActualEvalPasses)
+	}
+	if summary.BestEval == nil || summary.FinalEval == nil {
+		t.Fatal("expected best and final eval metrics")
+	}
+	if summary.BestStep == 0 {
+		t.Fatal("expected step-level best checkpoint")
+	}
+	if !summary.RestoredBest {
+		t.Fatal("expected restore-best to use step-level checkpoint")
+	}
+}
+
 func TestBucketContrastiveOrderByLengthSortsWithinWindows(t *testing.T) {
 	trainSet := []EmbeddingContrastiveExample{
 		{QueryTokens: make([]int32, 8), PositiveTokens: make([]int32, 1)},
@@ -476,6 +531,27 @@ func TestEmbeddingTrainerEvaluateContrastiveMatchesExpandedPairs(t *testing.T) {
 	if got.NegativeCount != want.NegativeCount {
 		t.Fatalf("negative count = %d, want %d", got.NegativeCount, want.NegativeCount)
 	}
+}
+
+func TestEvaluateContrastiveEncodingsTracksRankingMetrics(t *testing.T) {
+	queries := []*embeddingEncodedSequence{
+		{pooled: []float32{1, 0, 0}},
+		{pooled: []float32{0, 1, 0}},
+		{pooled: []float32{0, 0, 1}},
+	}
+	positives := []*embeddingEncodedSequence{
+		{pooled: []float32{0, 1, 0}},
+		{pooled: []float32{1, 0, 0}},
+		{pooled: []float32{0, 0, 1}},
+	}
+
+	got := evaluateContrastiveEncodings(queries, positives, EmbeddingTrainConfig{})
+
+	assertClose(t, got.Top1Accuracy, 1.0/3.0, 0.000001)
+	assertClose(t, got.Top5Accuracy, 1, 0.000001)
+	assertClose(t, got.Top10Accuracy, 1, 0.000001)
+	assertClose(t, got.MeanReciprocalRank, 2.0/3.0, 0.000001)
+	assertClose(t, got.MeanPositiveRank, 5.0/3.0, 0.000001)
 }
 
 func TestEmbeddingTrainerTrainContrastiveStepMatchesExpandedPairStep(t *testing.T) {

@@ -40,17 +40,20 @@ type EmbeddingTrainMetrics struct {
 
 // EmbeddingEvalMetrics summarizes retrieval-oriented quality on pairwise eval data.
 type EmbeddingEvalMetrics struct {
-	Loss              float32
-	AverageScore      float32
-	PositiveMeanScore float32
-	NegativeMeanScore float32
-	PairAccuracy      float32
-	ScoreMargin       float32
-	Top1Accuracy      float32
-	MeanPositiveRank  float32
-	PairCount         int
-	PositiveCount     int
-	NegativeCount     int
+	Loss               float32
+	AverageScore       float32
+	PositiveMeanScore  float32
+	NegativeMeanScore  float32
+	PairAccuracy       float32
+	ScoreMargin        float32
+	Top1Accuracy       float32
+	Top5Accuracy       float32
+	Top10Accuracy      float32
+	MeanReciprocalRank float32
+	MeanPositiveRank   float32
+	PairCount          int
+	PositiveCount      int
+	NegativeCount      int
 }
 
 // EmbeddingForwardResidencyStats summarizes trainer-level bind suppression plus backend prep activity.
@@ -1855,6 +1858,13 @@ func evaluateContrastiveEncodings(queries, positives []*embeddingEncodedSequence
 					rank++
 				}
 			}
+			if rank <= 5 {
+				metrics.Top5Accuracy++
+			}
+			if rank <= 10 {
+				metrics.Top10Accuracy++
+			}
+			metrics.MeanReciprocalRank += 1 / float32(rank)
 			metrics.MeanPositiveRank += float32(rank)
 		}
 		if cfg.ContrastiveLoss == "infonce" {
@@ -1881,6 +1891,9 @@ func evaluateContrastiveEncodings(queries, positives []*embeddingEncodedSequence
 	if len(queries) > 0 {
 		invRows := float32(1) / float32(len(queries))
 		metrics.Top1Accuracy *= invRows
+		metrics.Top5Accuracy *= invRows
+		metrics.Top10Accuracy *= invRows
+		metrics.MeanReciprocalRank *= invRows
 		metrics.MeanPositiveRank *= invRows
 	}
 	metrics.ScoreMargin = metrics.PositiveMeanScore - metrics.NegativeMeanScore
