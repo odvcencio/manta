@@ -61,54 +61,56 @@ type EmbeddingForwardResidencyStats struct {
 
 // EmbeddingTrainer trains a pooled embedding model with quantization-aware forward passes.
 type EmbeddingTrainer struct {
-	module             *barr.Module
-	manifest           EmbeddingManifest
-	config             EmbeddingTrainConfig
-	memoryPlan         *MemoryPlan
-	step               int
-	tokenParam         barr.Param
-	attnQParam         barr.Param
-	attnKParam         barr.Param
-	attnVParam         barr.Param
-	attnOParam         barr.Param
-	hiddenParam        barr.Param
-	projParam          barr.Param
-	tokenEmbed         *backend.Tensor
-	attentionQuery     *backend.Tensor
-	attentionKey       *backend.Tensor
-	attentionValue     *backend.Tensor
-	attentionOutput    *backend.Tensor
-	hiddenProjection   *backend.Tensor
-	projection         *backend.Tensor
-	tokenMom1          *backend.Tensor
-	tokenMom2          *backend.Tensor
-	attnQMom1          *backend.Tensor
-	attnQMom2          *backend.Tensor
-	attnKMom1          *backend.Tensor
-	attnKMom2          *backend.Tensor
-	attnVMom1          *backend.Tensor
-	attnVMom2          *backend.Tensor
-	attnOMom1          *backend.Tensor
-	attnOMom2          *backend.Tensor
-	hiddenMom1         *backend.Tensor
-	hiddenMom2         *backend.Tensor
-	projMom1           *backend.Tensor
-	projMom2           *backend.Tensor
-	forwardMatMul      backend.MatMulAccelerator
-	forwardBackend     barr.BackendKind
-	optimizerAccel     backend.OptimizerAccelerator
-	optimizerBackend   barr.BackendKind
-	activationAccel    backend.ActivationAccelerator
-	activationBackend  barr.BackendKind
-	contrastiveAccel   backend.ContrastiveAccelerator
-	contrastiveBackend barr.BackendKind
-	sequenceBindingID  int
-	momentsDirty       bool
-	forwardCache       *embeddingForwardWeights
-	boundForward       embeddingForwardWeights
-	forwardDirty       bool
-	forwardNeedsBind   bool
-	forwardBindSkips   int64
+	module               *barr.Module
+	manifest             EmbeddingManifest
+	config               EmbeddingTrainConfig
+	memoryPlan           *MemoryPlan
+	step                 int
+	tokenParam           barr.Param
+	attnQParam           barr.Param
+	attnKParam           barr.Param
+	attnVParam           barr.Param
+	attnOParam           barr.Param
+	hiddenParam          barr.Param
+	projParam            barr.Param
+	tokenEmbed           *backend.Tensor
+	attentionQuery       *backend.Tensor
+	attentionKey         *backend.Tensor
+	attentionValue       *backend.Tensor
+	attentionOutput      *backend.Tensor
+	hiddenProjection     *backend.Tensor
+	projection           *backend.Tensor
+	tokenMom1            *backend.Tensor
+	tokenMom2            *backend.Tensor
+	attnQMom1            *backend.Tensor
+	attnQMom2            *backend.Tensor
+	attnKMom1            *backend.Tensor
+	attnKMom2            *backend.Tensor
+	attnVMom1            *backend.Tensor
+	attnVMom2            *backend.Tensor
+	attnOMom1            *backend.Tensor
+	attnOMom2            *backend.Tensor
+	hiddenMom1           *backend.Tensor
+	hiddenMom2           *backend.Tensor
+	projMom1             *backend.Tensor
+	projMom2             *backend.Tensor
+	forwardMatMul        backend.MatMulAccelerator
+	forwardBackend       barr.BackendKind
+	optimizerAccel       backend.OptimizerAccelerator
+	optimizerBackend     barr.BackendKind
+	activationAccel      backend.ActivationAccelerator
+	activationBackend    barr.BackendKind
+	activationAccelFull  bool
+	softmaxBackwardAccel bool
+	contrastiveAccel     backend.ContrastiveAccelerator
+	contrastiveBackend   barr.BackendKind
+	sequenceBindingID    int
+	momentsDirty         bool
+	forwardCache         *embeddingForwardWeights
+	boundForward         embeddingForwardWeights
+	forwardDirty         bool
+	forwardNeedsBind     bool
+	forwardBindSkips     int64
 }
 
 type embeddingSequenceState struct {
@@ -301,7 +303,7 @@ func NewEmbeddingTrainer(mod *barr.Module, manifest EmbeddingManifest, weights m
 		}
 		return nil, err
 	}
-	activationAccel, activationBackend, err := newTrainerActivationAccelerator()
+	activationAccel, activationBackend, activationMode, err := newTrainerActivationAccelerator()
 	if err != nil {
 		if accel != nil {
 			accel.Close()
@@ -325,46 +327,48 @@ func NewEmbeddingTrainer(mod *barr.Module, manifest EmbeddingManifest, weights m
 		return nil, err
 	}
 	return &EmbeddingTrainer{
-		module:             mod,
-		manifest:           manifest,
-		config:             cfg,
-		memoryPlan:         nil,
-		tokenParam:         tokenParam,
-		attnQParam:         attnQParam,
-		attnKParam:         attnKParam,
-		attnVParam:         attnVParam,
-		attnOParam:         attnOParam,
-		hiddenParam:        hiddenParam,
-		projParam:          projParam,
-		tokenEmbed:         tensorAsMasterF32(tokenEmbed),
-		attentionQuery:     tensorAsMasterF32(attentionQuery),
-		attentionKey:       tensorAsMasterF32(attentionKey),
-		attentionValue:     tensorAsMasterF32(attentionValue),
-		attentionOutput:    tensorAsMasterF32(attentionOutput),
-		hiddenProjection:   tensorAsMasterF32(hiddenProjection),
-		projection:         tensorAsMasterF32(projection),
-		tokenMom1:          zeroLikeMaster(tokenEmbed),
-		tokenMom2:          zeroLikeMaster(tokenEmbed),
-		attnQMom1:          zeroLikeMaster(attentionQuery),
-		attnQMom2:          zeroLikeMaster(attentionQuery),
-		attnKMom1:          zeroLikeMaster(attentionKey),
-		attnKMom2:          zeroLikeMaster(attentionKey),
-		attnVMom1:          zeroLikeMaster(attentionValue),
-		attnVMom2:          zeroLikeMaster(attentionValue),
-		attnOMom1:          zeroLikeMaster(attentionOutput),
-		attnOMom2:          zeroLikeMaster(attentionOutput),
-		hiddenMom1:         zeroLikeMaster(hiddenProjection),
-		hiddenMom2:         zeroLikeMaster(hiddenProjection),
-		projMom1:           zeroLikeMaster(projection),
-		projMom2:           zeroLikeMaster(projection),
-		forwardMatMul:      accel,
-		forwardBackend:     accelBackend,
-		optimizerAccel:     optimizerAccel,
-		optimizerBackend:   optimizerBackend,
-		activationAccel:    activationAccel,
-		activationBackend:  activationBackend,
-		contrastiveAccel:   contrastiveAccel,
-		contrastiveBackend: contrastiveBackend,
+		module:               mod,
+		manifest:             manifest,
+		config:               cfg,
+		memoryPlan:           nil,
+		tokenParam:           tokenParam,
+		attnQParam:           attnQParam,
+		attnKParam:           attnKParam,
+		attnVParam:           attnVParam,
+		attnOParam:           attnOParam,
+		hiddenParam:          hiddenParam,
+		projParam:            projParam,
+		tokenEmbed:           tensorAsMasterF32(tokenEmbed),
+		attentionQuery:       tensorAsMasterF32(attentionQuery),
+		attentionKey:         tensorAsMasterF32(attentionKey),
+		attentionValue:       tensorAsMasterF32(attentionValue),
+		attentionOutput:      tensorAsMasterF32(attentionOutput),
+		hiddenProjection:     tensorAsMasterF32(hiddenProjection),
+		projection:           tensorAsMasterF32(projection),
+		tokenMom1:            zeroLikeMaster(tokenEmbed),
+		tokenMom2:            zeroLikeMaster(tokenEmbed),
+		attnQMom1:            zeroLikeMaster(attentionQuery),
+		attnQMom2:            zeroLikeMaster(attentionQuery),
+		attnKMom1:            zeroLikeMaster(attentionKey),
+		attnKMom2:            zeroLikeMaster(attentionKey),
+		attnVMom1:            zeroLikeMaster(attentionValue),
+		attnVMom2:            zeroLikeMaster(attentionValue),
+		attnOMom1:            zeroLikeMaster(attentionOutput),
+		attnOMom2:            zeroLikeMaster(attentionOutput),
+		hiddenMom1:           zeroLikeMaster(hiddenProjection),
+		hiddenMom2:           zeroLikeMaster(hiddenProjection),
+		projMom1:             zeroLikeMaster(projection),
+		projMom2:             zeroLikeMaster(projection),
+		forwardMatMul:        accel,
+		forwardBackend:       accelBackend,
+		optimizerAccel:       optimizerAccel,
+		optimizerBackend:     optimizerBackend,
+		activationAccel:      activationAccel,
+		activationBackend:    activationBackend,
+		activationAccelFull:  activationMode.fullBackward,
+		softmaxBackwardAccel: activationMode.softmaxBackward,
+		contrastiveAccel:     contrastiveAccel,
+		contrastiveBackend:   contrastiveBackend,
 	}, nil
 }
 
@@ -1428,7 +1432,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 			}
 			softmaxRowsInPlace(state.attnScores, seqLen, seqLen)
 			if captureBindings {
-				state.attnScoresBinding = t.bindSequenceTensor(state, "scores", tensorF32View([]int{seqLen, seqLen}, state.attnScores), true, true)
+				state.attnScoresBinding = t.bindSequenceTensor(state, "scores", tensorF32View([]int{seqLen, seqLen}, state.attnScores), true, t.softmaxBackwardAccelEnabled())
 			}
 		}
 		batchedMixed, batchedMixedOK := t.tryBatchedAttentionMixed(states, seqLen, d)
@@ -1476,7 +1480,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 						layerNormRow(state.hidden[base:base+d], state.attnResidual[base:base+d])
 					}
 					if captureBindings {
-						state.attnResidualBinding = t.bindSequenceTensor(state, "attn_residual", tensorF32View([]int{seqLen, d}, state.attnResidual), false, true)
+						state.attnResidualBinding = t.bindSequenceTensor(state, "attn_residual", tensorF32View([]int{seqLen, d}, state.attnResidual), false, t.fullActivationBackwardAccelEnabled())
 					}
 				} else {
 					copy(state.hidden, state.attnResidual)
@@ -1493,7 +1497,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 
 	for _, state := range states {
 		if captureBindings {
-			state.hiddenBinding = t.bindSequenceTensor(state, "hidden", tensorF32View([]int{seqLen, d}, state.hidden), true, t.attentionLayerNormEnabled())
+			state.hiddenBinding = t.bindSequenceTensor(state, "hidden", tensorF32View([]int{seqLen, d}, state.hidden), true, t.fullActivationBackwardAccelEnabled() && t.attentionLayerNormEnabled())
 		}
 	}
 
@@ -1505,7 +1509,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 		})
 		for _, state := range states {
 			if captureBindings {
-				state.ffnHiddenBinding = t.bindSequenceTensor(state, "ffn_hidden", tensorF32View([]int{seqLen, h}, state.ffnHidden), false, true)
+				state.ffnHiddenBinding = t.bindSequenceTensor(state, "ffn_hidden", tensorF32View([]int{seqLen, h}, state.ffnHidden), false, t.fullActivationBackwardAccelEnabled())
 			}
 			for i, value := range state.ffnHidden {
 				state.activated[i] = geluForward(value)
@@ -1534,8 +1538,8 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 						layerNormRow(state.projected[base:base+e], state.ffnResidual[base:base+e])
 					}
 					if captureBindings {
-						state.ffnResidualBinding = t.bindSequenceTensor(state, "ffn_residual", tensorF32View([]int{seqLen, e}, state.ffnResidual), false, true)
-						state.projectedBinding = t.bindSequenceTensor(state, "projected", tensorF32View([]int{seqLen, e}, state.projected), false, true)
+						state.ffnResidualBinding = t.bindSequenceTensor(state, "ffn_residual", tensorF32View([]int{seqLen, e}, state.ffnResidual), false, t.fullActivationBackwardAccelEnabled())
+						state.projectedBinding = t.bindSequenceTensor(state, "projected", tensorF32View([]int{seqLen, e}, state.projected), false, t.fullActivationBackwardAccelEnabled())
 					}
 				} else {
 					copy(state.projected, state.ffnResidual)
@@ -2202,7 +2206,7 @@ func (t *EmbeddingTrainer) encodeLayer(tokens, mask []int32, input []float32, at
 		}
 		softmaxRowsInPlace(state.attnScores, len(tokens), len(tokens))
 		if captureBindings {
-			state.attnScoresBinding = t.bindSequenceTensor(state, "scores", tensorF32View([]int{len(tokens), len(tokens)}, state.attnScores), true, true)
+			state.attnScoresBinding = t.bindSequenceTensor(state, "scores", tensorF32View([]int{len(tokens), len(tokens)}, state.attnScores), true, t.softmaxBackwardAccelEnabled())
 		}
 		if captureBindings {
 			mixed, matmulOK = t.tryTrainerMatMulBoundRight(state.attnScores, len(tokens), len(tokens), state.attnVBinding, tensorF32View([]int{len(tokens), d}, state.attnV), false, false)
@@ -2238,7 +2242,7 @@ func (t *EmbeddingTrainer) encodeLayer(tokens, mask []int32, input []float32, at
 					layerNormRow(state.hidden[base:base+d], state.attnResidual[base:base+d])
 				}
 				if captureBindings {
-					state.attnResidualBinding = t.bindSequenceTensor(state, "attn_residual", tensorF32View([]int{len(tokens), d}, state.attnResidual), false, true)
+					state.attnResidualBinding = t.bindSequenceTensor(state, "attn_residual", tensorF32View([]int{len(tokens), d}, state.attnResidual), false, t.fullActivationBackwardAccelEnabled())
 				}
 			} else {
 				copy(state.hidden, state.attnResidual)
@@ -2250,7 +2254,7 @@ func (t *EmbeddingTrainer) encodeLayer(tokens, mask []int32, input []float32, at
 		copy(state.hidden, state.input)
 	}
 	if captureBindings {
-		state.hiddenBinding = t.bindSequenceTensor(state, "hidden", tensorF32View([]int{len(tokens), d}, state.hidden), true, t.attentionLayerNormEnabled())
+		state.hiddenBinding = t.bindSequenceTensor(state, "hidden", tensorF32View([]int{len(tokens), d}, state.hidden), true, t.fullActivationBackwardAccelEnabled() && t.attentionLayerNormEnabled())
 	}
 	if hiddenProjection != nil {
 		ffnHidden, ok := t.tryForwardWeightMatMul(state.hidden, len(tokens), d, t.hiddenParam.Name, hiddenProjection, h)
@@ -2261,7 +2265,7 @@ func (t *EmbeddingTrainer) encodeLayer(tokens, mask []int32, input []float32, at
 			fillHostMatMul(state.hidden, len(tokens), d, hiddenData, h, state.ffnHidden)
 		}
 		if captureBindings {
-			state.ffnHiddenBinding = t.bindSequenceTensor(state, "ffn_hidden", tensorF32View([]int{len(tokens), h}, state.ffnHidden), false, true)
+			state.ffnHiddenBinding = t.bindSequenceTensor(state, "ffn_hidden", tensorF32View([]int{len(tokens), h}, state.ffnHidden), false, t.fullActivationBackwardAccelEnabled())
 		}
 		for i, value := range state.ffnHidden {
 			state.activated[i] = geluForward(value)
@@ -2290,8 +2294,8 @@ func (t *EmbeddingTrainer) encodeLayer(tokens, mask []int32, input []float32, at
 					layerNormRow(state.projected[base:base+e], state.ffnResidual[base:base+e])
 				}
 				if captureBindings {
-					state.ffnResidualBinding = t.bindSequenceTensor(state, "ffn_residual", tensorF32View([]int{len(tokens), e}, state.ffnResidual), false, true)
-					state.projectedBinding = t.bindSequenceTensor(state, "projected", tensorF32View([]int{len(tokens), e}, state.projected), false, true)
+					state.ffnResidualBinding = t.bindSequenceTensor(state, "ffn_residual", tensorF32View([]int{len(tokens), e}, state.ffnResidual), false, t.fullActivationBackwardAccelEnabled())
+					state.projectedBinding = t.bindSequenceTensor(state, "projected", tensorF32View([]int{len(tokens), e}, state.projected), false, t.fullActivationBackwardAccelEnabled())
 				}
 			} else {
 				copy(state.projected, state.ffnResidual)
@@ -3151,7 +3155,7 @@ func (t *EmbeddingTrainer) backpropProjectedFFNSequences(states []*embeddingSequ
 	gradOutputMatrices := make([][]float32, len(states))
 	gradActivatedPreMatrices := make([][]float32, len(states))
 	activatedMatrices := make([][]float32, len(states))
-	batchActivations := t != nil && t.activationAccel != nil
+	batchActivations := t.fullActivationBackwardAccelEnabled()
 	var (
 		projectedMatrices   [][]float32
 		ffnResidualMatrices [][]float32
@@ -3515,7 +3519,7 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 	gradAttnOutputs := make([][]float32, len(states))
 	gradResidualInputs := make([][]float32, len(states))
 	attnMixedMatrices := make([][]float32, len(states))
-	batchActivations := t != nil && t.activationAccel != nil
+	batchActivations := t.fullActivationBackwardAccelEnabled()
 	var (
 		attnHiddenMatrices   [][]float32
 		attnResidualMatrices [][]float32
@@ -4195,7 +4199,7 @@ func (t *EmbeddingTrainer) applyOptimizerUpdate(name string, tensor, mom1, mom2 
 }
 
 func (t *EmbeddingTrainer) tryGELUBackwardMul(gradOut, preAct []float32, rows, cols int, preActBinding string) ([]float32, bool) {
-	if t == nil || t.activationAccel == nil || rows == 0 || cols == 0 {
+	if !t.fullActivationBackwardAccelEnabled() || rows == 0 || cols == 0 {
 		return nil, false
 	}
 	gradTensor := tensorF32View([]int{rows, cols}, gradOut)
@@ -4222,7 +4226,7 @@ func (t *EmbeddingTrainer) tryGELUBackwardMul(gradOut, preAct []float32, rows, c
 }
 
 func (t *EmbeddingTrainer) trySoftmaxBackwardRows(gradOut, probs []float32, rows, cols int, probsBinding string) ([]float32, bool) {
-	if t == nil || t.activationAccel == nil || rows == 0 || cols == 0 {
+	if !t.softmaxBackwardAccelEnabled() || rows == 0 || cols == 0 {
 		return nil, false
 	}
 	gradTensor := tensorF32View([]int{rows, cols}, gradOut)
@@ -4249,7 +4253,7 @@ func (t *EmbeddingTrainer) trySoftmaxBackwardRows(gradOut, probs []float32, rows
 }
 
 func (t *EmbeddingTrainer) tryBatchedSoftmaxBackwardRows(gradOutMatrices, probsMatrices [][]float32, rows, cols int) ([][]float32, bool) {
-	if t == nil || t.activationAccel == nil || len(gradOutMatrices) == 0 || len(gradOutMatrices) != len(probsMatrices) || rows == 0 || cols == 0 {
+	if !t.softmaxBackwardAccelEnabled() || len(gradOutMatrices) == 0 || len(gradOutMatrices) != len(probsMatrices) || rows == 0 || cols == 0 {
 		return nil, false
 	}
 	perMatrix := rows * cols
@@ -4269,7 +4273,7 @@ func (t *EmbeddingTrainer) tryBatchedSoftmaxBackwardRows(gradOutMatrices, probsM
 }
 
 func (t *EmbeddingTrainer) tryBatchedGELUBackwardMul(gradOutMatrices, preActMatrices [][]float32, rows, cols int) ([][]float32, bool) {
-	if t == nil || t.activationAccel == nil || len(gradOutMatrices) == 0 || len(gradOutMatrices) != len(preActMatrices) || rows == 0 || cols == 0 {
+	if !t.fullActivationBackwardAccelEnabled() || len(gradOutMatrices) == 0 || len(gradOutMatrices) != len(preActMatrices) || rows == 0 || cols == 0 {
 		return nil, false
 	}
 	perMatrix := rows * cols
@@ -4289,7 +4293,7 @@ func (t *EmbeddingTrainer) tryBatchedGELUBackwardMul(gradOutMatrices, preActMatr
 }
 
 func (t *EmbeddingTrainer) tryBatchedLayerNormBackwardRows(gradOutMatrices, normalizedMatrices, preMatrices [][]float32, rows, cols int) ([][]float32, bool) {
-	if t == nil || t.activationAccel == nil || len(gradOutMatrices) == 0 || len(gradOutMatrices) != len(normalizedMatrices) || len(gradOutMatrices) != len(preMatrices) || rows == 0 || cols == 0 {
+	if !t.fullActivationBackwardAccelEnabled() || len(gradOutMatrices) == 0 || len(gradOutMatrices) != len(normalizedMatrices) || len(gradOutMatrices) != len(preMatrices) || rows == 0 || cols == 0 {
 		return nil, false
 	}
 	perMatrix := rows * cols
@@ -4313,7 +4317,7 @@ func (t *EmbeddingTrainer) tryBatchedLayerNormBackwardRows(gradOutMatrices, norm
 }
 
 func (t *EmbeddingTrainer) tryLayerNormBackwardRows(gradOut, normalized, pre []float32, rows, cols int, normalizedBinding, preBinding string) ([]float32, bool) {
-	if t == nil || t.activationAccel == nil || rows == 0 || cols == 0 {
+	if !t.fullActivationBackwardAccelEnabled() || rows == 0 || cols == 0 {
 		return nil, false
 	}
 	gradTensor := tensorF32View([]int{rows, cols}, gradOut)

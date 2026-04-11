@@ -187,3 +187,21 @@ throughput: elapsed=8.108s examples/s=568.33 pairs/s=549633.49 train_examples/s=
 accelerators: forward=cuda optimizer=cuda activation=cuda contrastive=cuda
 profile delta: matmul_bind_calls=30 matmul_runs=16464 matmul_run_upload_mb=4173.15 matmul_run_download_mb=2208.41 optimizer_updates=28 activation_calls=2568 contrastive_calls=4
 ```
+
+```bash
+BARR_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL=1
+```
+
+Enables only the attention softmax backward activation path while keeping GELU and layernorm backward on the host. This is a profiling seam, not a promoted default. On the same batch-1024 mini smoke it reduced activation dispatches to `642`, but still regressed because each call uploads grad/prob tensors and downloads the result without broader activation residency:
+
+```text
+throughput: elapsed=6.244s examples/s=737.99 pairs/s=713722.96 train_examples/s=689.45 train_pairs/s=706001.30 eval_examples/s=1689.85 eval_pairs/s=865203.52 optimizer_steps/s=0.67
+accelerators: forward=cuda optimizer=cuda activation=cuda contrastive=cuda
+profile delta: matmul_bind_calls=30 matmul_runs=13644 matmul_run_upload_mb=3727.56 matmul_run_download_mb=2000.00 optimizer_updates=28 activation_calls=642 contrastive_calls=4
+```
+
+```bash
+BARR_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL=1
+```
+
+Disables the softmax backward activation path even when the broader activation accelerator is enabled. Use it to isolate GELU/layernorm activation experiments from attention softmax experiments.

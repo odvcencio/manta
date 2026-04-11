@@ -1218,7 +1218,67 @@ func TestEmbeddingTrainerCheckpointSyncsResidentOptimizerMoments(t *testing.T) {
 	}
 }
 
+func TestTrainerActivationAccelModeFromEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     map[string]string
+		full    bool
+		softmax bool
+	}{
+		{name: "default disabled"},
+		{
+			name: "full enables all activation backward",
+			env: map[string]string{
+				"BARR_TRAIN_ENABLE_ACTIVATION_ACCEL": "1",
+			},
+			full:    true,
+			softmax: true,
+		},
+		{
+			name: "softmax only",
+			env: map[string]string{
+				"BARR_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL": "1",
+			},
+			softmax: true,
+		},
+		{
+			name: "global disable wins",
+			env: map[string]string{
+				"BARR_TRAIN_DISABLE_ACTIVATION_ACCEL":      "1",
+				"BARR_TRAIN_ENABLE_ACTIVATION_ACCEL":       "1",
+				"BARR_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL": "1",
+			},
+		},
+		{
+			name: "softmax disable can narrow full mode",
+			env: map[string]string{
+				"BARR_TRAIN_ENABLE_ACTIVATION_ACCEL":        "1",
+				"BARR_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL": "1",
+			},
+			full: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BARR_TRAIN_DISABLE_ACTIVATION_ACCEL", "")
+			t.Setenv("BARR_TRAIN_ENABLE_ACTIVATION_ACCEL", "")
+			t.Setenv("BARR_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL", "")
+			t.Setenv("BARR_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL", "")
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
+			got := trainerActivationAccelModeFromEnv()
+			if got.fullBackward != tc.full {
+				t.Fatalf("full backward = %v, want %v", got.fullBackward, tc.full)
+			}
+			if got.softmaxBackward != tc.softmax {
+				t.Fatalf("softmax backward = %v, want %v", got.softmaxBackward, tc.softmax)
+			}
+		})
+	}
+}
+
 func TestEmbeddingTrainerGELUBackwardAcceleratorMatchesHost(t *testing.T) {
+	t.Setenv("BARR_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
@@ -1243,9 +1303,16 @@ func TestEmbeddingTrainerGELUBackwardAcceleratorMatchesHost(t *testing.T) {
 }
 
 func TestEmbeddingTrainerSoftmaxBackwardAcceleratorMatchesHost(t *testing.T) {
+	t.Setenv("BARR_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
+	}
+	if trainer.activationAccelFull {
+		t.Fatal("softmax-only env unexpectedly enabled full activation backward")
+	}
+	if !trainer.softmaxBackwardAccel {
+		t.Fatal("softmax-only env did not enable softmax backward acceleration")
 	}
 	gradOut := []float32{
 		0.3, -0.1,
@@ -1264,9 +1331,13 @@ func TestEmbeddingTrainerSoftmaxBackwardAcceleratorMatchesHost(t *testing.T) {
 		backwardSoftmaxRow(want[row*2:(row+1)*2], gradOut[row*2:(row+1)*2], probs[row*2:(row+1)*2])
 	}
 	assertTensorClose(t, backend.NewTensorF32([]int{2, 2}, got), []int{2, 2}, want)
+	if _, ok := trainer.tryGELUBackwardMul(gradOut, probs, 2, 2, ""); ok {
+		t.Fatal("softmax-only env unexpectedly enabled gelu backward acceleration")
+	}
 }
 
 func TestEmbeddingTrainerLayerNormBackwardAcceleratorMatchesHost(t *testing.T) {
+	t.Setenv("BARR_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
