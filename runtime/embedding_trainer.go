@@ -1339,36 +1339,52 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 				state.attnKBinding = t.bindSequenceTensor(state, "k", tensorF32View([]int{seqLen, d}, state.attnK), true, false)
 				state.attnVBinding = t.bindSequenceTensor(state, "v", tensorF32View([]int{seqLen, d}, state.attnV), true, false)
 			}
-
-			kt := transpose2DData(state.attnK, seqLen, d)
-			var (
-				scores   []float32
-				mixed    []float32
-				matmulOK bool
-			)
-			if captureBindings {
-				scores, matmulOK = t.tryTrainerMatMulBoundRight(state.attnQ, seqLen, d, state.attnKBinding, tensorF32View([]int{seqLen, d}, state.attnK), false, true)
+		}
+		batchedScores, batchedScoresOK := t.tryBatchedAttentionScores(states, seqLen, d)
+		for i, state := range states {
+			if batchedScoresOK {
+				copy(state.attnScores, batchedScores[i])
 			} else {
-				scores, matmulOK = t.tryTrainerMatMul(state.attnQ, seqLen, d, state.attnK, seqLen, d, false, true)
-			}
-			if matmulOK {
-				copy(state.attnScores, scores)
-			} else {
-				fillHostMatMul(state.attnQ, seqLen, d, kt, seqLen, state.attnScores)
+				kt := transpose2DData(state.attnK, seqLen, d)
+				var (
+					scores   []float32
+					matmulOK bool
+				)
+				if captureBindings {
+					scores, matmulOK = t.tryTrainerMatMulBoundRight(state.attnQ, seqLen, d, state.attnKBinding, tensorF32View([]int{seqLen, d}, state.attnK), false, true)
+				} else {
+					scores, matmulOK = t.tryTrainerMatMul(state.attnQ, seqLen, d, state.attnK, seqLen, d, false, true)
+				}
+				if matmulOK {
+					copy(state.attnScores, scores)
+				} else {
+					fillHostMatMul(state.attnQ, seqLen, d, kt, seqLen, state.attnScores)
+				}
 			}
 			softmaxRowsInPlace(state.attnScores, seqLen, seqLen)
 			if captureBindings {
 				state.attnScoresBinding = t.bindSequenceTensor(state, "scores", tensorF32View([]int{seqLen, seqLen}, state.attnScores), true, true)
 			}
-			if captureBindings {
-				mixed, matmulOK = t.tryTrainerMatMulBoundRight(state.attnScores, seqLen, seqLen, state.attnVBinding, tensorF32View([]int{seqLen, d}, state.attnV), false, false)
+		}
+		batchedMixed, batchedMixedOK := t.tryBatchedAttentionMixed(states, seqLen, d)
+		for i, state := range states {
+			if batchedMixedOK {
+				copy(state.attnMixed, batchedMixed[i])
 			} else {
-				mixed, matmulOK = t.tryTrainerMatMul(state.attnScores, seqLen, seqLen, state.attnV, seqLen, d, false, false)
-			}
-			if matmulOK {
-				copy(state.attnMixed, mixed)
-			} else {
-				fillHostMatMul(state.attnScores, seqLen, seqLen, state.attnV, d, state.attnMixed)
+				var (
+					mixed    []float32
+					matmulOK bool
+				)
+				if captureBindings {
+					mixed, matmulOK = t.tryTrainerMatMulBoundRight(state.attnScores, seqLen, seqLen, state.attnVBinding, tensorF32View([]int{seqLen, d}, state.attnV), false, false)
+				} else {
+					mixed, matmulOK = t.tryTrainerMatMul(state.attnScores, seqLen, seqLen, state.attnV, seqLen, d, false, false)
+				}
+				if matmulOK {
+					copy(state.attnMixed, mixed)
+				} else {
+					fillHostMatMul(state.attnScores, seqLen, seqLen, state.attnV, d, state.attnMixed)
+				}
 			}
 			if captureBindings {
 				state.attnMixedBinding = t.bindSequenceTensor(state, "mixed", tensorF32View([]int{seqLen, d}, state.attnMixed), true, false)
@@ -1512,6 +1528,38 @@ func (t *EmbeddingTrainer) fillBatchedForwardWeightMatMul(states []*embeddingSeq
 		}
 		fillHostMatMul(left, rows, inner, rhsData, cols, out)
 	}
+}
+
+func (t *EmbeddingTrainer) tryBatchedAttentionScores(states []*embeddingSequenceState, seqLen, d int) ([][]float32, bool) {
+	if len(states) < 2 || seqLen == 0 || d == 0 {
+		return nil, false
+	}
+	queries := make([][]float32, len(states))
+	keys := make([][]float32, len(states))
+	for i, state := range states {
+		if state == nil || len(state.attnQ) != seqLen*d || len(state.attnK) != seqLen*d {
+			return nil, false
+		}
+		queries[i] = state.attnQ
+		keys[i] = transpose2DData(state.attnK, seqLen, d)
+	}
+	return t.tryTrainerBatchedMatMul(queries, seqLen, d, keys, d, seqLen)
+}
+
+func (t *EmbeddingTrainer) tryBatchedAttentionMixed(states []*embeddingSequenceState, seqLen, d int) ([][]float32, bool) {
+	if len(states) < 2 || seqLen == 0 || d == 0 {
+		return nil, false
+	}
+	scores := make([][]float32, len(states))
+	values := make([][]float32, len(states))
+	for i, state := range states {
+		if state == nil || len(state.attnScores) != seqLen*seqLen || len(state.attnV) != seqLen*d {
+			return nil, false
+		}
+		scores[i] = state.attnScores
+		values[i] = state.attnV
+	}
+	return t.tryTrainerBatchedMatMul(scores, seqLen, seqLen, values, seqLen, d)
 }
 
 func finalizeEncodedStatePooling(state *embeddingSequenceState, e int) error {
@@ -2266,6 +2314,47 @@ func (t *EmbeddingTrainer) tryTrainerMatMul(lhsData []float32, lhsRows, lhsCols 
 		return nil, false
 	}
 	return out, true
+}
+
+func (t *EmbeddingTrainer) tryTrainerBatchedMatMul(lhsMatrices [][]float32, lhsRows, lhsCols int, rhsMatrices [][]float32, rhsRows, rhsCols int) ([][]float32, bool) {
+	if t == nil || t.forwardMatMul == nil || len(lhsMatrices) == 0 || len(lhsMatrices) != len(rhsMatrices) || lhsRows == 0 || lhsCols == 0 || rhsRows == 0 || rhsCols == 0 || lhsCols != rhsRows {
+		return nil, false
+	}
+	batches := len(lhsMatrices)
+	lhsBatch := make([]float32, 0, batches*lhsRows*lhsCols)
+	rhsBatch := make([]float32, 0, batches*rhsRows*rhsCols)
+	for i := range lhsMatrices {
+		if len(lhsMatrices[i]) != lhsRows*lhsCols || len(rhsMatrices[i]) != rhsRows*rhsCols {
+			return nil, false
+		}
+		lhsBatch = append(lhsBatch, lhsMatrices[i]...)
+		rhsBatch = append(rhsBatch, rhsMatrices[i]...)
+	}
+	result, err := t.forwardMatMul.RunMatMul(
+		[]*backend.Tensor{
+			tensorF32View([]int{batches, lhsRows, lhsCols}, lhsBatch),
+			tensorF32View([]int{batches, rhsRows, rhsCols}, rhsBatch),
+		},
+		barr.ValueType{
+			Kind: barr.ValueTensor,
+			Tensor: &barr.TensorType{
+				DType: "f32",
+			},
+		},
+	)
+	if err != nil || len(result.Outputs) != 1 || result.Outputs[0] == nil {
+		return nil, false
+	}
+	perMatrix := lhsRows * rhsCols
+	out := result.Outputs[0].F32
+	if len(out) != batches*perMatrix {
+		return nil, false
+	}
+	split := make([][]float32, batches)
+	for i := range split {
+		split[i] = out[i*perMatrix : (i+1)*perMatrix]
+	}
+	return split, true
 }
 
 func (t *EmbeddingTrainer) tryTrainerMatMulBoundLeft(lhsName string, lhs, rhs *backend.Tensor, transposeLeft, transposeRight bool) ([]float32, bool) {

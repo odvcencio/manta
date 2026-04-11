@@ -51,12 +51,12 @@ The current reference smoke uses:
 Latest local CUDA result:
 
 ```text
-throughput: elapsed=30.298s pairs/s=43261.36 train_pairs/s=35856.58 eval_pairs/s=248697.34
+throughput: elapsed=25.236s pairs/s=51937.87 train_pairs/s=42594.29 eval_pairs/s=423845.92
 accelerators: forward=cuda optimizer=cuda activation=host contrastive=cuda
-profile delta: matmul_bind_calls=131174 matmul_runs=140056 matmul_run_upload_mb=7534.34 matmul_run_download_mb=5159.03 optimizer_updates=112 activation_calls=0 contrastive_calls=16
+profile delta: matmul_bind_calls=131174 matmul_runs=107552 matmul_run_upload_mb=7930.39 matmul_run_download_mb=5159.03 optimizer_updates=112 activation_calls=0 contrastive_calls=16
 ```
 
-This is the promoted default path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, and exact-length grouped contrastive forward for variable-length text.
+This is the promoted default path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, and strided-batched cuBLAS for grouped attention matmuls.
 
 ## Recent Perf Delta
 
@@ -68,16 +68,17 @@ The training hot path moved as follows on the same mini smoke:
 | CUDA scratch reuse | `22933.16` | `409600` |
 | Grouped batched backward default | `33328.94` | `237568` |
 | Exact-length grouped forward default | `35856.58` | `140056` |
+| Strided-batched grouped attention | `42594.29` | `107552` |
 
-The main wins came from grouping real text batches by sequence length during backward, coalescing parameter-gradient matmuls into taller `X^T*dY` operations, and grouping contrastive forward sequences by exact token length inside each original batch. The forward grouping keeps the full in-batch negative set intact and avoids padding, so attention math does not change.
+The main wins came from grouping real text batches by sequence length during backward, coalescing parameter-gradient matmuls into taller `X^T*dY` operations, grouping contrastive forward sequences by exact token length inside each original batch, and promoting rank-3 x rank-3 CUDA matmul to `cublasSgemmStridedBatched`. The forward grouping keeps the full in-batch negative set intact and avoids padding, so attention math does not change.
 
 ## How Much Faster Can It Get?
 
 The current profile still shows the next bottleneck is backend transfer/orchestration, not raw math:
 
 ```text
-MatMulRuns ~= 140056 per 4096-example mini smoke
-RunUploadedBytes ~= 7.53 GiB
+MatMulRuns ~= 107552 per 4096-example mini smoke
+RunUploadedBytes ~= 7.93 GiB
 RunDownloadedBytes ~= 5.16 GiB
 ```
 

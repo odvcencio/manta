@@ -165,6 +165,53 @@ func TestCUDABoundQuantizedMatrixMatchesHostFakeQuantization(t *testing.T) {
 	}
 }
 
+func TestCUDAStridedBatchedMatMulMatchesHost(t *testing.T) {
+	accelAny, err := NewMatMulAccelerator()
+	if err != nil {
+		t.Fatalf("new matmul accelerator: %v", err)
+	}
+	if accelAny == nil {
+		t.Skip("no cuda matmul accelerator available")
+	}
+	defer accelAny.Close()
+
+	lhs := backend.NewTensorF32([]int{2, 2, 3}, []float32{
+		1, 2, 3,
+		4, 5, 6,
+		7, 8, 9,
+		10, 11, 12,
+	})
+	rhs := backend.NewTensorF32([]int{2, 3, 2}, []float32{
+		1, 0,
+		0, 1,
+		1, 1,
+		2, 0,
+		0, 2,
+		1, -1,
+	})
+	result, err := accelAny.RunMatMul([]*backend.Tensor{lhs, rhs}, barr.ValueType{
+		Kind: barr.ValueTensor,
+		Tensor: &barr.TensorType{
+			DType: "f32",
+		},
+	})
+	if err != nil {
+		t.Fatalf("run strided batched matmul: %v", err)
+	}
+	if len(result.Outputs) != 1 || result.Outputs[0] == nil {
+		t.Fatalf("output count = %d, want 1", len(result.Outputs))
+	}
+	if result.Metadata["launch_api"] != "cublasSgemmStridedBatched" {
+		t.Fatalf("launch_api = %v, want cublasSgemmStridedBatched", result.Metadata["launch_api"])
+	}
+	assertTensorClose(t, result.Outputs[0], []int{2, 2, 2}, []float32{
+		4, 5,
+		10, 11,
+		23, 7,
+		32, 10,
+	})
+}
+
 func assertTensorClose(t *testing.T, tensor *backend.Tensor, wantShape []int, want []float32) {
 	t.Helper()
 	if tensor == nil {

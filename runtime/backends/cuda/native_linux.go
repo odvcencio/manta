@@ -481,6 +481,63 @@ static int barrCudaMatMulCublas(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdevicept
 	return 0;
 }
 
+static int barrCudaMatMulCublasStridedBatched(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int batches, int lhsRows, int lhsCols, int rhsRows, int rhsCols, char** err) {
+	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
+	if (cuRes != CUDA_SUCCESS) {
+		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
+		return 1;
+	}
+	if (batches <= 0 || lhsRows <= 0 || lhsCols <= 0 || rhsRows <= 0 || rhsCols <= 0) {
+		*err = barr_dup_format("cublasSgemmStridedBatched", "invalid shape");
+		return 1;
+	}
+	if (lhsCols != rhsRows) {
+		*err = barr_dup_format("cublasSgemmStridedBatched", "shape mismatch");
+		return 1;
+	}
+	const float alpha = 1.0f;
+	const float beta = 0.0f;
+	const float* lhsPtr = (const float*)(uintptr_t)lhs;
+	const float* rhsPtr = (const float*)(uintptr_t)rhs;
+	float* outPtr = (float*)(uintptr_t)out0;
+	int rows = lhsRows;
+	int inner = lhsCols;
+	int cols = rhsCols;
+	long long int lhsStride = (long long int)lhsRows * (long long int)lhsCols;
+	long long int rhsStride = (long long int)rhsRows * (long long int)rhsCols;
+	long long int outStride = (long long int)rows * (long long int)cols;
+	cublasStatus_t blasRes = cublasSgemmStridedBatched(
+		rt->blas,
+		CUBLAS_OP_N,
+		CUBLAS_OP_N,
+		cols,
+		rows,
+		inner,
+		&alpha,
+		rhsPtr,
+		rhsCols,
+		rhsStride,
+		lhsPtr,
+		lhsCols,
+		lhsStride,
+		&beta,
+		outPtr,
+		cols,
+		outStride,
+		batches
+	);
+	if (blasRes != CUBLAS_STATUS_SUCCESS) {
+		*err = barr_dup_cublas_error("cublasSgemmStridedBatched", blasRes);
+		return 1;
+	}
+	cuRes = cuCtxSynchronize();
+	if (cuRes != CUDA_SUCCESS) {
+		*err = barr_dup_cu_error("cuCtxSynchronize", cuRes);
+		return 1;
+	}
+	return 0;
+}
+
 static void barrCudaFreeCString(char* s) {
 	if (s != NULL) {
 		free(s);
@@ -1202,6 +1259,14 @@ func (rt *deviceRuntime) matMulCublas(lhs, rhs, out0 C.CUdeviceptr, lhsRows, lhs
 	return nil
 }
 
+func (rt *deviceRuntime) matMulCublasStridedBatched(lhs, rhs, out0 C.CUdeviceptr, batches, lhsRows, lhsCols, rhsRows, rhsCols C.int) error {
+	var errStr *C.char
+	if C.barrCudaMatMulCublasStridedBatched(rt.ptr, lhs, rhs, out0, batches, lhsRows, lhsCols, rhsRows, rhsCols, &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
 func cStringValue(value *C.char) string {
 	if value == nil {
 		return ""
@@ -1451,6 +1516,7 @@ func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, output
 	runUploadedBytes := int64((len(inputs[0].F32) + len(inputs[1].F32)) * 4)
 	runDownloadedBytes := int64(batches * rows * cols * 4)
 	compiled := cudaBuiltinMatMulCompiledKernel()
+	launchAPI := "cublasSgemm"
 	outHost := make([]float32, batches*rows*cols)
 	if !rhsBatched {
 		lhsBuf, err := rt.uploadMatMulScratchFloat32("matmul_lhs", inputs[0].F32)
@@ -1478,36 +1544,30 @@ func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, output
 			return backend.StepDispatchResult{}, err
 		}
 	} else {
+		if transposeLeft || transposeRight {
+			return backend.StepDispatchResult{}, fmt.Errorf("cuda strided-batched matmul does not support transpose")
+		}
 		lhsRows, lhsCols := rows, inner
 		rhsRows, rhsCols := inner, cols
-		if transposeLeft || transposeRight {
-			lhsRows, lhsCols = matrixShape(inputs[0])
-			rhsRows, rhsCols = matrixShape(inputs[1])
+		lhsBuf, err := rt.uploadMatMulScratchFloat32("matmul_lhs", inputs[0].F32)
+		if err != nil {
+			return backend.StepDispatchResult{}, err
 		}
-		lhsStride := lhsRows * lhsCols
-		rhsStride := rhsRows * rhsCols
-		outStride := rows * cols
-		for b := 0; b < batches; b++ {
-			lhsBuf, err := rt.uploadMatMulScratchFloat32("matmul_lhs", inputs[0].F32[b*lhsStride:(b+1)*lhsStride])
-			if err != nil {
-				return backend.StepDispatchResult{}, err
-			}
-			rhsBuf, err := rt.uploadMatMulScratchFloat32("matmul_rhs", inputs[1].F32[b*rhsStride:(b+1)*rhsStride])
-			if err != nil {
-				return backend.StepDispatchResult{}, err
-			}
-			outBuf, err := rt.matMulScratchFloat32("matmul_out", outStride)
-			if err != nil {
-				return backend.StepDispatchResult{}, err
-			}
-			runErr := rt.matMulCublas(lhsBuf, rhsBuf, outBuf, C.int(lhsRows), C.int(lhsCols), C.int(rhsRows), C.int(rhsCols), transposeLeft, transposeRight)
-			if runErr == nil {
-				runErr = rt.downloadFloat32(outHost[b*outStride:(b+1)*outStride], outBuf)
-			}
-			if runErr != nil {
-				return backend.StepDispatchResult{}, runErr
-			}
+		rhsBuf, err := rt.uploadMatMulScratchFloat32("matmul_rhs", inputs[1].F32)
+		if err != nil {
+			return backend.StepDispatchResult{}, err
 		}
+		outBuf, err := rt.matMulScratchFloat32("matmul_out", len(outHost))
+		if err != nil {
+			return backend.StepDispatchResult{}, err
+		}
+		if err := rt.matMulCublasStridedBatched(lhsBuf, rhsBuf, outBuf, C.int(batches), C.int(lhsRows), C.int(lhsCols), C.int(rhsRows), C.int(rhsCols)); err != nil {
+			return backend.StepDispatchResult{}, err
+		}
+		if err := rt.downloadFloat32(outHost, outBuf); err != nil {
+			return backend.StepDispatchResult{}, err
+		}
+		launchAPI = "cublasSgemmStridedBatched"
 	}
 	rt.recordMatMulRun(runStart, runUploadedBytes, runDownloadedBytes, false, false)
 	return backend.StepDispatchResult{
@@ -1518,7 +1578,7 @@ func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, output
 			"dispatch_mode":    "backend_native",
 			"execution_mode":   "cuda_device",
 			"device_execution": true,
-			"launch_api":       "cublasSgemm",
+			"launch_api":       launchAPI,
 			"launch_compiler":  "cublas",
 			"backend_library":  "cublas",
 			"transpose_left":   transposeLeft,

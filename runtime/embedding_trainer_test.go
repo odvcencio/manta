@@ -15,6 +15,8 @@ import (
 
 type countingMatMulAccelerator struct {
 	bindCalls         int
+	runCalls          int
+	maxRunBatches     int
 	boundRightRuns    int
 	maxBoundRightRows int
 	bound             map[string]*backend.Tensor
@@ -22,6 +24,19 @@ type countingMatMulAccelerator struct {
 
 func (a *countingMatMulAccelerator) Backend() barr.BackendKind { return barr.BackendCUDA }
 func (a *countingMatMulAccelerator) RunMatMul(inputs []*backend.Tensor, outputType barr.ValueType) (backend.StepDispatchResult, error) {
+	a.runCalls++
+	if len(inputs) == 2 && len(inputs[0].Shape) == 3 && len(inputs[1].Shape) == 3 {
+		lhs := inputs[0]
+		rhs := inputs[1]
+		if lhs.Shape[0] == rhs.Shape[0] && lhs.Shape[2] == rhs.Shape[1] {
+			if lhs.Shape[0] > a.maxRunBatches {
+				a.maxRunBatches = lhs.Shape[0]
+			}
+			return backend.StepDispatchResult{Outputs: []*backend.Tensor{
+				backend.NewTensorF32([]int{lhs.Shape[0], lhs.Shape[1], rhs.Shape[2]}, make([]float32, lhs.Shape[0]*lhs.Shape[1]*rhs.Shape[2])),
+			}}, nil
+		}
+	}
 	return backend.StepDispatchResult{}, nil
 }
 func (a *countingMatMulAccelerator) RunMatMulWithTranspose(inputs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
@@ -53,7 +68,7 @@ func (a *countingMatMulAccelerator) Stats() backend.MatMulAcceleratorStats {
 	return backend.MatMulAcceleratorStats{
 		BindCalls:       int64(a.bindCalls),
 		BoundMatrices:   int64(len(a.bound)),
-		RunCalls:        int64(a.boundRightRuns),
+		RunCalls:        int64(a.boundRightRuns + a.runCalls),
 		BoundRightCalls: int64(a.boundRightRuns),
 	}
 }
@@ -1392,6 +1407,9 @@ func TestEmbeddingTrainerBatchedForwardGroupsVariableSequenceLengths(t *testing.
 	}
 	if fake.maxBoundRightRows <= 2 {
 		t.Fatalf("max bound-right lhs rows = %d, want length-grouped rows above any single sequence", fake.maxBoundRightRows)
+	}
+	if fake.runCalls == 0 || fake.maxRunBatches < 2 {
+		t.Fatalf("attention matmul run calls=%d max batches=%d, want batched attention dispatch", fake.runCalls, fake.maxRunBatches)
 	}
 }
 
