@@ -97,10 +97,10 @@ BARR_TRAIN_DISABLE_BATCHED_BACKWARD=1
 Disables the promoted grouped batched-backward path and returns to per-sequence backward.
 
 ```bash
-BARR_TRAIN_BATCHED_FORWARD=1
+BARR_TRAIN_DISABLE_BATCHED_FORWARD=1
 ```
 
-Enables the experimental batched forward path. It is currently gated because it is effectively tied with the default path on the reference smoke.
+Disables the promoted batched forward path and returns to per-sequence forward encoding. Batched forward is enabled by default because the larger default-model run underfeeds the GPU unless forward work is coalesced aggressively.
 
 ```bash
 BARR_TRAIN_ENABLE_ACTIVATION_ACCEL=1

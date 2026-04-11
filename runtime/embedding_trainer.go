@@ -1208,7 +1208,15 @@ func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []Embed
 }
 
 func batchedContrastiveForwardEnabled() bool {
-	return trainEnvFlagEnabled("BARR_TRAIN_BATCHED_FORWARD")
+	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_BATCHED_FORWARD") {
+		return false
+	}
+	switch os.Getenv("BARR_TRAIN_BATCHED_FORWARD") {
+	case "0", "false", "FALSE", "no", "NO":
+		return false
+	default:
+		return true
+	}
 }
 
 func sequenceMatMulBindingsEnabled() bool {
