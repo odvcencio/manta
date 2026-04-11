@@ -23,6 +23,27 @@ type EmbeddingTrainRunConfig struct {
 	LearningRate          float32
 	ContrastiveLoss       string
 	Temperature           float32
+	ProgressEverySteps    int
+	Progress              EmbeddingTrainProgressFunc
+}
+
+// EmbeddingTrainProgressFunc receives incremental training progress updates.
+type EmbeddingTrainProgressFunc func(EmbeddingTrainProgress)
+
+// EmbeddingTrainProgress reports one completed optimizer step.
+type EmbeddingTrainProgress struct {
+	Epoch              int
+	Batch              int
+	Batches            int
+	Step               int
+	BatchExamples      int
+	BatchPairs         int64
+	EpochTrainExamples int64
+	EpochTrainPairs    int64
+	PlannedEpochPairs  int64
+	Loss               float32
+	AverageScore       float32
+	Elapsed            time.Duration
 }
 
 // EmbeddingTrainEpochSummary records one epoch of training progress.
@@ -104,6 +125,9 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 	if cfg.EarlyStoppingPatience < 0 {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("early_stopping_patience must be non-negative")
 	}
+	if cfg.ProgressEverySteps < 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("progress_every_steps must be non-negative")
+	}
 	if !validTrainSelectionMetric(cfg.SelectMetric) {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("unsupported select_metric %q", cfg.SelectMetric)
 	}
@@ -138,7 +162,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 		}
 
 		trainStart := time.Now()
-		trainMetrics, err := t.runEpoch(trainSet, indices, cfg.BatchSize)
+		trainMetrics, err := t.runEpoch(trainSet, indices, cfg.BatchSize, cfg, epoch, runStart)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d: %w", epoch, err)
 		}
@@ -261,6 +285,9 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 	if cfg.EarlyStoppingPatience < 0 {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("early_stopping_patience must be non-negative")
 	}
+	if cfg.ProgressEverySteps < 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("progress_every_steps must be non-negative")
+	}
 	if !validTrainSelectionMetric(cfg.SelectMetric) {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("unsupported select_metric %q", cfg.SelectMetric)
 	}
@@ -296,7 +323,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 			bucketContrastiveOrderByLength(trainSet, indices, cfg.BatchSize)
 		}
 		trainStart := time.Now()
-		trainMetrics, err := t.runContrastiveEpoch(trainSet, indices, cfg.BatchSize)
+		trainMetrics, err := t.runContrastiveEpoch(trainSet, indices, cfg.BatchSize, cfg, epoch, runStart)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d: %w", epoch, err)
 		}
@@ -526,10 +553,12 @@ func workloadEvalMode(evalExamples int, mode string) string {
 	return mode
 }
 
-func (t *EmbeddingTrainer) runEpoch(trainSet []EmbeddingPairExample, order []int, batchSize int) (EmbeddingTrainMetrics, error) {
+func (t *EmbeddingTrainer) runEpoch(trainSet []EmbeddingPairExample, order []int, batchSize int, cfg EmbeddingTrainRunConfig, epoch int, runStart time.Time) (EmbeddingTrainMetrics, error) {
 	totalLoss := float32(0)
 	totalScore := float32(0)
 	totalExamples := 0
+	batchIndex := 0
+	totalBatches := batchCount(len(order), batchSize, 1)
 	for start := 0; start < len(order); start += batchSize {
 		end := start + batchSize
 		if end > len(order) {
@@ -546,6 +575,21 @@ func (t *EmbeddingTrainer) runEpoch(trainSet []EmbeddingPairExample, order []int
 		totalLoss += metrics.Loss * float32(metrics.BatchSize)
 		totalScore += metrics.AverageScore * float32(metrics.BatchSize)
 		totalExamples += metrics.BatchSize
+		batchIndex++
+		maybeReportTrainProgress(cfg, EmbeddingTrainProgress{
+			Epoch:              epoch,
+			Batch:              batchIndex,
+			Batches:            totalBatches,
+			Step:               t.step,
+			BatchExamples:      metrics.BatchSize,
+			BatchPairs:         int64(metrics.BatchSize),
+			EpochTrainExamples: int64(totalExamples),
+			EpochTrainPairs:    int64(totalExamples),
+			PlannedEpochPairs:  int64(len(order)),
+			Loss:               metrics.Loss,
+			AverageScore:       metrics.AverageScore,
+			Elapsed:            time.Since(runStart),
+		})
 	}
 	if totalExamples == 0 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("training epoch has no examples")
@@ -558,10 +602,14 @@ func (t *EmbeddingTrainer) runEpoch(trainSet []EmbeddingPairExample, order []int
 	}, nil
 }
 
-func (t *EmbeddingTrainer) runContrastiveEpoch(trainSet []EmbeddingContrastiveExample, order []int, batchSize int) (EmbeddingTrainMetrics, error) {
+func (t *EmbeddingTrainer) runContrastiveEpoch(trainSet []EmbeddingContrastiveExample, order []int, batchSize int, cfg EmbeddingTrainRunConfig, epoch int, runStart time.Time) (EmbeddingTrainMetrics, error) {
 	totalLoss := float32(0)
 	totalScore := float32(0)
 	totalExamples := 0
+	totalTrainExamples := 0
+	var totalPairs int64
+	batchIndex := 0
+	totalBatches, plannedEpochPairs := contrastiveBatchWork(len(order), batchSize)
 	for start := 0; start < len(order); start += batchSize {
 		end := start + batchSize
 		if end > len(order) {
@@ -581,6 +629,23 @@ func (t *EmbeddingTrainer) runContrastiveEpoch(trainSet []EmbeddingContrastiveEx
 		totalLoss += metrics.Loss * float32(metrics.BatchSize)
 		totalScore += metrics.AverageScore * float32(metrics.BatchSize)
 		totalExamples += metrics.BatchSize
+		totalTrainExamples += end - start
+		totalPairs += int64(metrics.BatchSize)
+		batchIndex++
+		maybeReportTrainProgress(cfg, EmbeddingTrainProgress{
+			Epoch:              epoch,
+			Batch:              batchIndex,
+			Batches:            totalBatches,
+			Step:               t.step,
+			BatchExamples:      end - start,
+			BatchPairs:         int64(metrics.BatchSize),
+			EpochTrainExamples: int64(totalTrainExamples),
+			EpochTrainPairs:    totalPairs,
+			PlannedEpochPairs:  plannedEpochPairs,
+			Loss:               metrics.Loss,
+			AverageScore:       metrics.AverageScore,
+			Elapsed:            time.Since(runStart),
+		})
 	}
 	if totalExamples == 0 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("training epoch has no usable contrastive batches")
@@ -600,6 +665,16 @@ func (t *EmbeddingTrainer) restoreCheckpoint(checkpoint EmbeddingTrainCheckpoint
 	}
 	*t = *restored
 	return nil
+}
+
+func maybeReportTrainProgress(cfg EmbeddingTrainRunConfig, progress EmbeddingTrainProgress) {
+	if cfg.Progress == nil || cfg.ProgressEverySteps <= 0 || progress.Batch <= 0 {
+		return
+	}
+	if progress.Batch%cfg.ProgressEverySteps != 0 && progress.Batch != progress.Batches {
+		return
+	}
+	cfg.Progress(progress)
 }
 
 func bucketContrastiveOrderByLength(trainSet []EmbeddingContrastiveExample, order []int, batchSize int) {

@@ -136,6 +136,9 @@ func TestEmbeddingTrainerFitRejectsInvalidRunConfig(t *testing.T) {
 	if _, err := trainer.Fit(trainSet, nil, EmbeddingTrainRunConfig{Epochs: 1, BatchSize: -1}); err == nil {
 		t.Fatal("expected batch size error")
 	}
+	if _, err := trainer.Fit(trainSet, nil, EmbeddingTrainRunConfig{Epochs: 1, BatchSize: 2, ProgressEverySteps: -1}); err == nil {
+		t.Fatal("expected progress interval error")
+	}
 }
 
 func TestEmbeddingTrainerFitContrastiveImprovesEval(t *testing.T) {
@@ -226,6 +229,44 @@ func TestEmbeddingTrainerFitContrastiveTracksWorkloadAndTiming(t *testing.T) {
 	}
 	if summary.Elapsed+time.Millisecond < summary.TrainDuration+summary.EvalDuration {
 		t.Fatalf("elapsed = %s, train+eval = %s, want elapsed >= train+eval", summary.Elapsed, summary.TrainDuration+summary.EvalDuration)
+	}
+}
+
+func TestEmbeddingTrainerFitContrastiveReportsProgress(t *testing.T) {
+	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
+	trainSet := tinyEmbeddingContrastiveDataset()
+	var reports []EmbeddingTrainProgress
+
+	summary, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:             1,
+		BatchSize:          2,
+		Shuffle:            false,
+		ProgressEverySteps: 1,
+		Progress: func(progress EmbeddingTrainProgress) {
+			reports = append(reports, progress)
+		},
+	})
+	if err != nil {
+		t.Fatalf("fit contrastive: %v", err)
+	}
+	if len(reports) != summary.StepsRun {
+		t.Fatalf("progress reports = %d, want %d", len(reports), summary.StepsRun)
+	}
+	got := reports[0]
+	if got.Epoch != 1 || got.Batch != 1 || got.Batches != 1 {
+		t.Fatalf("progress position = epoch %d batch %d/%d, want 1 1/1", got.Epoch, got.Batch, got.Batches)
+	}
+	if got.BatchExamples != len(trainSet) {
+		t.Fatalf("batch examples = %d, want %d", got.BatchExamples, len(trainSet))
+	}
+	if got.BatchPairs != int64(len(trainSet)*len(trainSet)) {
+		t.Fatalf("batch pairs = %d, want %d", got.BatchPairs, len(trainSet)*len(trainSet))
+	}
+	if got.Step != trainer.step {
+		t.Fatalf("progress step = %d, want trainer step %d", got.Step, trainer.step)
+	}
+	if got.Elapsed <= 0 {
+		t.Fatalf("progress elapsed = %s, want > 0", got.Elapsed)
 	}
 }
 

@@ -526,6 +526,7 @@ func runTrainEmbed(args []string) error {
 	var minDelta float64
 	var restoreBest bool
 	var lengthBucketBatches bool
+	var progressEvery int
 	var tokenizerPath string
 	var planOnly bool
 	var learningRate float64
@@ -541,6 +542,7 @@ func runTrainEmbed(args []string) error {
 	fs.Float64Var(&minDelta, "min-delta", 0, "minimum eval improvement to count as better")
 	fs.BoolVar(&restoreBest, "restore-best", true, "restore best checkpoint at end")
 	fs.BoolVar(&lengthBucketBatches, "length-bucket-batches", false, "cluster contrastive batches by token length to improve batched GPU training")
+	fs.IntVar(&progressEvery, "progress-every", 0, "print training progress every N optimizer steps (0 disables)")
 	fs.StringVar(&tokenizerPath, "tokenizer", "", "path to tokenizer JSON for text-pair datasets")
 	fs.BoolVar(&planOnly, "plan-only", false, "print planned workload and exit without training")
 	fs.Float64Var(&learningRate, "lr", 0, "override package learning rate for this run")
@@ -557,6 +559,9 @@ func runTrainEmbed(args []string) error {
 	}
 	if temperature < 0 {
 		return fmt.Errorf("temperature must be non-negative")
+	}
+	if progressEvery < 0 {
+		return fmt.Errorf("progress-every must be non-negative")
 	}
 	path := fs.Arg(0)
 	trainPath := fs.Arg(1)
@@ -584,6 +589,10 @@ func runTrainEmbed(args []string) error {
 		LearningRate:          float32(learningRate),
 		ContrastiveLoss:       contrastiveLoss,
 		Temperature:           float32(temperature),
+		ProgressEverySteps:    progressEvery,
+	}
+	if progressEvery > 0 {
+		runConfig.Progress = printTrainProgress
 	}
 	workload, workloadErr := estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath, runConfig)
 	if workloadErr == nil {
@@ -735,6 +744,27 @@ func formatTrainThroughput(summary barruntime.EmbeddingTrainRunSummary) string {
 	return strings.Join(parts, " ")
 }
 
+func printTrainProgress(progress barruntime.EmbeddingTrainProgress) {
+	epochPairs := fmt.Sprintf("%d", progress.EpochTrainPairs)
+	if progress.PlannedEpochPairs > 0 {
+		epochPairs = fmt.Sprintf("%d/%d", progress.EpochTrainPairs, progress.PlannedEpochPairs)
+	}
+	fmt.Printf(
+		"progress: epoch=%d batch=%d/%d step=%d loss=%.6f avg_score=%.6f batch_examples=%d batch_pairs=%d epoch_examples=%d epoch_pairs=%s elapsed=%s\n",
+		progress.Epoch,
+		progress.Batch,
+		progress.Batches,
+		progress.Step,
+		progress.Loss,
+		progress.AverageScore,
+		progress.BatchExamples,
+		progress.BatchPairs,
+		progress.EpochTrainExamples,
+		epochPairs,
+		progress.Elapsed.Round(time.Millisecond),
+	)
+}
+
 func itemsPerSecond(items int64, elapsed time.Duration) float64 {
 	if items <= 0 || elapsed <= 0 {
 		return 0
@@ -762,6 +792,7 @@ func runTrainCorpus(args []string) error {
 	var minDelta float64
 	var restoreBest bool
 	var lengthBucketBatches bool
+	var progressEvery int
 	var tokenizerPath string
 	var vocabSize int
 	var minFreq int
@@ -783,6 +814,7 @@ func runTrainCorpus(args []string) error {
 	fs.Float64Var(&minDelta, "min-delta", 0, "minimum eval improvement to count as better")
 	fs.BoolVar(&restoreBest, "restore-best", true, "restore best checkpoint at end")
 	fs.BoolVar(&lengthBucketBatches, "length-bucket-batches", false, "cluster contrastive batches by token length to improve batched GPU training")
+	fs.IntVar(&progressEvery, "progress-every", 0, "print training progress every N optimizer steps (0 disables)")
 	fs.StringVar(&tokenizerPath, "tokenizer", "", "output tokenizer path")
 	fs.IntVar(&vocabSize, "vocab-size", 0, "tokenizer vocab size override")
 	fs.IntVar(&minFreq, "min-freq", 2, "minimum pair frequency for tokenizer merges")
@@ -806,8 +838,30 @@ func runTrainCorpus(args []string) error {
 	if temperature < 0 {
 		return fmt.Errorf("temperature must be non-negative")
 	}
+	if progressEvery < 0 {
+		return fmt.Errorf("progress-every must be non-negative")
+	}
 	path := fs.Arg(0)
 	corpusPath := fs.Arg(1)
+	runConfig := barruntime.EmbeddingTrainRunConfig{
+		Epochs:                epochs,
+		BatchSize:             batchSize,
+		Shuffle:               shuffle,
+		Seed:                  seed,
+		EvalEveryEpoch:        evalEvery,
+		EarlyStoppingPatience: patience,
+		SelectMetric:          selectMetric,
+		MinDelta:              float32(minDelta),
+		RestoreBest:           restoreBest,
+		LengthBucketBatches:   lengthBucketBatches,
+		LearningRate:          float32(learningRate),
+		ContrastiveLoss:       contrastiveLoss,
+		Temperature:           float32(temperature),
+		ProgressEverySteps:    progressEvery,
+	}
+	if progressEvery > 0 {
+		runConfig.Progress = printTrainProgress
+	}
 	summary, paths, err := barruntime.TrainEmbeddingPackageFromCorpusFile(path, corpusPath, barruntime.EmbeddingCorpusTrainConfig{
 		TokenizerPath:      tokenizerPath,
 		TokenizerVocabSize: vocabSize,
@@ -820,21 +874,7 @@ func runTrainCorpus(args []string) error {
 			EvalPairs: evalPairs,
 			Seed:      seed,
 		},
-		Run: barruntime.EmbeddingTrainRunConfig{
-			Epochs:                epochs,
-			BatchSize:             batchSize,
-			Shuffle:               shuffle,
-			Seed:                  seed,
-			EvalEveryEpoch:        evalEvery,
-			EarlyStoppingPatience: patience,
-			SelectMetric:          selectMetric,
-			MinDelta:              float32(minDelta),
-			RestoreBest:           restoreBest,
-			LengthBucketBatches:   lengthBucketBatches,
-			LearningRate:          float32(learningRate),
-			ContrastiveLoss:       contrastiveLoss,
-			Temperature:           float32(temperature),
-		},
+		Run: runConfig,
 	})
 	if err != nil {
 		return err
