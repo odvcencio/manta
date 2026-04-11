@@ -18,6 +18,7 @@ typedef struct {
 	CUdevice device;
 	int major;
 	int minor;
+	int primary_ctx;
 	cublasHandle_t blas;
 } BarrCudaRuntime;
 
@@ -131,27 +132,29 @@ static int barrCudaRuntimeCreate(BarrCudaRuntime** out, char** err) {
 		*err = barr_dup_cu_error("cuDeviceGetAttribute(COMPUTE_CAPABILITY_MINOR)", cuRes);
 		return 1;
 	}
-	cuRes = cuCtxCreate(&ctx, NULL, 0, device);
+	// Repeated runtime loads must not allocate independent CUDA contexts.
+	// The primary context is shared by the process and avoids suite-wide VRAM exhaustion.
+	cuRes = cuDevicePrimaryCtxRetain(&ctx, device);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxCreate", cuRes);
+		*err = barr_dup_cu_error("cuDevicePrimaryCtxRetain", cuRes);
 		return 1;
 	}
 	cuRes = cuCtxSetCurrent(ctx);
 	if (cuRes != CUDA_SUCCESS) {
-		cuCtxDestroy(ctx);
+		cuDevicePrimaryCtxRelease(device);
 		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
 	cublasStatus_t blasRes = cublasCreate(&blas);
 	if (blasRes != CUBLAS_STATUS_SUCCESS) {
-		cuCtxDestroy(ctx);
+		cuDevicePrimaryCtxRelease(device);
 		*err = barr_dup_cublas_error("cublasCreate", blasRes);
 		return 1;
 	}
 	rt = (BarrCudaRuntime*)malloc(sizeof(BarrCudaRuntime));
 	if (rt == NULL) {
 		cublasDestroy(blas);
-		cuCtxDestroy(ctx);
+		cuDevicePrimaryCtxRelease(device);
 		*err = barr_dup_format("malloc", "failed to allocate runtime");
 		return 1;
 	}
@@ -159,6 +162,7 @@ static int barrCudaRuntimeCreate(BarrCudaRuntime** out, char** err) {
 	rt->device = device;
 	rt->major = major;
 	rt->minor = minor;
+	rt->primary_ctx = 1;
 	rt->blas = blas;
 	*out = rt;
 	return 0;
@@ -175,7 +179,11 @@ static void barrCudaRuntimeDestroy(BarrCudaRuntime* rt) {
 		cublasDestroy(rt->blas);
 	}
 	if (rt->ctx != NULL) {
-		cuCtxDestroy(rt->ctx);
+		if (rt->primary_ctx) {
+			cuDevicePrimaryCtxRelease(rt->device);
+		} else {
+			cuCtxDestroy(rt->ctx);
+		}
 	}
 	free(rt);
 }
