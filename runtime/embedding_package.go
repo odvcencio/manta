@@ -19,6 +19,11 @@ type EmbeddingPackagePaths struct {
 
 // LoadEmbeddingPackage loads a packaged embedding model from sibling artifact, manifest, and weight files.
 func (rt *Runtime) LoadEmbeddingPackage(ctx context.Context, barrPath string) (*EmbeddingModel, error) {
+	if model, ok, err := rt.tryLoadSealedEmbeddingPackage(ctx, barrPath); err != nil {
+		return nil, err
+	} else if ok {
+		return model, nil
+	}
 	return rt.LoadEmbeddingPackageWithPaths(
 		ctx,
 		EmbeddingPackagePaths{
@@ -30,6 +35,32 @@ func (rt *Runtime) LoadEmbeddingPackage(ctx context.Context, barrPath string) (*
 			PackageManifestPath: ResolvePackageManifestPath(barrPath),
 		},
 	)
+}
+
+func (rt *Runtime) tryLoadSealedEmbeddingPackage(ctx context.Context, path string) (*EmbeddingModel, bool, error) {
+	reader, meta, err := readSealedBarracudaMLL(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, nil
+	}
+	if _, ok := meta.JSONFiles["embedding_manifest"]; !ok {
+		return nil, false, nil
+	}
+	pkg, ok, err := sealedEmbeddingPackageFromReader(reader, meta)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	opts := pkg.Weights.LoadOptions()
+	if pkg.MemoryPlan != nil {
+		opts = append(opts, WithMemoryPlan(*pkg.MemoryPlan))
+	}
+	model, err := rt.LoadEmbedding(ctx, pkg.Module, pkg.Manifest, opts...)
+	if err != nil {
+		return nil, true, err
+	}
+	return model, true, nil
 }
 
 // LoadEmbeddingPackageWithPaths loads a packaged embedding model from explicit artifact, manifest, and weight files.

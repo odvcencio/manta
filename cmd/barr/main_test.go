@@ -131,6 +131,17 @@ func TestRunInitModelTrainCorpusExportFlow(t *testing.T) {
 	if _, err := mll.ReadFile(sealedPath, mll.WithDigestVerification()); err != nil {
 		t.Fatalf("read sealed default model MLL: %v", err)
 	}
+	sealedInspect := captureRunOutput(t, []string{"inspect", sealedPath})
+	for _, want := range []string{
+		"embedding manifest: embedded",
+		"package: embedded sealed MLL",
+		"package verify: OK",
+		"embedding model: barracuda-embed-v0",
+	} {
+		if !strings.Contains(sealedInspect, want) {
+			t.Fatalf("sealed inspect output missing %q\noutput:\n%s", want, sealedInspect)
+		}
+	}
 	if err := run([]string{"inspect", path}); err != nil {
 		t.Fatalf("inspect trained default package after export: %v", err)
 	}

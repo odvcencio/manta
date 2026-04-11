@@ -242,6 +242,19 @@ func decodeWeightFileMLL(data []byte) (WeightFile, error) {
 	if reader.Profile() != mll.ProfileWeightsOnly {
 		return WeightFile{}, fmt.Errorf("weight file profile = %d, want %d", reader.Profile(), mll.ProfileWeightsOnly)
 	}
+	meta := weightFileMLLMetadata{Version: WeightFileVersion}
+	if body, ok := reader.Section(tagXWGT); ok {
+		if err := json.Unmarshal(body, &meta); err != nil {
+			return WeightFile{}, err
+		}
+	}
+	return decodeWeightFileFromMLLReader(reader, meta.Version, meta.LogicalTensorDType)
+}
+
+func decodeWeightFileFromMLLReader(reader *mll.Reader, version string, logicalTensorDTypes map[string]string) (WeightFile, error) {
+	if reader == nil {
+		return WeightFile{}, fmt.Errorf("nil MLL reader")
+	}
 	strgBody, ok := reader.Section(mll.TagSTRG)
 	if !ok {
 		return WeightFile{}, fmt.Errorf("weight file missing STRG section")
@@ -258,17 +271,11 @@ func decodeWeightFileMLL(data []byte) (WeightFile, error) {
 	if err != nil {
 		return WeightFile{}, err
 	}
-	meta := weightFileMLLMetadata{Version: WeightFileVersion}
-	if body, ok := reader.Section(tagXWGT); ok {
-		if err := json.Unmarshal(body, &meta); err != nil {
-			return WeightFile{}, err
-		}
-	}
-	if meta.Version == "" {
-		meta.Version = WeightFileVersion
+	if version == "" {
+		version = WeightFileVersion
 	}
 	weights := WeightFile{
-		Version: meta.Version,
+		Version: version,
 		Weights: make(map[string]*backend.Tensor, len(tnsr.Tensors)),
 	}
 	for _, entry := range tnsr.Tensors {
@@ -276,7 +283,7 @@ func decodeWeightFileMLL(data []byte) (WeightFile, error) {
 		if name == "" {
 			return WeightFile{}, fmt.Errorf("weight tensor missing name for index %d", entry.NameIdx)
 		}
-		logical := meta.LogicalTensorDType[name]
+		logical := logicalTensorDTypes[name]
 		tensor, err := decodeTensorEntry(entry, logical)
 		if err != nil {
 			return WeightFile{}, fmt.Errorf("decode weight %q: %w", name, err)

@@ -1,12 +1,15 @@
 package barruntime
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/odvcencio/barracuda/artifact/barr"
 	"github.com/odvcencio/barracuda/compiler"
+	"github.com/odvcencio/barracuda/runtime/backends/cuda"
+	"github.com/odvcencio/barracuda/runtime/backends/metal"
 	mll "github.com/odvcencio/mll"
 )
 
@@ -110,6 +113,18 @@ func TestExportPackageToMLLWritesSealedContainer(t *testing.T) {
 	}
 	if _, ok := meta.JSONFiles["package_manifest"]; !ok {
 		t.Fatalf("expected package_manifest JSON metadata")
+	}
+
+	rt := New(cuda.New(), metal.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), outPath)
+	if err != nil {
+		t.Fatalf("load sealed embedding package: %v", err)
+	}
+	if model.Backend() == "" {
+		t.Fatal("expected sealed package to select a backend")
+	}
+	if model.MemoryPlan() == nil {
+		t.Fatal("expected sealed package to restore memory plan")
 	}
 }
 

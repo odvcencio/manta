@@ -214,6 +214,7 @@ func runInspect(args []string) error {
 	if len(mod.Requirements.Capabilities) > 0 {
 		fmt.Printf("capabilities: %s\n", strings.Join(mod.Requirements.Capabilities, ", "))
 	}
+	embeddedPackage := false
 	embeddingManifestPath := barruntime.ResolveEmbeddingManifestPath(path)
 	if _, err := os.Stat(embeddingManifestPath); err == nil {
 		manifest, err := barruntime.ReadEmbeddingManifestFile(embeddingManifestPath)
@@ -221,45 +222,43 @@ func runInspect(args []string) error {
 			return err
 		}
 		fmt.Printf("embedding manifest: %s\n", embeddingManifestPath)
-		fmt.Printf("embedding model: %s pooled=%s batch=%s output=%s/%s\n",
-			displayManifestName(manifest.Name),
-			manifest.PooledEntry,
-			displayManifestName(manifest.BatchEntry),
-			manifest.OutputName,
-			manifest.OutputDType,
-		)
-		fmt.Printf("encoder repeats: %d\n", manifest.EncoderRepeats)
-		if manifest.Tokenizer.VocabSize > 0 || manifest.Tokenizer.MaxSequence > 0 {
-			fmt.Printf("tokenizer: vocab=%d max_sequence=%d\n", manifest.Tokenizer.VocabSize, manifest.Tokenizer.MaxSequence)
-		}
+		printEmbeddingManifestSummary(manifest)
+	} else if sealed, err := barruntime.ReadSealedEmbeddingPackage(path); err == nil {
+		fmt.Println("embedding manifest: embedded")
+		printEmbeddingManifestSummary(sealed.Manifest)
+		fmt.Println("package: embedded sealed MLL")
+		fmt.Println("package verify: OK")
+		embeddedPackage = true
 	}
 	packagePath := barruntime.ResolvePackageManifestPath(path)
-	if _, err := os.Stat(packagePath); err == nil {
-		pkg, err := barruntime.ReadPackageManifestFile(packagePath)
-		if err != nil {
-			return err
-		}
-		verifyPaths := map[string]string{
-			"artifact":           path,
-			"embedding_manifest": barruntime.DefaultEmbeddingManifestPath(path),
-			"tokenizer":          barruntime.DefaultTokenizerPath(path),
-			"weights":            barruntime.DefaultWeightFilePath(path),
-			"memory_plan":        barruntime.DefaultMemoryPlanPath(path),
-			"train_manifest":     barruntime.DefaultEmbeddingTrainManifestPath(path),
-			"checkpoint":         barruntime.DefaultEmbeddingCheckpointPath(path),
-			"train_profile":      barruntime.DefaultEmbeddingTrainProfilePath(path),
-		}
-		if pkg.Kind == barruntime.PackageEmbedding {
-			delete(verifyPaths, "train_manifest")
-			delete(verifyPaths, "checkpoint")
-			delete(verifyPaths, "train_profile")
-		}
-		verifyErr := pkg.VerifyFiles(verifyPaths)
-		fmt.Printf("package: %s (%s)\n", packagePath, pkg.Kind)
-		if verifyErr != nil {
-			fmt.Printf("package verify: FAIL (%v)\n", verifyErr)
-		} else {
-			fmt.Println("package verify: OK")
+	if !embeddedPackage {
+		if _, err := os.Stat(packagePath); err == nil {
+			pkg, err := barruntime.ReadPackageManifestFile(packagePath)
+			if err != nil {
+				return err
+			}
+			verifyPaths := map[string]string{
+				"artifact":           path,
+				"embedding_manifest": barruntime.DefaultEmbeddingManifestPath(path),
+				"tokenizer":          barruntime.DefaultTokenizerPath(path),
+				"weights":            barruntime.DefaultWeightFilePath(path),
+				"memory_plan":        barruntime.DefaultMemoryPlanPath(path),
+				"train_manifest":     barruntime.DefaultEmbeddingTrainManifestPath(path),
+				"checkpoint":         barruntime.DefaultEmbeddingCheckpointPath(path),
+				"train_profile":      barruntime.DefaultEmbeddingTrainProfilePath(path),
+			}
+			if pkg.Kind == barruntime.PackageEmbedding {
+				delete(verifyPaths, "train_manifest")
+				delete(verifyPaths, "checkpoint")
+				delete(verifyPaths, "train_profile")
+			}
+			verifyErr := pkg.VerifyFiles(verifyPaths)
+			fmt.Printf("package: %s (%s)\n", packagePath, pkg.Kind)
+			if verifyErr != nil {
+				fmt.Printf("package verify: FAIL (%v)\n", verifyErr)
+			} else {
+				fmt.Println("package verify: OK")
+			}
 		}
 	}
 	profilePath := barruntime.DefaultEmbeddingTrainProfilePath(path)
@@ -277,6 +276,20 @@ func runInspect(args []string) error {
 		)
 	}
 	return nil
+}
+
+func printEmbeddingManifestSummary(manifest barruntime.EmbeddingManifest) {
+	fmt.Printf("embedding model: %s pooled=%s batch=%s output=%s/%s\n",
+		displayManifestName(manifest.Name),
+		manifest.PooledEntry,
+		displayManifestName(manifest.BatchEntry),
+		manifest.OutputName,
+		manifest.OutputDType,
+	)
+	fmt.Printf("encoder repeats: %d\n", manifest.EncoderRepeats)
+	if manifest.Tokenizer.VocabSize > 0 || manifest.Tokenizer.MaxSequence > 0 {
+		fmt.Printf("tokenizer: vocab=%d max_sequence=%d\n", manifest.Tokenizer.VocabSize, manifest.Tokenizer.MaxSequence)
+	}
 }
 
 func runExportMLL(args []string) error {
