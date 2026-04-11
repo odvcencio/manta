@@ -626,10 +626,13 @@ func lowerArtifactKernelOp(op lir.KernelOp) barr.KernelOp {
 	}
 }
 
-type kernelVariantEmitter struct {
-	backend barr.BackendKind
-	entry   func(lir.Kernel) string
-	source  func(lir.Kernel) string
+type kernelBackendEmitter struct {
+	backend         barr.BackendKind
+	suffix          string
+	prelude         string
+	signaturePrefix string
+	params          func(lir.Kernel) []string
+	native          nativeKernelEmitter
 }
 
 type nativeKernelEmitter struct {
@@ -646,20 +649,33 @@ type nativeKernelEmitter struct {
 	scoreBodies   map[string]string
 }
 
-var kernelVariantEmitters = []kernelVariantEmitter{
+func (emitter kernelBackendEmitter) entry(kernel lir.Kernel) string {
+	return kernel.Name + "_" + emitter.suffix
+}
+
+func (emitter kernelBackendEmitter) source(kernel lir.Kernel) string {
+	if src, ok := emitNativeKernelSourceWithEmitter(emitter.native, kernel); ok {
+		return src
+	}
+	return emitGenericKernelSource(emitter, kernel)
+}
+
+var kernelBackendEmitters = []kernelBackendEmitter{
 	{
-		backend: barr.BackendCUDA,
-		entry: func(kernel lir.Kernel) string {
-			return kernel.Name + "_cuda"
-		},
-		source: emitCUDAKernelSource,
+		backend:         barr.BackendCUDA,
+		suffix:          "cuda",
+		prelude:         "#include <cuda_fp16.h>\n\n",
+		signaturePrefix: "extern \"C\" __global__ void ",
+		params:          cudaKernelParams,
+		native:          cudaNativeEmitter,
 	},
 	{
-		backend: barr.BackendMetal,
-		entry: func(kernel lir.Kernel) string {
-			return kernel.Name + "_metal"
-		},
-		source: emitMetalKernelSource,
+		backend:         barr.BackendMetal,
+		suffix:          "metal",
+		prelude:         "#include <metal_stdlib>\nusing namespace metal;\n\n",
+		signaturePrefix: "kernel void ",
+		params:          metalKernelParams,
+		native:          metalNativeEmitter,
 	},
 }
 
@@ -905,8 +921,8 @@ func emitKernelVariants(kernel lir.Kernel) []barr.KernelVariant {
 		"subgroup":     strconv.FormatBool(kernel.Hints.Subgroup),
 		"memory":       kernel.Hints.Memory,
 	}
-	variants := make([]barr.KernelVariant, 0, len(kernelVariantEmitters))
-	for _, emitter := range kernelVariantEmitters {
+	variants := make([]barr.KernelVariant, 0, len(kernelBackendEmitters))
+	for _, emitter := range kernelBackendEmitters {
 		variants = append(variants, barr.KernelVariant{
 			Backend: emitter.backend,
 			Entry:   emitter.entry(kernel),
@@ -917,16 +933,13 @@ func emitKernelVariants(kernel lir.Kernel) []barr.KernelVariant {
 	return variants
 }
 
-func emitCUDAKernelSource(kernel lir.Kernel) string {
-	if src, ok := emitNativeCUDAKernelSource(kernel); ok {
-		return src
-	}
+func emitGenericKernelSource(emitter kernelBackendEmitter, kernel lir.Kernel) string {
 	var b strings.Builder
-	b.WriteString("#include <cuda_fp16.h>\n\n")
-	b.WriteString("extern \"C\" __global__ void ")
-	b.WriteString(kernel.Name)
-	b.WriteString("_cuda(")
-	b.WriteString(strings.Join(cudaKernelParams(kernel), ", "))
+	b.WriteString(emitter.prelude)
+	b.WriteString(emitter.signaturePrefix)
+	b.WriteString(emitter.entry(kernel))
+	b.WriteString("(")
+	b.WriteString(strings.Join(emitter.params(kernel), ", "))
 	b.WriteString(") {\n")
 	b.WriteString("  // tile=")
 	b.WriteString(scheduleTileString(kernel.Hints.Tile))
@@ -944,10 +957,6 @@ func emitCUDAKernelSource(kernel lir.Kernel) string {
 	}
 	b.WriteString("}\n")
 	return b.String()
-}
-
-func emitNativeCUDAKernelSource(kernel lir.Kernel) (string, bool) {
-	return emitNativeKernelSourceWithEmitter(cudaNativeEmitter, kernel)
 }
 
 func emitNativeKernelSourceWithEmitter(emitter nativeKernelEmitter, kernel lir.Kernel) (string, bool) {
@@ -1080,39 +1089,6 @@ func cudaBinaryExpr(op string) string {
 	default:
 		return "lhs[idx] + rhs[idx]"
 	}
-}
-
-func emitMetalKernelSource(kernel lir.Kernel) string {
-	if src, ok := emitNativeMetalKernelSource(kernel); ok {
-		return src
-	}
-	var b strings.Builder
-	b.WriteString("#include <metal_stdlib>\nusing namespace metal;\n\n")
-	b.WriteString("kernel void ")
-	b.WriteString(kernel.Name)
-	b.WriteString("_metal(")
-	b.WriteString(strings.Join(metalKernelParams(kernel), ", "))
-	b.WriteString(") {\n")
-	b.WriteString("  // tile=")
-	b.WriteString(scheduleTileString(kernel.Hints.Tile))
-	b.WriteString(" vector_width=")
-	b.WriteString(strconv.Itoa(kernel.Hints.VectorWidth))
-	b.WriteString(" subgroup=")
-	b.WriteString(strconv.FormatBool(kernel.Hints.Subgroup))
-	b.WriteString(" memory=")
-	b.WriteString(kernel.Hints.Memory)
-	b.WriteString("\n")
-	for _, op := range kernel.Body {
-		b.WriteString("  ")
-		b.WriteString(renderKernelOpComment(op))
-		b.WriteString("\n")
-	}
-	b.WriteString("}\n")
-	return b.String()
-}
-
-func emitNativeMetalKernelSource(kernel lir.Kernel) (string, bool) {
-	return emitNativeKernelSourceWithEmitter(metalNativeEmitter, kernel)
 }
 
 func emitMetalRowKernel(kernel lir.Kernel, body string) string {

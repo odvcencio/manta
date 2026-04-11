@@ -3,6 +3,8 @@ package compiler
 import (
 	"strings"
 	"testing"
+
+	"github.com/odvcencio/barracuda/artifact/barr"
 )
 
 func TestBuildTinyEmbedSource(t *testing.T) {
@@ -51,6 +53,33 @@ func TestBuildTinyEmbedSource(t *testing.T) {
 	}
 	if kernel.Variants[0].Source == "" || kernel.Variants[1].Source == "" {
 		t.Fatalf("expected emitted backend sources: %+v", kernel.Variants)
+	}
+}
+
+func TestKernelVariantsFollowBackendEmitterTable(t *testing.T) {
+	bundle, err := Build([]byte(sourceForPreset(PresetTinyEmbed)), Options{ModuleName: "tiny_embed"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	kernel := bundle.Artifact.Kernels[0]
+	if got := len(kernel.Variants); got != len(kernelBackendEmitters) {
+		t.Fatalf("variant count = %d, want backend emitter count %d", got, len(kernelBackendEmitters))
+	}
+	byBackend := map[barr.BackendKind]barr.KernelVariant{}
+	for _, variant := range kernel.Variants {
+		byBackend[variant.Backend] = variant
+	}
+	for _, emitter := range kernelBackendEmitters {
+		variant, ok := byBackend[emitter.backend]
+		if !ok {
+			t.Fatalf("missing variant for backend %q", emitter.backend)
+		}
+		if want := kernel.Name + "_" + emitter.suffix; variant.Entry != want {
+			t.Fatalf("entry for backend %q = %q, want %q", emitter.backend, variant.Entry, want)
+		}
+		if variant.Source == "" {
+			t.Fatalf("source for backend %q is empty", emitter.backend)
+		}
 	}
 }
 
