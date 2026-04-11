@@ -4,6 +4,7 @@ package cuda
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/odvcencio/barracuda/runtime/backend"
@@ -53,6 +54,20 @@ func TestCUDAContrastiveAcceleratorMatchesHostInfoNCE(t *testing.T) {
 	}
 	if stats.RunNanos <= 0 {
 		t.Fatalf("run nanos = %d, want positive", stats.RunNanos)
+	}
+}
+
+func TestCUDAContrastiveKernelsUse64BitPairIndexing(t *testing.T) {
+	for name, source := range map[string]string{
+		"scores": contrastiveScoresKernelSource,
+		"grad":   contrastiveGradKernelSource,
+	} {
+		if !strings.Contains(source, "long long idx = (long long)blockIdx.x") {
+			t.Fatalf("%s kernel does not use 64-bit global index", name)
+		}
+	}
+	if !strings.Contains(contrastiveGradKernelSource, "(long long)rows * (long long)rows * (long long)width") {
+		t.Fatal("grad kernel does not compute total grad elements in 64-bit")
 	}
 }
 

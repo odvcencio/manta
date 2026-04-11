@@ -27,13 +27,13 @@ extern "C" __global__ void barr_contrastive_scores(
     int rows,
     int width
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = rows * rows;
+    long long idx = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+    long long total = (long long)rows * (long long)rows;
     if (idx >= total) {
         return;
     }
-    int row = idx / rows;
-    int col = idx - row * rows;
+    int row = (int)(idx / rows);
+    int col = (int)(idx - (long long)row * rows);
     float qn = query_norms[row];
     float pn = positive_norms[col];
     if (qn == 0.0f || pn == 0.0f) {
@@ -113,15 +113,15 @@ extern "C" __global__ void barr_contrastive_grad(
     int rows,
     int width
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = rows * rows * width;
+    long long idx = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
+    long long total = (long long)rows * (long long)rows * (long long)width;
     if (idx >= total) {
         return;
     }
-    int k = idx % width;
-    int pair = idx / width;
-    int row = pair / rows;
-    int col = pair - row * rows;
+    int k = (int)(idx % width);
+    long long pair = idx / width;
+    int row = (int)(pair / rows);
+    int col = (int)(pair - (long long)row * rows);
     float qn = query_norms[row];
     float pn = positive_norms[col];
     if (qn == 0.0f || pn == 0.0f) {
