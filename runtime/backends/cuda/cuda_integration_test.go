@@ -212,6 +212,82 @@ func TestCUDAStridedBatchedMatMulMatchesHost(t *testing.T) {
 	})
 }
 
+func TestCUDAStridedBatchedMatMulTransposeMatchesHost(t *testing.T) {
+	accelAny, err := NewMatMulAccelerator()
+	if err != nil {
+		t.Fatalf("new matmul accelerator: %v", err)
+	}
+	if accelAny == nil {
+		t.Skip("no cuda matmul accelerator available")
+	}
+	defer accelAny.Close()
+
+	outputType := barr.ValueType{
+		Kind: barr.ValueTensor,
+		Tensor: &barr.TensorType{
+			DType: "f32",
+		},
+	}
+	t.Run("transpose right", func(t *testing.T) {
+		lhs := backend.NewTensorF32([]int{2, 2, 3}, []float32{
+			1, 2, 3,
+			4, 5, 6,
+			7, 8, 9,
+			10, 11, 12,
+		})
+		rhs := backend.NewTensorF32([]int{2, 2, 3}, []float32{
+			1, 0, 1,
+			0, 1, 1,
+			2, 0, 1,
+			0, 2, -1,
+		})
+		result, err := accelAny.RunMatMulWithTranspose([]*backend.Tensor{lhs, rhs}, outputType, false, true)
+		if err != nil {
+			t.Fatalf("run transposed strided batched matmul: %v", err)
+		}
+		if result.Metadata["launch_api"] != "cublasSgemmStridedBatched" {
+			t.Fatalf("launch_api = %v, want cublasSgemmStridedBatched", result.Metadata["launch_api"])
+		}
+		assertTensorClose(t, result.Outputs[0], []int{2, 2, 2}, []float32{
+			4, 5,
+			10, 11,
+			23, 7,
+			32, 10,
+		})
+	})
+	t.Run("transpose left", func(t *testing.T) {
+		lhs := backend.NewTensorF32([]int{2, 3, 2}, []float32{
+			1, 4,
+			2, 5,
+			3, 6,
+			7, 10,
+			8, 11,
+			9, 12,
+		})
+		rhs := backend.NewTensorF32([]int{2, 3, 2}, []float32{
+			1, 0,
+			0, 1,
+			1, 1,
+			2, 0,
+			0, 2,
+			1, -1,
+		})
+		result, err := accelAny.RunMatMulWithTranspose([]*backend.Tensor{lhs, rhs}, outputType, true, false)
+		if err != nil {
+			t.Fatalf("run transposed strided batched matmul: %v", err)
+		}
+		if result.Metadata["launch_api"] != "cublasSgemmStridedBatched" {
+			t.Fatalf("launch_api = %v, want cublasSgemmStridedBatched", result.Metadata["launch_api"])
+		}
+		assertTensorClose(t, result.Outputs[0], []int{2, 2, 2}, []float32{
+			4, 5,
+			10, 11,
+			23, 7,
+			32, 10,
+		})
+	})
+}
+
 func assertTensorClose(t *testing.T, tensor *backend.Tensor, wantShape []int, want []float32) {
 	t.Helper()
 	if tensor == nil {

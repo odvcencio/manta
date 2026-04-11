@@ -1541,9 +1541,9 @@ func (t *EmbeddingTrainer) tryBatchedAttentionScores(states []*embeddingSequence
 			return nil, false
 		}
 		queries[i] = state.attnQ
-		keys[i] = transpose2DData(state.attnK, seqLen, d)
+		keys[i] = state.attnK
 	}
-	return t.tryTrainerBatchedMatMul(queries, seqLen, d, keys, d, seqLen)
+	return t.tryTrainerBatchedMatMulTranspose(queries, seqLen, d, keys, seqLen, d, false, true)
 }
 
 func (t *EmbeddingTrainer) tryBatchedAttentionMixed(states []*embeddingSequenceState, seqLen, d int) ([][]float32, bool) {
@@ -2317,7 +2317,15 @@ func (t *EmbeddingTrainer) tryTrainerMatMul(lhsData []float32, lhsRows, lhsCols 
 }
 
 func (t *EmbeddingTrainer) tryTrainerBatchedMatMul(lhsMatrices [][]float32, lhsRows, lhsCols int, rhsMatrices [][]float32, rhsRows, rhsCols int) ([][]float32, bool) {
-	if t == nil || t.forwardMatMul == nil || len(lhsMatrices) == 0 || len(lhsMatrices) != len(rhsMatrices) || lhsRows == 0 || lhsCols == 0 || rhsRows == 0 || rhsCols == 0 || lhsCols != rhsRows {
+	return t.tryTrainerBatchedMatMulTranspose(lhsMatrices, lhsRows, lhsCols, rhsMatrices, rhsRows, rhsCols, false, false)
+}
+
+func (t *EmbeddingTrainer) tryTrainerBatchedMatMulTranspose(lhsMatrices [][]float32, lhsRows, lhsCols int, rhsMatrices [][]float32, rhsRows, rhsCols int, transposeLeft, transposeRight bool) ([][]float32, bool) {
+	if t == nil || t.forwardMatMul == nil || len(lhsMatrices) == 0 || len(lhsMatrices) != len(rhsMatrices) || lhsRows == 0 || lhsCols == 0 || rhsRows == 0 || rhsCols == 0 {
+		return nil, false
+	}
+	outRows, outCols, ok := trainerMatMulShape(lhsRows, lhsCols, rhsRows, rhsCols, transposeLeft, transposeRight)
+	if !ok {
 		return nil, false
 	}
 	batches := len(lhsMatrices)
@@ -2330,7 +2338,7 @@ func (t *EmbeddingTrainer) tryTrainerBatchedMatMul(lhsMatrices [][]float32, lhsR
 		lhsBatch = append(lhsBatch, lhsMatrices[i]...)
 		rhsBatch = append(rhsBatch, rhsMatrices[i]...)
 	}
-	result, err := t.forwardMatMul.RunMatMul(
+	result, err := t.forwardMatMul.RunMatMulWithTranspose(
 		[]*backend.Tensor{
 			tensorF32View([]int{batches, lhsRows, lhsCols}, lhsBatch),
 			tensorF32View([]int{batches, rhsRows, rhsCols}, rhsBatch),
@@ -2341,11 +2349,13 @@ func (t *EmbeddingTrainer) tryTrainerBatchedMatMul(lhsMatrices [][]float32, lhsR
 				DType: "f32",
 			},
 		},
+		transposeLeft,
+		transposeRight,
 	)
 	if err != nil || len(result.Outputs) != 1 || result.Outputs[0] == nil {
 		return nil, false
 	}
-	perMatrix := lhsRows * rhsCols
+	perMatrix := outRows * outCols
 	out := result.Outputs[0].F32
 	if len(out) != batches*perMatrix {
 		return nil, false
@@ -3238,28 +3248,62 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 	gradKMatrices := make([][]float32, len(states))
 	gradVMatrices := make([][]float32, len(states))
 	inputMatrices := make([][]float32, len(states))
+	attnScoreMatrices := make([][]float32, len(states))
+	attnQMatrices := make([][]float32, len(states))
+	attnKMatrices := make([][]float32, len(states))
+	attnVMatrices := make([][]float32, len(states))
+	for i, state := range states {
+		attnScoreMatrices[i] = state.attnScores
+		attnQMatrices[i] = state.attnQ
+		attnKMatrices[i] = state.attnK
+		attnVMatrices[i] = state.attnV
+		inputMatrices[i] = state.input
+	}
+
+	gradScoresMatrices, gradScoresOK := t.tryTrainerBatchedMatMulTranspose(gradMixedMatrices, seqLen, d, attnVMatrices, seqLen, d, false, true)
+	if !gradScoresOK {
+		gradScoresMatrices = make([][]float32, len(states))
+		for i, state := range states {
+			gradScoresFlat := make([]float32, seqLen*seqLen)
+			if out, ok := t.tryTrainerMatMul(gradMixedMatrices[i], seqLen, d, state.attnV, seqLen, d, false, true); ok {
+				copy(gradScoresFlat, out)
+			} else {
+				fillHostMatMulTranspose(gradMixedMatrices[i], seqLen, d, state.attnV, seqLen, d, false, true, gradScoresFlat)
+			}
+			gradScoresMatrices[i] = gradScoresFlat
+		}
+	}
+
+	gradPreSoftmaxMatrices, gradPreSoftmaxOK := t.tryBatchedSoftmaxBackwardRows(gradScoresMatrices, attnScoreMatrices, seqLen, seqLen)
+	if !gradPreSoftmaxOK {
+		gradPreSoftmaxMatrices = make([][]float32, len(states))
+		for i, state := range states {
+			gradPreSoftmaxFlat := make([]float32, seqLen*seqLen)
+			if out, ok := t.trySoftmaxBackwardRows(gradScoresMatrices[i], state.attnScores, seqLen, seqLen, state.attnScoresBinding); ok {
+				copy(gradPreSoftmaxFlat, out)
+			} else {
+				for row := 0; row < seqLen; row++ {
+					rowScores := state.attnScores[row*seqLen : (row+1)*seqLen]
+					gradScores := gradScoresMatrices[i][row*seqLen : (row+1)*seqLen]
+					backwardSoftmaxRow(gradPreSoftmaxFlat[row*seqLen:(row+1)*seqLen], gradScores, rowScores)
+				}
+			}
+			gradPreSoftmaxMatrices[i] = gradPreSoftmaxFlat
+		}
+	}
+
+	batchedGradV, gradVOK := t.tryTrainerBatchedMatMulTranspose(attnScoreMatrices, seqLen, seqLen, gradMixedMatrices, seqLen, d, true, false)
+	batchedGradQ, gradQOK := t.tryTrainerBatchedMatMulTranspose(gradPreSoftmaxMatrices, seqLen, seqLen, attnKMatrices, seqLen, d, false, false)
+	batchedGradK, gradKOK := t.tryTrainerBatchedMatMulTranspose(gradPreSoftmaxMatrices, seqLen, seqLen, attnQMatrices, seqLen, d, true, false)
 	for i, state := range states {
 		gradMixed := gradMixedMatrices[i]
+		gradPreSoftmaxFlat := gradPreSoftmaxMatrices[i]
 		gradQ := make([]float32, seqLen*d)
 		gradK := make([]float32, seqLen*d)
 		gradV := make([]float32, seqLen*d)
-		gradScoresFlat := make([]float32, seqLen*seqLen)
-		if out, ok := t.tryTrainerMatMul(gradMixed, seqLen, d, state.attnV, seqLen, d, false, true); ok {
-			copy(gradScoresFlat, out)
-		} else {
-			fillHostMatMulTranspose(gradMixed, seqLen, d, state.attnV, seqLen, d, false, true, gradScoresFlat)
-		}
-		gradPreSoftmaxFlat := make([]float32, seqLen*seqLen)
-		if out, ok := t.trySoftmaxBackwardRows(gradScoresFlat, state.attnScores, seqLen, seqLen, state.attnScoresBinding); ok {
-			copy(gradPreSoftmaxFlat, out)
-		} else {
-			for row := 0; row < seqLen; row++ {
-				rowScores := state.attnScores[row*seqLen : (row+1)*seqLen]
-				gradScores := gradScoresFlat[row*seqLen : (row+1)*seqLen]
-				backwardSoftmaxRow(gradPreSoftmaxFlat[row*seqLen:(row+1)*seqLen], gradScores, rowScores)
-			}
-		}
-		if out, ok := t.tryTrainerMatMulBoundLeft(
+		if gradVOK {
+			addFloat32Slice(gradV, batchedGradV[i])
+		} else if out, ok := t.tryTrainerMatMulBoundLeft(
 			state.attnScoresBinding,
 			tensorF32View([]int{seqLen, seqLen}, state.attnScores),
 			tensorF32View([]int{seqLen, d}, gradMixed),
@@ -3272,21 +3316,23 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 			fillHostMatMulTranspose(state.attnScores, seqLen, seqLen, gradMixed, seqLen, d, true, false, gradVStep)
 			addFloat32Slice(gradV, gradVStep)
 		}
-		if out, ok := t.tryTrainerMatMul(gradPreSoftmaxFlat, seqLen, seqLen, state.attnK, seqLen, d, false, false); ok {
+		if gradQOK {
+			copy(gradQ, batchedGradQ[i])
+		} else if out, ok := t.tryTrainerMatMul(gradPreSoftmaxFlat, seqLen, seqLen, state.attnK, seqLen, d, false, false); ok {
 			copy(gradQ, out)
 		} else {
 			fillHostMatMulTranspose(gradPreSoftmaxFlat, seqLen, seqLen, state.attnK, seqLen, d, false, false, gradQ)
 		}
-		if out, ok := t.tryTrainerMatMul(gradPreSoftmaxFlat, seqLen, seqLen, state.attnQ, seqLen, d, true, false); ok {
+		if gradKOK {
+			copy(gradK, batchedGradK[i])
+		} else if out, ok := t.tryTrainerMatMul(gradPreSoftmaxFlat, seqLen, seqLen, state.attnQ, seqLen, d, true, false); ok {
 			copy(gradK, out)
 		} else {
 			fillHostMatMulTranspose(gradPreSoftmaxFlat, seqLen, seqLen, state.attnQ, seqLen, d, true, false, gradK)
 		}
-
 		gradQMatrices[i] = gradQ
 		gradKMatrices[i] = gradK
 		gradVMatrices[i] = gradV
-		inputMatrices[i] = state.input
 	}
 
 	if out, ok := t.tryAccumulatedTransposeMatMul(inputMatrices, gradQMatrices, seqLen, d, d); ok {
@@ -3812,6 +3858,31 @@ func (t *EmbeddingTrainer) trySoftmaxBackwardRows(gradOut, probs []float32, rows
 		return nil, false
 	}
 	return out, true
+}
+
+func (t *EmbeddingTrainer) tryBatchedSoftmaxBackwardRows(gradOutMatrices, probsMatrices [][]float32, rows, cols int) ([][]float32, bool) {
+	if len(gradOutMatrices) == 0 || len(gradOutMatrices) != len(probsMatrices) || rows == 0 || cols == 0 {
+		return nil, false
+	}
+	perMatrix := rows * cols
+	gradOut := make([]float32, 0, len(gradOutMatrices)*perMatrix)
+	probs := make([]float32, 0, len(probsMatrices)*perMatrix)
+	for i := range gradOutMatrices {
+		if len(gradOutMatrices[i]) != perMatrix || len(probsMatrices[i]) != perMatrix {
+			return nil, false
+		}
+		gradOut = append(gradOut, gradOutMatrices[i]...)
+		probs = append(probs, probsMatrices[i]...)
+	}
+	out, ok := t.trySoftmaxBackwardRows(gradOut, probs, len(gradOutMatrices)*rows, cols, "")
+	if !ok || len(out) != len(gradOut) {
+		return nil, false
+	}
+	result := make([][]float32, len(gradOutMatrices))
+	for i := range result {
+		result[i] = out[i*perMatrix : (i+1)*perMatrix]
+	}
+	return result, true
 }
 
 func (t *EmbeddingTrainer) tryLayerNormBackwardRows(gradOut, normalized, pre []float32, rows, cols int, normalizedBinding, preBinding string) ([]float32, bool) {

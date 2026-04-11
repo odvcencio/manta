@@ -481,7 +481,7 @@ static int barrCudaMatMulCublas(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdevicept
 	return 0;
 }
 
-static int barrCudaMatMulCublasStridedBatched(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int batches, int lhsRows, int lhsCols, int rhsRows, int rhsCols, char** err) {
+static int barrCudaMatMulCublasStridedBatched(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int batches, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -491,7 +491,11 @@ static int barrCudaMatMulCublasStridedBatched(BarrCudaRuntime* rt, CUdeviceptr l
 		*err = barr_dup_format("cublasSgemmStridedBatched", "invalid shape");
 		return 1;
 	}
-	if (lhsCols != rhsRows) {
+	int rows = transposeLeft ? lhsCols : lhsRows;
+	int inner = transposeLeft ? lhsRows : lhsCols;
+	int rhsInner = transposeRight ? rhsCols : rhsRows;
+	int cols = transposeRight ? rhsRows : rhsCols;
+	if (inner != rhsInner) {
 		*err = barr_dup_format("cublasSgemmStridedBatched", "shape mismatch");
 		return 1;
 	}
@@ -500,16 +504,13 @@ static int barrCudaMatMulCublasStridedBatched(BarrCudaRuntime* rt, CUdeviceptr l
 	const float* lhsPtr = (const float*)(uintptr_t)lhs;
 	const float* rhsPtr = (const float*)(uintptr_t)rhs;
 	float* outPtr = (float*)(uintptr_t)out0;
-	int rows = lhsRows;
-	int inner = lhsCols;
-	int cols = rhsCols;
 	long long int lhsStride = (long long int)lhsRows * (long long int)lhsCols;
 	long long int rhsStride = (long long int)rhsRows * (long long int)rhsCols;
 	long long int outStride = (long long int)rows * (long long int)cols;
 	cublasStatus_t blasRes = cublasSgemmStridedBatched(
 		rt->blas,
-		CUBLAS_OP_N,
-		CUBLAS_OP_N,
+		transposeRight ? CUBLAS_OP_T : CUBLAS_OP_N,
+		transposeLeft ? CUBLAS_OP_T : CUBLAS_OP_N,
 		cols,
 		rows,
 		inner,
@@ -1259,9 +1260,17 @@ func (rt *deviceRuntime) matMulCublas(lhs, rhs, out0 C.CUdeviceptr, lhsRows, lhs
 	return nil
 }
 
-func (rt *deviceRuntime) matMulCublasStridedBatched(lhs, rhs, out0 C.CUdeviceptr, batches, lhsRows, lhsCols, rhsRows, rhsCols C.int) error {
+func (rt *deviceRuntime) matMulCublasStridedBatched(lhs, rhs, out0 C.CUdeviceptr, batches, lhsRows, lhsCols, rhsRows, rhsCols C.int, transposeLeft, transposeRight bool) error {
 	var errStr *C.char
-	if C.barrCudaMatMulCublasStridedBatched(rt.ptr, lhs, rhs, out0, batches, lhsRows, lhsCols, rhsRows, rhsCols, &errStr) != 0 {
+	var left C.int
+	var right C.int
+	if transposeLeft {
+		left = 1
+	}
+	if transposeRight {
+		right = 1
+	}
+	if C.barrCudaMatMulCublasStridedBatched(rt.ptr, lhs, rhs, out0, batches, lhsRows, lhsCols, rhsRows, rhsCols, left, right, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1544,11 +1553,12 @@ func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, output
 			return backend.StepDispatchResult{}, err
 		}
 	} else {
-		if transposeLeft || transposeRight {
-			return backend.StepDispatchResult{}, fmt.Errorf("cuda strided-batched matmul does not support transpose")
-		}
 		lhsRows, lhsCols := rows, inner
 		rhsRows, rhsCols := inner, cols
+		if transposeLeft || transposeRight {
+			lhsRows, lhsCols = matrixShape(inputs[0])
+			rhsRows, rhsCols = matrixShape(inputs[1])
+		}
 		lhsBuf, err := rt.uploadMatMulScratchFloat32("matmul_lhs", inputs[0].F32)
 		if err != nil {
 			return backend.StepDispatchResult{}, err
@@ -1561,7 +1571,7 @@ func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, output
 		if err != nil {
 			return backend.StepDispatchResult{}, err
 		}
-		if err := rt.matMulCublasStridedBatched(lhsBuf, rhsBuf, outBuf, C.int(batches), C.int(lhsRows), C.int(lhsCols), C.int(rhsRows), C.int(rhsCols)); err != nil {
+		if err := rt.matMulCublasStridedBatched(lhsBuf, rhsBuf, outBuf, C.int(batches), C.int(lhsRows), C.int(lhsCols), C.int(rhsRows), C.int(rhsCols), transposeLeft, transposeRight); err != nil {
 			return backend.StepDispatchResult{}, err
 		}
 		if err := rt.downloadFloat32(outHost, outBuf); err != nil {
@@ -1642,23 +1652,49 @@ func matmulLayoutWithTranspose(lhs, rhs *backend.Tensor, transposeLeft, transpos
 	if lhs == nil || rhs == nil {
 		return 0, 0, 0, 0, false, nil, fmt.Errorf("nil matmul input")
 	}
-	if len(lhs.Shape) != 2 || len(rhs.Shape) != 2 {
-		return 0, 0, 0, 0, false, nil, fmt.Errorf("transposed matmul expects rank-2 tensors")
+	switch len(lhs.Shape) {
+	case 2:
+		if len(rhs.Shape) != 2 {
+			return 0, 0, 0, 0, false, nil, fmt.Errorf("transposed rank-2 lhs requires rank-2 rhs tensor")
+		}
+		rows = lhs.Shape[0]
+		inner = lhs.Shape[1]
+		if transposeLeft {
+			rows, inner = inner, rows
+		}
+		rhsInner := rhs.Shape[0]
+		cols = rhs.Shape[1]
+		if transposeRight {
+			rhsInner, cols = cols, rhsInner
+		}
+		if inner != rhsInner {
+			return 0, 0, 0, 0, false, nil, fmt.Errorf("matmul mismatch %v x %v with transpose_left=%t transpose_right=%t", lhs.Shape, rhs.Shape, transposeLeft, transposeRight)
+		}
+		return 1, rows, inner, cols, false, []int{rows, cols}, nil
+	case 3:
+		if len(rhs.Shape) != 3 {
+			return 0, 0, 0, 0, false, nil, fmt.Errorf("transposed rank-3 lhs requires rank-3 rhs tensor")
+		}
+		if lhs.Shape[0] != rhs.Shape[0] {
+			return 0, 0, 0, 0, false, nil, fmt.Errorf("matmul batch mismatch %v x %v", lhs.Shape, rhs.Shape)
+		}
+		rows = lhs.Shape[1]
+		inner = lhs.Shape[2]
+		if transposeLeft {
+			rows, inner = inner, rows
+		}
+		rhsInner := rhs.Shape[1]
+		cols = rhs.Shape[2]
+		if transposeRight {
+			rhsInner, cols = cols, rhsInner
+		}
+		if inner != rhsInner {
+			return 0, 0, 0, 0, false, nil, fmt.Errorf("matmul mismatch %v x %v with transpose_left=%t transpose_right=%t", lhs.Shape, rhs.Shape, transposeLeft, transposeRight)
+		}
+		return lhs.Shape[0], rows, inner, cols, true, []int{lhs.Shape[0], rows, cols}, nil
+	default:
+		return 0, 0, 0, 0, false, nil, fmt.Errorf("transposed matmul expects rank-2 or rank-3 lhs tensor")
 	}
-	rows = lhs.Shape[0]
-	inner = lhs.Shape[1]
-	if transposeLeft {
-		rows, inner = inner, rows
-	}
-	rhsInner := rhs.Shape[0]
-	cols = rhs.Shape[1]
-	if transposeRight {
-		rhsInner, cols = cols, rhsInner
-	}
-	if inner != rhsInner {
-		return 0, 0, 0, 0, false, nil, fmt.Errorf("matmul mismatch %v x %v with transpose_left=%t transpose_right=%t", lhs.Shape, rhs.Shape, transposeLeft, transposeRight)
-	}
-	return 1, rows, inner, cols, false, []int{rows, cols}, nil
 }
 
 func matrixShape(t *backend.Tensor) (rows, cols int) {

@@ -51,12 +51,12 @@ The current reference smoke uses:
 Latest local CUDA result:
 
 ```text
-throughput: elapsed=25.236s pairs/s=51937.87 train_pairs/s=42594.29 eval_pairs/s=423845.92
+throughput: elapsed=13.168s pairs/s=99535.85 train_pairs/s=82262.50 eval_pairs/s=621792.84
 accelerators: forward=cuda optimizer=cuda activation=host contrastive=cuda
-profile delta: matmul_bind_calls=131174 matmul_runs=107552 matmul_run_upload_mb=7930.39 matmul_run_download_mb=5159.03 optimizer_updates=112 activation_calls=0 contrastive_calls=16
+profile delta: matmul_bind_calls=131174 matmul_runs=50208 matmul_run_upload_mb=4103.88 matmul_run_download_mb=2384.16 optimizer_updates=112 activation_calls=0 contrastive_calls=16
 ```
 
-This is the promoted default path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, and strided-batched cuBLAS for grouped attention matmuls.
+This is the promoted default path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, strided-batched cuBLAS for grouped attention matmuls, and rank-3 transpose support for grouped attention backward.
 
 ## Recent Perf Delta
 
@@ -69,24 +69,25 @@ The training hot path moved as follows on the same mini smoke:
 | Grouped batched backward default | `33328.94` | `237568` |
 | Exact-length grouped forward default | `35856.58` | `140056` |
 | Strided-batched grouped attention | `42594.29` | `107552` |
+| Rank-3 transpose batched attention backward | `82262.50` | `50208` |
 
-The main wins came from grouping real text batches by sequence length during backward, coalescing parameter-gradient matmuls into taller `X^T*dY` operations, grouping contrastive forward sequences by exact token length inside each original batch, and promoting rank-3 x rank-3 CUDA matmul to `cublasSgemmStridedBatched`. The forward grouping keeps the full in-batch negative set intact and avoids padding, so attention math does not change.
+The main wins came from grouping real text batches by sequence length during backward, coalescing parameter-gradient matmuls into taller `X^T*dY` operations, grouping contrastive forward sequences by exact token length inside each original batch, promoting rank-3 x rank-3 CUDA matmul to `cublasSgemmStridedBatched`, and allowing strided-batched matmul to handle transpose flags directly. The forward grouping keeps the full in-batch negative set intact and avoids padding, so attention math does not change.
 
 ## How Much Faster Can It Get?
 
 The current profile still shows the next bottleneck is backend transfer/orchestration, not raw math:
 
 ```text
-MatMulRuns ~= 107552 per 4096-example mini smoke
-RunUploadedBytes ~= 7.93 GiB
-RunDownloadedBytes ~= 5.16 GiB
+MatMulRuns ~= 50208 per 4096-example mini smoke
+RunUploadedBytes ~= 4.10 GiB
+RunDownloadedBytes ~= 2.38 GiB
 ```
 
 Reasonable next targets:
 
-- `45k-55k train pairs/s`: reduce forward/backward activation upload/download churn and keep same-length grouped intermediates device-resident.
-- `55k-75k train pairs/s`: fuse attention and FFN backward kernels so small tensor products stop round-tripping through host-owned orchestration.
-- `75k-120k train pairs/s`: persistent device-resident training steps with fewer per-layer dispatches and larger effective batches.
+- `90k-120k train pairs/s`: batch/fuse remaining activation backward work and reduce host materialization inside same-length groups.
+- `120k-180k train pairs/s`: keep forward/backward intermediates device-resident across full layer groups and raise effective batch size when memory allows.
+- `180k+ train pairs/s`: persistent device-resident training steps with fused attention/FFN backward and fewer per-layer dispatches.
 
 The practical ceiling for this tiny model is dominated by orchestration and host-device transfer, not raw GEMM throughput. Larger models will shift more time into actual math, but the same device-residency work is still required to get high GPU utilization.
 

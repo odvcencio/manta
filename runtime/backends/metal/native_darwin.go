@@ -785,23 +785,49 @@ func matmulLayoutWithTranspose(lhs, rhs *backend.Tensor, transposeLeft, transpos
 	if lhs == nil || rhs == nil {
 		return 0, 0, 0, 0, false, nil, fmt.Errorf("nil matmul input")
 	}
-	if len(lhs.Shape) != 2 || len(rhs.Shape) != 2 {
-		return 0, 0, 0, 0, false, nil, fmt.Errorf("transposed matmul expects rank-2 tensors")
+	switch len(lhs.Shape) {
+	case 2:
+		if len(rhs.Shape) != 2 {
+			return 0, 0, 0, 0, false, nil, fmt.Errorf("transposed rank-2 lhs requires rank-2 rhs tensor")
+		}
+		rows = lhs.Shape[0]
+		inner = lhs.Shape[1]
+		if transposeLeft {
+			rows, inner = inner, rows
+		}
+		rhsInner := rhs.Shape[0]
+		cols = rhs.Shape[1]
+		if transposeRight {
+			rhsInner, cols = cols, rhsInner
+		}
+		if inner != rhsInner {
+			return 0, 0, 0, 0, false, nil, fmt.Errorf("matmul mismatch %v x %v with transpose_left=%t transpose_right=%t", lhs.Shape, rhs.Shape, transposeLeft, transposeRight)
+		}
+		return 1, rows, inner, cols, false, []int{rows, cols}, nil
+	case 3:
+		if len(rhs.Shape) != 3 {
+			return 0, 0, 0, 0, false, nil, fmt.Errorf("transposed rank-3 lhs requires rank-3 rhs tensor")
+		}
+		if lhs.Shape[0] != rhs.Shape[0] {
+			return 0, 0, 0, 0, false, nil, fmt.Errorf("matmul batch mismatch %v x %v", lhs.Shape, rhs.Shape)
+		}
+		rows = lhs.Shape[1]
+		inner = lhs.Shape[2]
+		if transposeLeft {
+			rows, inner = inner, rows
+		}
+		rhsInner := rhs.Shape[1]
+		cols = rhs.Shape[2]
+		if transposeRight {
+			rhsInner, cols = cols, rhsInner
+		}
+		if inner != rhsInner {
+			return 0, 0, 0, 0, false, nil, fmt.Errorf("matmul mismatch %v x %v with transpose_left=%t transpose_right=%t", lhs.Shape, rhs.Shape, transposeLeft, transposeRight)
+		}
+		return lhs.Shape[0], rows, inner, cols, true, []int{lhs.Shape[0], rows, cols}, nil
+	default:
+		return 0, 0, 0, 0, false, nil, fmt.Errorf("transposed matmul expects rank-2 or rank-3 lhs tensor")
 	}
-	rows = lhs.Shape[0]
-	inner = lhs.Shape[1]
-	if transposeLeft {
-		rows, inner = inner, rows
-	}
-	rhsInner := rhs.Shape[0]
-	cols = rhs.Shape[1]
-	if transposeRight {
-		rhsInner, cols = cols, rhsInner
-	}
-	if inner != rhsInner {
-		return 0, 0, 0, 0, false, nil, fmt.Errorf("matmul mismatch %v x %v with transpose_left=%t transpose_right=%t", lhs.Shape, rhs.Shape, transposeLeft, transposeRight)
-	}
-	return 1, rows, inner, cols, false, []int{rows, cols}, nil
 }
 
 func matrixShape(t *backend.Tensor) (rows, cols int) {

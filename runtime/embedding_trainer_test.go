@@ -40,6 +40,22 @@ func (a *countingMatMulAccelerator) RunMatMul(inputs []*backend.Tensor, outputTy
 	return backend.StepDispatchResult{}, nil
 }
 func (a *countingMatMulAccelerator) RunMatMulWithTranspose(inputs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+	a.runCalls++
+	if len(inputs) == 2 && len(inputs[0].Shape) == 3 && len(inputs[1].Shape) == 3 {
+		lhs := inputs[0]
+		rhs := inputs[1]
+		lhsRows, lhsCols := lhs.Shape[1], lhs.Shape[2]
+		rhsRows, rhsCols := rhs.Shape[1], rhs.Shape[2]
+		outRows, outCols, ok := trainerMatMulShape(lhsRows, lhsCols, rhsRows, rhsCols, transposeLeft, transposeRight)
+		if lhs.Shape[0] == rhs.Shape[0] && ok {
+			if lhs.Shape[0] > a.maxRunBatches {
+				a.maxRunBatches = lhs.Shape[0]
+			}
+			return backend.StepDispatchResult{Outputs: []*backend.Tensor{
+				backend.NewTensorF32([]int{lhs.Shape[0], outRows, outCols}, make([]float32, lhs.Shape[0]*outRows*outCols)),
+			}}, nil
+		}
+	}
 	return backend.StepDispatchResult{}, nil
 }
 func (a *countingMatMulAccelerator) BindMatrix(name string, tensor *backend.Tensor) error {
