@@ -51,12 +51,12 @@ The current reference smoke uses:
 Latest local CUDA result:
 
 ```text
-throughput: elapsed=33.426s pairs/s=39212.02 train_pairs/s=33328.94 eval_pairs/s=133403.79
+throughput: elapsed=30.298s pairs/s=43261.36 train_pairs/s=35856.58 eval_pairs/s=248697.34
 accelerators: forward=cuda optimizer=cuda activation=host contrastive=cuda
-profile delta: matmul_bind_calls=131174 matmul_runs=237568 matmul_run_upload_mb=3856.50 matmul_run_download_mb=2384.16 optimizer_updates=112 activation_calls=0 contrastive_calls=16
+profile delta: matmul_bind_calls=131174 matmul_runs=140056 matmul_run_upload_mb=7534.34 matmul_run_download_mb=5159.03 optimizer_updates=112 activation_calls=0 contrastive_calls=16
 ```
 
-This is the promoted default path. It includes CUDA matmul scratch-buffer reuse and grouped batched backward.
+This is the promoted default path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, and exact-length grouped contrastive forward for variable-length text.
 
 ## Recent Perf Delta
 
@@ -67,24 +67,25 @@ The training hot path moved as follows on the same mini smoke:
 | Instrumented baseline | `21975.83` | `409600` |
 | CUDA scratch reuse | `22933.16` | `409600` |
 | Grouped batched backward default | `33328.94` | `237568` |
+| Exact-length grouped forward default | `35856.58` | `140056` |
 
-The main win came from grouping real text batches by sequence length during backward and coalescing parameter-gradient matmuls into taller `X^T*dY` operations. That cut backend matmul dispatch pressure by about `42%` and moved train throughput by about `52%` over the instrumented baseline.
+The main wins came from grouping real text batches by sequence length during backward, coalescing parameter-gradient matmuls into taller `X^T*dY` operations, and grouping contrastive forward sequences by exact token length inside each original batch. The forward grouping keeps the full in-batch negative set intact and avoids padding, so attention math does not change.
 
 ## How Much Faster Can It Get?
 
-The current profile still shows most wall time in backend matmul dispatch:
+The current profile still shows the next bottleneck is backend transfer/orchestration, not raw math:
 
 ```text
-MatMul RunNanos ~= 28.2s of 33.4s trainer elapsed
-RunUploadedBytes ~= 3.86 GiB
-RunDownloadedBytes ~= 2.38 GiB
+MatMulRuns ~= 140056 per 4096-example mini smoke
+RunUploadedBytes ~= 7.53 GiB
+RunDownloadedBytes ~= 5.16 GiB
 ```
 
 Reasonable next targets:
 
-- `45k-55k train pairs/s`: batch packing by sequence length before training plus more backward coalescing.
-- `55k-75k train pairs/s`: keep forward activations and backward intermediates device-resident across forward to backward.
-- `75k-120k train pairs/s`: fused attention/FFN backward kernels that stop routing every small tensor product through host-owned orchestration.
+- `45k-55k train pairs/s`: reduce forward/backward activation upload/download churn and keep same-length grouped intermediates device-resident.
+- `55k-75k train pairs/s`: fuse attention and FFN backward kernels so small tensor products stop round-tripping through host-owned orchestration.
+- `75k-120k train pairs/s`: persistent device-resident training steps with fewer per-layer dispatches and larger effective batches.
 
 The practical ceiling for this tiny model is dominated by orchestration and host-device transfer, not raw GEMM throughput. Larger models will shift more time into actual math, but the same device-residency work is still required to get high GPU utilization.
 

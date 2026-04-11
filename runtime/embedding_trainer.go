@@ -1133,14 +1133,19 @@ type embeddingBatchSequence struct {
 	encoded *embeddingEncodedSequence
 }
 
+type embeddingBatchSequenceSlot struct {
+	sequence *embeddingBatchSequence
+}
+
 func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []EmbeddingContrastiveExample, forward *embeddingForwardWeights, captureBindings bool) ([]*embeddingEncodedSequence, []*embeddingEncodedSequence, bool, error) {
 	if t == nil || t.forwardMatMul == nil || forward == nil || len(batch) == 0 || !batchedContrastiveForwardEnabled() {
 		return nil, nil, false, nil
 	}
-	seqLen := 0
 	sequences := make([]*embeddingBatchSequence, 0, len(batch)*2)
 	queries := make([]*embeddingEncodedSequence, len(batch))
 	positives := make([]*embeddingEncodedSequence, len(batch))
+	groups := map[int][]embeddingBatchSequenceSlot{}
+	lengths := make([]int, 0)
 	for i, example := range batch {
 		queryMask, err := t.prepareMask(example.QueryTokens, example.QueryMask)
 		if err != nil {
@@ -1150,51 +1155,62 @@ func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []Embed
 		if err != nil {
 			return nil, nil, true, fmt.Errorf("batch %d positive: %w", i, err)
 		}
-		if seqLen == 0 {
-			seqLen = len(example.QueryTokens)
-		}
-		if len(example.QueryTokens) != seqLen || len(example.PositiveTokens) != seqLen {
-			return nil, nil, false, nil
-		}
 		query, err := t.newEmbeddingBatchSequence(example.QueryTokens, queryMask, forward.token)
 		if err != nil {
+			t.releaseBatchEncodedSequences(sequences)
 			return nil, nil, true, fmt.Errorf("batch %d query: %w", i, err)
 		}
+		sequences = append(sequences, query)
 		positive, err := t.newEmbeddingBatchSequence(example.PositiveTokens, positiveMask, forward.token)
 		if err != nil {
+			t.releaseBatchEncodedSequences(sequences)
 			return nil, nil, true, fmt.Errorf("batch %d positive: %w", i, err)
 		}
 		queries[i] = query.encoded
 		positives[i] = positive.encoded
-		sequences = append(sequences, query, positive)
+		sequences = append(sequences, positive)
+		for _, sequence := range []*embeddingBatchSequence{query, positive} {
+			seqLen := len(sequence.tokens)
+			if _, ok := groups[seqLen]; !ok {
+				lengths = append(lengths, seqLen)
+			}
+			groups[seqLen] = append(groups[seqLen], embeddingBatchSequenceSlot{sequence: sequence})
+		}
 	}
-	if seqLen == 0 || len(sequences) == 0 {
+	if len(sequences) == 0 {
 		return nil, nil, false, nil
 	}
 	for layer := 0; layer < t.encoderRepeats(); layer++ {
-		states := make([]*embeddingSequenceState, len(sequences))
-		for i, sequence := range sequences {
-			state, err := newEmbeddingSequenceState(sequence.tokens, sequence.mask, sequence.current, forward.hidden, forward.proj)
-			if err != nil {
+		for _, seqLen := range lengths {
+			slots := groups[seqLen]
+			states := make([]*embeddingSequenceState, len(slots))
+			for i, slot := range slots {
+				state, err := newEmbeddingSequenceState(slot.sequence.tokens, slot.sequence.mask, slot.sequence.current, forward.hidden, forward.proj)
+				if err != nil {
+					t.releaseBatchEncodedSequences(sequences)
+					for _, state := range states {
+						t.releaseSequenceBindings(state)
+					}
+					return nil, nil, true, err
+				}
+				if captureBindings {
+					d := stateWidth(forward.hidden, forward.proj)
+					state.inputBinding = t.bindSequenceTensor(state, "input", tensorF32View([]int{len(state.tokens), d}, state.input), true, false)
+				}
+				states[i] = state
+			}
+			if err := t.encodeBatchedLayerStates(states, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, captureBindings); err != nil {
 				t.releaseBatchEncodedSequences(sequences)
+				for _, state := range states {
+					t.releaseSequenceBindings(state)
+				}
 				return nil, nil, true, err
 			}
-			if captureBindings {
-				d := stateWidth(forward.hidden, forward.proj)
-				state.inputBinding = t.bindSequenceTensor(state, "input", tensorF32View([]int{len(state.tokens), d}, state.input), true, false)
+			for i, state := range states {
+				sequence := slots[i].sequence
+				sequence.encoded.layers = append(sequence.encoded.layers, state)
+				sequence.current = append(sequence.current[:0], state.projected...)
 			}
-			states[i] = state
-		}
-		if err := t.encodeBatchedLayerStates(states, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, captureBindings); err != nil {
-			t.releaseBatchEncodedSequences(sequences)
-			for _, state := range states {
-				t.releaseSequenceBindings(state)
-			}
-			return nil, nil, true, err
-		}
-		for i, state := range states {
-			sequences[i].encoded.layers = append(sequences[i].encoded.layers, state)
-			sequences[i].current = append(sequences[i].current[:0], state.projected...)
 		}
 	}
 	for _, sequence := range sequences {

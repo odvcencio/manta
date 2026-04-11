@@ -1363,6 +1363,38 @@ func TestEmbeddingTrainerTrainContrastiveStepEncodesEachSequenceOncePerBatch(t *
 	}
 }
 
+func TestEmbeddingTrainerBatchedForwardGroupsVariableSequenceLengths(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+	batch := []EmbeddingContrastiveExample{
+		{QueryTokens: []int32{0}, PositiveTokens: []int32{0, 2}, QueryMask: []int32{1}, PositiveMask: []int32{1, 1}},
+		{QueryTokens: []int32{1}, PositiveTokens: []int32{1, 2}, QueryMask: []int32{1}, PositiveMask: []int32{1, 1}},
+		{QueryTokens: []int32{2, 0}, PositiveTokens: []int32{2}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1}},
+	}
+
+	forward := trainer.prepareForwardWeights()
+	trainer.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	queries, positives, err := trainer.encodeContrastiveBatch(batch, forward, true)
+	if err != nil {
+		t.Fatalf("encode contrastive batch: %v", err)
+	}
+	defer trainer.releaseEncodedSequences(queries)
+	defer trainer.releaseEncodedSequences(positives)
+	if trainer.sequenceBindingID != 6 {
+		t.Fatalf("sequence binding count = %d, want 6 encoded sequences", trainer.sequenceBindingID)
+	}
+	if fake.boundRightRuns == 0 {
+		t.Fatalf("batched forward path did not attempt bound-right matmul")
+	}
+	if fake.maxBoundRightRows <= 2 {
+		t.Fatalf("max bound-right lhs rows = %d, want length-grouped rows above any single sequence", fake.maxBoundRightRows)
+	}
+}
+
 func TestEmbeddingTrainerBatchedForwardCanBeDisabled(t *testing.T) {
 	t.Setenv("BARR_TRAIN_DISABLE_BATCHED_FORWARD", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
