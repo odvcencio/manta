@@ -18,6 +18,7 @@ type countingMatMulAccelerator struct {
 	runCalls          int
 	maxRunBatches     int
 	boundRightRuns    int
+	multiBoundRuns    int
 	maxBoundRightRows int
 	bound             map[string]*backend.Tensor
 }
@@ -79,6 +80,32 @@ func (a *countingMatMulAccelerator) RunMatMulWithBoundRight(lhs *backend.Tensor,
 		a.maxBoundRightRows = lhs.Shape[0]
 	}
 	return backend.StepDispatchResult{}, nil
+}
+func (a *countingMatMulAccelerator) RunMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+	a.multiBoundRuns++
+	a.boundRightRuns += len(rightNames)
+	if lhs != nil && len(lhs.Shape) > 0 && lhs.Shape[0] > a.maxBoundRightRows {
+		a.maxBoundRightRows = lhs.Shape[0]
+	}
+	results := make([]backend.StepDispatchResult, len(rightNames))
+	rows := 0
+	inner := 0
+	if lhs != nil && len(lhs.Shape) == 2 {
+		rows = lhs.Shape[0]
+		inner = lhs.Shape[1]
+	}
+	for i, name := range rightNames {
+		cols := inner
+		if a.bound != nil {
+			if rhs := a.bound[name]; rhs != nil && len(rhs.Shape) == 2 {
+				cols = rhs.Shape[1]
+			}
+		}
+		results[i] = backend.StepDispatchResult{Outputs: []*backend.Tensor{
+			backend.NewTensorF32([]int{rows, cols}, make([]float32, rows*cols)),
+		}}
+	}
+	return results, nil
 }
 func (a *countingMatMulAccelerator) Stats() backend.MatMulAcceleratorStats {
 	return backend.MatMulAcceleratorStats{
@@ -1529,6 +1556,9 @@ func TestEmbeddingTrainerTrainContrastiveStepEncodesEachSequenceOncePerBatch(t *
 	if fake.boundRightRuns == 0 {
 		t.Fatalf("batched forward path did not attempt bound-right matmul")
 	}
+	if fake.multiBoundRuns == 0 {
+		t.Fatalf("batched forward path did not coalesce q/k/v bound-right matmuls")
+	}
 	if fake.maxBoundRightRows < 6 {
 		t.Fatalf("max bound-right lhs rows = %d, want batched rows", fake.maxBoundRightRows)
 	}
@@ -1561,11 +1591,43 @@ func TestEmbeddingTrainerBatchedForwardGroupsVariableSequenceLengths(t *testing.
 	if fake.boundRightRuns == 0 {
 		t.Fatalf("batched forward path did not attempt bound-right matmul")
 	}
+	if fake.multiBoundRuns == 0 {
+		t.Fatalf("batched forward path did not coalesce q/k/v bound-right matmuls")
+	}
 	if fake.maxBoundRightRows <= 2 {
 		t.Fatalf("max bound-right lhs rows = %d, want length-grouped rows above any single sequence", fake.maxBoundRightRows)
 	}
 	if fake.runCalls == 0 || fake.maxRunBatches < 2 {
 		t.Fatalf("attention matmul run calls=%d max batches=%d, want batched attention dispatch", fake.runCalls, fake.maxRunBatches)
+	}
+}
+
+func TestEmbeddingTrainerQKVMultiBoundCanBeDisabled(t *testing.T) {
+	t.Setenv("BARR_TRAIN_DISABLE_QKV_MULTI_BOUND", "1")
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+	batch := []EmbeddingContrastiveExample{
+		{QueryTokens: []int32{0, 2}, PositiveTokens: []int32{0, 0}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}},
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 1}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}},
+	}
+
+	forward := trainer.prepareForwardWeights()
+	trainer.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	queries, positives, err := trainer.encodeContrastiveBatch(batch, forward, true)
+	if err != nil {
+		t.Fatalf("encode contrastive batch: %v", err)
+	}
+	defer trainer.releaseEncodedSequences(queries)
+	defer trainer.releaseEncodedSequences(positives)
+	if fake.multiBoundRuns != 0 {
+		t.Fatalf("multi-bound q/k/v runs = %d, want disabled", fake.multiBoundRuns)
+	}
+	if fake.boundRightRuns == 0 {
+		t.Fatal("expected fallback bound-right matmuls when q/k/v coalescing is disabled")
 	}
 }
 

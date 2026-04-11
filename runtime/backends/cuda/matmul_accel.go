@@ -73,6 +73,13 @@ func (a *matMulAccelerator) RunMatMulWithBoundRight(lhs *backend.Tensor, rightNa
 	return a.device.runMatMulWithBoundRight(lhs, rightName, outputType, transposeLeft, transposeRight)
 }
 
+func (a *matMulAccelerator) RunMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+	if a == nil || a.device == nil {
+		return nil, fmt.Errorf("cuda matmul accelerator is not initialized")
+	}
+	return a.device.runMatMulWithBoundRights(lhs, rightNames, outputType, transposeLeft, transposeRight)
+}
+
 func (a *matMulAccelerator) Stats() backend.MatMulAcceleratorStats {
 	if a == nil || a.device == nil {
 		return backend.MatMulAcceleratorStats{}

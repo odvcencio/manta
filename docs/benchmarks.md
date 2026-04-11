@@ -51,12 +51,12 @@ The current reference smoke uses:
 Latest local CUDA result:
 
 ```text
-throughput: elapsed=5.975s examples/s=771.26 pairs/s=745892.27 train_examples/s=723.74 train_pairs/s=741111.67 eval_examples/s=1624.62 eval_pairs/s=831804.78 optimizer_steps/s=0.71
+throughput: elapsed=6.053s examples/s=761.24 pairs/s=736203.17 train_examples/s=710.09 train_pairs/s=727127.64 eval_examples/s=1796.85 eval_pairs/s=919988.93 optimizer_steps/s=0.69
 accelerators: forward=cuda optimizer=cuda activation=host contrastive=cuda
-profile delta: matmul_bind_calls=30 matmul_runs=16464 matmul_run_upload_mb=4173.15 matmul_run_download_mb=2208.41 optimizer_updates=28 activation_calls=0 contrastive_calls=4
+profile delta: matmul_bind_calls=30 matmul_runs=16464 matmul_run_upload_mb=3935.98 matmul_run_download_mb=2208.41 optimizer_updates=28 activation_calls=0 contrastive_calls=4
 ```
 
-This is the promoted default benchmark path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, strided-batched cuBLAS for grouped attention matmuls, rank-3 transpose support for grouped attention backward, batch-1024 contrastive training, sequence matmul bindings disabled by default, and grouped activation-backward helpers kept behind the activation accelerator flag. The larger batch keeps the full in-batch negative set intact, improves contrastive signal, cuts optimizer/contrastive calls on this smoke, and reduces per-pair orchestration overhead. Disabling per-sequence matmul bindings trades a small upload increase for a large reduction in backend binding churn. The CLI/runtime default remains conservative until Barracuda has an adaptive CPU/GPU batch policy.
+This is the promoted default benchmark path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, strided-batched cuBLAS for grouped attention matmuls, rank-3 transpose support for grouped attention backward, batch-1024 contrastive training, sequence matmul bindings disabled by default, Q/K/V forward projection coalescing through a multi-bound-right CUDA path, and grouped activation-backward helpers kept behind the activation accelerator flag. The larger batch keeps the full in-batch negative set intact, improves contrastive signal, cuts optimizer/contrastive calls on this smoke, and reduces per-pair orchestration overhead. Disabling per-sequence matmul bindings trades a small upload increase for a large reduction in backend binding churn. Q/K/V coalescing preserves per-weight residency and quantization while uploading each shared left-hand activation once across query/key/value projections. The CLI/runtime default remains conservative until Barracuda has an adaptive CPU/GPU batch policy.
 
 Read the throughput line with both lenses:
 
@@ -83,6 +83,8 @@ The training hot path moved as follows on the same mini smoke:
 
 The main wins came from grouping real text batches by sequence length during backward, coalescing parameter-gradient matmuls into taller `X^T*dY` operations, grouping contrastive forward sequences by exact token length inside each original batch, promoting rank-3 x rank-3 CUDA matmul to `cublasSgemmStridedBatched`, allowing strided-batched matmul to handle transpose flags directly, and increasing the effective contrastive batch. The forward grouping keeps the full in-batch negative set intact and avoids padding, so attention math does not change.
 
+The Q/K/V multi-bound-right path is transfer progress, not a claimed default throughput win yet. On batch 1024 it holds `matmul_runs=16464` and reduces matmul run uploads from `4173.15 MB` to `3935.98 MB`; local wall-clock samples remain noisy and roughly neutral. A disabled A/B run measured `711.62 train_examples/s` with the old `4173.15 MB` upload profile.
+
 ## Batch Sweep
 
 Batch size is now the largest exposed training knob. On the same 4096-example mini smoke:
@@ -90,8 +92,8 @@ Batch size is now the largest exposed training knob. On the same 4096-example mi
 | Batch | Run steps | Train examples/s | Train pairs/s | Matmul runs | Max RSS |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | `512` | `8` | `558.19` | `285791.12` | `28848` | `1.02 GB` |
-| `1024` | `4` | `725.08` | `742477.76` | `16464` | `1.51 GB` |
-| `2048` | `2` | `820.54` | `1680463.06` | `9408` | `2.51 GB` |
+| `1024` | `4` | `710.09` | `727127.64` | `16464` | `1.51 GB` |
+| `2048` | `2` | `827.20` | `1694107.56` | `9408` | `2.50 GB` |
 | `4096` | `1` | `741.49` | `3037152.08` | `5616` | `4.47 GB` |
 
 Batch 2048 is a useful ceiling or large-corpus setting, but it halves optimizer steps on this mini smoke. Batch 4096 is one update and regresses example throughput despite very high pair throughput. Batch 1024 is the benchmark default because it keeps multiple updates in the smoke and captures most of the real throughput win.
@@ -102,7 +104,7 @@ The current profile still shows the next bottleneck is backend transfer/orchestr
 
 ```text
 MatMulRuns ~= 16464 per 4096-example mini smoke at batch 1024
-RunUploadedBytes ~= 4.17 GiB
+RunUploadedBytes ~= 3.94 GiB
 RunDownloadedBytes ~= 2.21 GiB
 ```
 
@@ -133,6 +135,12 @@ BARR_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS=1
 ```
 
 Re-enables per-sequence matmul bindings. These are disabled by default because batch-1024 grouped training spends more time binding and unbinding short-lived sequence tensors than it saves in uploads. Keep this for small-batch experiments and regression checks.
+
+```bash
+BARR_TRAIN_DISABLE_QKV_MULTI_BOUND=1
+```
+
+Disables Q/K/V forward projection coalescing. By default CUDA uses one uploaded left-hand activation with three resident right-hand Q/K/V matrices for same-length forward groups. This cuts transfer bytes while preserving each right-hand weight's own quantization state.
 
 ```bash
 BARR_TRAIN_ENABLE_ACTIVATION_ACCEL=1

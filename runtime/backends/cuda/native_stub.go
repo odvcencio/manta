@@ -48,6 +48,10 @@ func (rt *deviceRuntime) runMatMulWithBoundRight(lhs *backend.Tensor, rightName 
 	return backend.StepDispatchResult{}, nil
 }
 
+func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+	return nil, nil
+}
+
 func (rt *deviceRuntime) runMatMulWithBoundLeft(leftName string, rhs *backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }

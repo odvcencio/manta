@@ -1242,6 +1242,18 @@ func sequenceMatMulBindingsEnabled() bool {
 	return trainEnvFlagEnabled("BARR_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS")
 }
 
+func qkvMultiBoundRightEnabled() bool {
+	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_QKV_MULTI_BOUND") {
+		return false
+	}
+	switch os.Getenv("BARR_TRAIN_QKV_MULTI_BOUND") {
+	case "0", "false", "FALSE", "no", "NO":
+		return false
+	default:
+		return true
+	}
+}
+
 func batchedBackwardEnabled() bool {
 	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_BATCHED_BACKWARD") {
 		return false
@@ -1321,21 +1333,23 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 	}
 
 	if attentionQuery != nil && attentionKey != nil && attentionValue != nil && attentionOutput != nil {
-		t.fillBatchedForwardWeightMatMul(states, seqLen, d, func(state *embeddingSequenceState) []float32 {
-			return state.input
-		}, t.attnQParam.Name, attentionQuery, d, func(state *embeddingSequenceState) []float32 {
-			return state.attnQ
-		})
-		t.fillBatchedForwardWeightMatMul(states, seqLen, d, func(state *embeddingSequenceState) []float32 {
-			return state.input
-		}, t.attnKParam.Name, attentionKey, d, func(state *embeddingSequenceState) []float32 {
-			return state.attnK
-		})
-		t.fillBatchedForwardWeightMatMul(states, seqLen, d, func(state *embeddingSequenceState) []float32 {
-			return state.input
-		}, t.attnVParam.Name, attentionValue, d, func(state *embeddingSequenceState) []float32 {
-			return state.attnV
-		})
+		if !t.fillBatchedForwardQKVMatMul(states, seqLen, d, attentionQuery, attentionKey, attentionValue) {
+			t.fillBatchedForwardWeightMatMul(states, seqLen, d, func(state *embeddingSequenceState) []float32 {
+				return state.input
+			}, t.attnQParam.Name, attentionQuery, d, func(state *embeddingSequenceState) []float32 {
+				return state.attnQ
+			})
+			t.fillBatchedForwardWeightMatMul(states, seqLen, d, func(state *embeddingSequenceState) []float32 {
+				return state.input
+			}, t.attnKParam.Name, attentionKey, d, func(state *embeddingSequenceState) []float32 {
+				return state.attnK
+			})
+			t.fillBatchedForwardWeightMatMul(states, seqLen, d, func(state *embeddingSequenceState) []float32 {
+				return state.input
+			}, t.attnVParam.Name, attentionValue, d, func(state *embeddingSequenceState) []float32 {
+				return state.attnV
+			})
+		}
 		for _, state := range states {
 			if captureBindings {
 				state.attnQBinding = t.bindSequenceTensor(state, "q", tensorF32View([]int{seqLen, d}, state.attnQ), true, false)
@@ -1496,6 +1510,74 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 		}
 	}
 	return nil
+}
+
+func trainerF32TensorValueType() barr.ValueType {
+	return barr.ValueType{
+		Kind: barr.ValueTensor,
+		Tensor: &barr.TensorType{
+			DType: "f32",
+		},
+	}
+}
+
+func (t *EmbeddingTrainer) fillBatchedForwardQKVMatMul(states []*embeddingSequenceState, rows, width int, attentionQuery, attentionKey, attentionValue *backend.Tensor) bool {
+	if t == nil || t.forwardMatMul == nil || len(states) == 0 || rows == 0 || width == 0 {
+		return false
+	}
+	if !qkvMultiBoundRightEnabled() {
+		return false
+	}
+	multi, ok := t.forwardMatMul.(backend.MultiBoundRightMatMulAccelerator)
+	if !ok {
+		return false
+	}
+	if attentionQuery == nil || attentionKey == nil || attentionValue == nil {
+		return false
+	}
+	if len(attentionQuery.Shape) != 2 || len(attentionKey.Shape) != 2 || len(attentionValue.Shape) != 2 {
+		return false
+	}
+	for _, tensor := range []*backend.Tensor{attentionQuery, attentionKey, attentionValue} {
+		if tensor.Shape[0] != width || tensor.Shape[1] != width {
+			return false
+		}
+	}
+	perInput := rows * width
+	batchedLHS := make([]float32, len(states)*perInput)
+	for i, state := range states {
+		if state == nil || len(state.input) != perInput || len(state.attnQ) != perInput || len(state.attnK) != perInput || len(state.attnV) != perInput {
+			return false
+		}
+		copy(batchedLHS[i*perInput:(i+1)*perInput], state.input)
+	}
+	results, err := multi.RunMatMulWithBoundRights(
+		tensorF32View([]int{len(states) * rows, width}, batchedLHS),
+		[]string{t.attnQParam.Name, t.attnKParam.Name, t.attnVParam.Name},
+		trainerF32TensorValueType(),
+		false,
+		false,
+	)
+	if err != nil || len(results) != 3 {
+		return false
+	}
+	outs := make([][]float32, len(results))
+	for i, result := range results {
+		if len(result.Outputs) != 1 || result.Outputs[0] == nil {
+			return false
+		}
+		out := result.Outputs[0].F32
+		if len(out) != len(states)*perInput {
+			return false
+		}
+		outs[i] = out
+	}
+	for i, state := range states {
+		copy(state.attnQ, outs[0][i*perInput:(i+1)*perInput])
+		copy(state.attnK, outs[1][i*perInput:(i+1)*perInput])
+		copy(state.attnV, outs[2][i*perInput:(i+1)*perInput])
+	}
+	return true
 }
 
 func (t *EmbeddingTrainer) fillBatchedForwardWeightMatMul(states []*embeddingSequenceState, rows, inner int, lhs func(*embeddingSequenceState) []float32, rhsName string, rhs *backend.Tensor, cols int, dst func(*embeddingSequenceState) []float32) {

@@ -1390,6 +1390,113 @@ func (rt *deviceRuntime) unbindMatMulRight(name string) error {
 	return nil
 }
 
+func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+	if lhs == nil {
+		return nil, fmt.Errorf("cuda matmul lhs is nil")
+	}
+	if len(rightNames) == 0 {
+		return nil, fmt.Errorf("cuda matmul requires at least one rhs binding")
+	}
+	type boundRightPlan struct {
+		name            string
+		resident        residentMatrix
+		batches         int
+		rows            int
+		inner           int
+		cols            int
+		outShape        []int
+		lhsRows         int
+		lhsCols         int
+		rhsRows         int
+		rhsCols         int
+		downloadedBytes int64
+	}
+	plans := make([]boundRightPlan, len(rightNames))
+	for i, name := range rightNames {
+		resident, ok := rt.residentMatrices[name]
+		if !ok {
+			return nil, fmt.Errorf("cuda matmul binding %q is not resident", name)
+		}
+		rhsTensor := &backend.Tensor{DType: "f32", Shape: []int{resident.rows, resident.cols}}
+		batches, rows, inner, cols, rhsBatched, outShape, err := matmulLayout(lhs, rhsTensor)
+		if transposeLeft || transposeRight {
+			batches, rows, inner, cols, rhsBatched, outShape, err = matmulLayoutWithTranspose(lhs, rhsTensor, transposeLeft, transposeRight)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if rhsBatched {
+			return nil, fmt.Errorf("cuda cached rhs matmul does not support batched rhs")
+		}
+		lhsRows, lhsCols := batches*rows, inner
+		rhsRows, rhsCols := inner, cols
+		if transposeLeft || transposeRight {
+			lhsRows, lhsCols = matrixShape(lhs)
+			rhsRows, rhsCols = resident.rows, resident.cols
+		}
+		plans[i] = boundRightPlan{
+			name:            name,
+			resident:        resident,
+			batches:         batches,
+			rows:            rows,
+			inner:           inner,
+			cols:            cols,
+			outShape:        outShape,
+			lhsRows:         lhsRows,
+			lhsCols:         lhsCols,
+			rhsRows:         rhsRows,
+			rhsCols:         rhsCols,
+			downloadedBytes: int64(batches * rows * cols * 4),
+		}
+	}
+
+	compiled := cudaBuiltinMatMulCompiledKernel()
+	runStart := time.Now()
+	runUploadedBytes := int64(len(lhs.F32) * 4)
+	lhsBuf, err := rt.uploadMatMulScratchFloat32("matmul_lhs", lhs.F32)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]backend.StepDispatchResult, len(plans))
+	for i, plan := range plans {
+		if i > 0 {
+			runStart = time.Now()
+			runUploadedBytes = 0
+		}
+		outHost := make([]float32, plan.batches*plan.rows*plan.cols)
+		outBuf, err := rt.matMulScratchFloat32("matmul_out", len(outHost))
+		if err != nil {
+			return nil, err
+		}
+		if err := rt.matMulCublas(lhsBuf, plan.resident.ptr, outBuf, C.int(plan.lhsRows), C.int(plan.lhsCols), C.int(plan.rhsRows), C.int(plan.rhsCols), transposeLeft, transposeRight); err != nil {
+			return nil, err
+		}
+		if err := rt.downloadFloat32(outHost, outBuf); err != nil {
+			return nil, err
+		}
+		rt.recordMatMulRun(runStart, runUploadedBytes, plan.downloadedBytes, false, true)
+		results[i] = backend.StepDispatchResult{
+			Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, plan.outShape, outHost)},
+			VariantEntry: compiled.Entry,
+			SourceHash:   compiled.SourceHash,
+			Metadata: map[string]any{
+				"dispatch_mode":    "backend_native",
+				"execution_mode":   "cuda_device",
+				"device_execution": true,
+				"launch_api":       "cublasSgemm",
+				"launch_compiler":  "cublas",
+				"backend_library":  "cublas",
+				"transpose_left":   transposeLeft,
+				"transpose_right":  transposeRight,
+				"rhs_binding":      plan.name,
+				"rhs_residency":    "device_resident",
+				"coalesced_lhs":    true,
+			},
+		}
+	}
+	return results, nil
+}
+
 func (rt *deviceRuntime) runMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if lhs == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda matmul lhs is nil")

@@ -165,6 +165,80 @@ func TestCUDABoundQuantizedMatrixMatchesHostFakeQuantization(t *testing.T) {
 	}
 }
 
+func TestCUDAMultiBoundRightMatMulUploadsLHSOnce(t *testing.T) {
+	accelAny, err := NewMatMulAccelerator()
+	if err != nil {
+		t.Fatalf("new matmul accelerator: %v", err)
+	}
+	if accelAny == nil {
+		t.Skip("no cuda matmul accelerator available")
+	}
+	defer accelAny.Close()
+	multi, ok := accelAny.(backend.MultiBoundRightMatMulAccelerator)
+	if !ok {
+		t.Fatal("cuda matmul accelerator does not implement multi-bound-right matmul")
+	}
+
+	lhs := backend.NewTensorF32([]int{2, 2}, []float32{
+		1.0, -0.5,
+		0.25, 0.75,
+	})
+	rhsA := &backend.Tensor{
+		DType: "q8",
+		Shape: []int{2, 2},
+		F32: []float32{
+			0.9, -0.35,
+			0.2, 0.7,
+		},
+	}
+	rhsB := &backend.Tensor{
+		DType: "q8",
+		Shape: []int{2, 2},
+		F32: []float32{
+			0.1, 1.2,
+			-0.8, 0.4,
+		},
+	}
+	if err := accelAny.BindMatrix("rhs_a", rhsA); err != nil {
+		t.Fatalf("bind rhs_a: %v", err)
+	}
+	if err := accelAny.BindMatrix("rhs_b", rhsB); err != nil {
+		t.Fatalf("bind rhs_b: %v", err)
+	}
+	results, err := multi.RunMatMulWithBoundRights(lhs, []string{"rhs_a", "rhs_b"}, barr.ValueType{
+		Kind: barr.ValueTensor,
+		Tensor: &barr.TensorType{
+			DType: "f32",
+		},
+	}, false, false)
+	if err != nil {
+		t.Fatalf("run multi bound-right matmul: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("result count = %d, want 2", len(results))
+	}
+
+	for i, rhs := range []*backend.Tensor{rhsA, rhsB} {
+		if len(results[i].Outputs) != 1 || results[i].Outputs[0] == nil {
+			t.Fatalf("result %d output count = %d, want 1", i, len(results[i].Outputs))
+		}
+		qrhs := fakeQuantizeCopy(rhs.F32, 8)
+		want := make([]float32, 4)
+		fillHostMatMul(lhs.F32, 2, 2, qrhs, 2, want)
+		assertTensorClose(t, results[i].Outputs[0], []int{2, 2}, want)
+		if results[i].Metadata["coalesced_lhs"] != true {
+			t.Fatalf("result %d coalesced_lhs = %v, want true", i, results[i].Metadata["coalesced_lhs"])
+		}
+	}
+	stats := accelAny.Stats()
+	if stats.RunUploadedBytes != int64(len(lhs.F32)*4) {
+		t.Fatalf("run uploaded bytes = %d, want one lhs upload %d", stats.RunUploadedBytes, len(lhs.F32)*4)
+	}
+	if stats.RunCalls != 2 || stats.BoundRightCalls != 2 {
+		t.Fatalf("run calls=%d bound-right calls=%d, want 2/2", stats.RunCalls, stats.BoundRightCalls)
+	}
+}
+
 func TestCUDAStridedBatchedMatMulMatchesHost(t *testing.T) {
 	accelAny, err := NewMatMulAccelerator()
 	if err != nil {

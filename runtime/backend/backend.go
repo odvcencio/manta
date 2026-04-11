@@ -163,6 +163,13 @@ type MatMulAccelerator interface {
 	Close()
 }
 
+// MultiBoundRightMatMulAccelerator optionally coalesces several resident-right matmuls
+// that share the same left input. It preserves each bound right-hand tensor's own
+// residency and quantization state while avoiding repeated LHS uploads.
+type MultiBoundRightMatMulAccelerator interface {
+	RunMatMulWithBoundRights(lhs *Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]StepDispatchResult, error)
+}
+
 // OptimizerAccelerator exposes a backend-owned optimizer update fast path.
 type OptimizerAccelerator interface {
 	Backend() barr.BackendKind
