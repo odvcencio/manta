@@ -14,7 +14,7 @@ Barracuda is an inference-first GPU language and runtime stack. It compiles `.ba
 
 ## Product direction
 
-The near-term target is not “generic GPU programming.” The target is:
+The near-term target is an inference-first product surface for embedding, reranking, retrieval-time scoring, decode, and CorkScrewDB integration. Barracuda also owns the native training path needed to produce those default artifacts, so model authors do not need to train in Python, export through another format, and deploy through a separate runtime.
 
 That means the language and runtime should bias toward:
 
@@ -23,6 +23,7 @@ That means the language and runtime should bias toward:
 - rerank/select entrypoints that can return ids directly
 - inference kernels that can consume TurboQuant-native layouts directly
 - portable `.barr` artifacts that CorkScrewDB can load without rewriting host code
+- sealed MLL package exports that carry model definition, weights, tokenizer, memory plan, and metadata together
 
 ## Install
 
@@ -322,9 +323,11 @@ The compiler, IR pipeline, artifact format, semantic analysis, runtime, and CLI 
 ## Development
 
 ```bash
-go test ./...
+CGO_ENABLED=0 go test ./artifact/barr ./cmd/barr ./compiler ./models ./runtime/backend ./runtime/backends/metal ./syntax
 go build ./cmd/barr/
 ```
+
+CUDA-backed runtime tests require a working CUDA device and should be run separately from the no-cgo public gate.
 
 ## Benchmarks
 
