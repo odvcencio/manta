@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 
 	"github.com/odvcencio/barracuda/artifact/barr"
 	"github.com/odvcencio/barracuda/runtime/backend"
@@ -882,6 +883,22 @@ func (t *EmbeddingTrainer) ExportWeightFile() (WeightFile, error) {
 		return WeightFile{}, err
 	}
 	return NewWeightFile(weights), nil
+}
+
+// RenameEmbeddingModel updates the module and embedding manifest identity before rewriting a package.
+func (t *EmbeddingTrainer) RenameEmbeddingModel(name string) error {
+	if t == nil {
+		return fmt.Errorf("embedding trainer is not initialized")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("embedding model name is required")
+	}
+	if t.module != nil {
+		t.module.Name = name
+	}
+	t.manifest.Name = name
+	return nil
 }
 
 // WriteEmbeddingPackage writes a packaged embedding model to sibling artifact, manifest, and weight files.

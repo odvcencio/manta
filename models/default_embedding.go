@@ -11,7 +11,7 @@ import (
 	barruntime "github.com/odvcencio/barracuda/runtime"
 )
 
-const DefaultEmbeddingModelName = "barracuda-embed-v0"
+const DefaultEmbeddingModelName = "manta-embed-v0"
 
 // DefaultEmbeddingPackageConfig controls Barracuda's built-in default
 // embedding-model package initialization.
@@ -194,7 +194,7 @@ func moduleNameForModel(name string) string {
 	}
 	out := strings.Trim(b.String(), "_")
 	if out == "" {
-		return "barracuda_model"
+		return "manta_model"
 	}
 	return out
 }

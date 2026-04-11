@@ -96,6 +96,8 @@ func run(args []string) error {
 		return runInitModel(args[1:])
 	case "init-train":
 		return runInitTrain(args[1:])
+	case "rename-embed":
+		return runRenameEmbed(args[1:])
 	case "train-tokenizer":
 		return runTrainTokenizer(args[1:])
 	case "mine-text-pairs":
@@ -511,6 +513,60 @@ func runInitTrain(args []string) error {
 	fmt.Printf("checkpoint: %s\n", paths.CheckpointPath)
 	fmt.Printf("profile: %s\n", paths.TrainProfilePath)
 	return nil
+}
+
+func runRenameEmbed(args []string) error {
+	fs := flag.NewFlagSet("rename-embed", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var name string
+	fs.StringVar(&name, "name", "", "new embedding model name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
+		return fmt.Errorf("usage: barr rename-embed --name <model-name> <input.mll> <output.mll>")
+	}
+	inputPath := fs.Arg(0)
+	outputPath := fs.Arg(1)
+	trainer, err := barruntime.LoadEmbeddingTrainerPackage(inputPath)
+	if err != nil {
+		return err
+	}
+	if err := trainer.RenameEmbeddingModel(name); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return err
+	}
+	if err := copyTokenizerIfPresent(inputPath, outputPath); err != nil {
+		return err
+	}
+	paths, err := trainer.WriteTrainingPackage(outputPath)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("renamed embedding package %q -> %q\n", inputPath, outputPath)
+	fmt.Printf("model: %s\n", name)
+	fmt.Printf("embedding manifest: %s\n", paths.EmbeddingManifestPath)
+	fmt.Printf("weights: %s\n", paths.WeightFilePath)
+	fmt.Printf("checkpoint: %s\n", paths.CheckpointPath)
+	fmt.Printf("profile: %s\n", paths.TrainProfilePath)
+	return nil
+}
+
+func copyTokenizerIfPresent(inputPath, outputPath string) error {
+	sourcePath := barruntime.DefaultTokenizerPath(inputPath)
+	if _, err := os.Stat(sourcePath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(barruntime.DefaultTokenizerPath(outputPath), data, 0o644)
 }
 
 func runTrainEmbed(args []string) error {
@@ -1044,6 +1100,7 @@ func printUsage() {
 	fmt.Println("  barr export-mll <artifact.mll> [output.mll]")
 	fmt.Println("  barr init-model [flags] <artifact.mll>")
 	fmt.Println("  barr init-train [flags] <artifact.mll>")
+	fmt.Println("  barr rename-embed --name <model-name> <input.mll> <output.mll>")
 	fmt.Println("  barr train-tokenizer [flags] <artifact.mll> <corpus.txt>")
 	fmt.Println("  barr train-corpus [flags] <artifact.mll> <corpus.txt>")
 	fmt.Println("  barr train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]")
@@ -1055,6 +1112,7 @@ func printUsage() {
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Barracuda metadata in XBAR.")
 	fmt.Println("init-model creates the Barracuda-owned default quantized embedding training package.")
 	fmt.Println("init-train creates a native training package next to an artifact.")
+	fmt.Println("rename-embed rewrites a training package under a new embedding model identity.")
 	fmt.Println("train-tokenizer builds a sibling .tokenizer.mll from a raw text corpus, using embedding-manifest vocab_size by default.")
 	fmt.Println("train-corpus trains tokenizer + mined text pairs + embedder in one Barracuda job from a raw text corpus.")
 	fmt.Println("train-embed reloads a training package, fits it on token JSONL or text JSONL (with --tokenizer or a sibling .tokenizer.mll), and writes it back.")
