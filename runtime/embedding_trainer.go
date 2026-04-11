@@ -1266,6 +1266,18 @@ func sharedLeftMatMulEnabled() bool {
 	}
 }
 
+func concatenatedSharedLeftMatMulEnabled() bool {
+	if !sharedLeftMatMulEnabled() || trainEnvFlagEnabled("BARR_TRAIN_DISABLE_CONCAT_SHARED_LEFT_MATMUL") {
+		return false
+	}
+	switch os.Getenv("BARR_TRAIN_CONCAT_SHARED_LEFT_MATMUL") {
+	case "0", "false", "FALSE", "no", "NO":
+		return false
+	default:
+		return true
+	}
+}
+
 func batchedBackwardEnabled() bool {
 	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_BATCHED_BACKWARD") {
 		return false
@@ -3304,6 +3316,9 @@ func (t *EmbeddingTrainer) trySharedLeftAccumulatedTransposeMatMuls(lhsMatrices 
 	if t == nil || t.forwardMatMul == nil || !sharedLeftMatMulEnabled() || len(lhsMatrices) == 0 || len(rhsMatrixSets) < 2 || rows == 0 || lhsCols == 0 || rhsCols == 0 {
 		return nil, false
 	}
+	if out, ok := t.tryConcatenatedSharedLeftAccumulatedTransposeMatMuls(lhsMatrices, rhsMatrixSets, rows, lhsCols, rhsCols); ok {
+		return out, true
+	}
 	shared, ok := t.forwardMatMul.(backend.SharedLeftMatMulAccelerator)
 	if !ok {
 		return nil, false
@@ -3346,6 +3361,51 @@ func (t *EmbeddingTrainer) trySharedLeftAccumulatedTransposeMatMuls(lhsMatrices 
 		out[i] = data
 	}
 	return out, true
+}
+
+func (t *EmbeddingTrainer) tryConcatenatedSharedLeftAccumulatedTransposeMatMuls(lhsMatrices [][]float32, rhsMatrixSets [][][]float32, rows, lhsCols, rhsCols int) ([][]float32, bool) {
+	if t == nil || !concatenatedSharedLeftMatMulEnabled() || len(lhsMatrices) == 0 || len(rhsMatrixSets) < 2 || rows == 0 || lhsCols == 0 || rhsCols == 0 {
+		return nil, false
+	}
+	totalRows := len(lhsMatrices) * rows
+	lhsBatch, ok := flattenFixedFloat32Matrices(lhsMatrices, rows*lhsCols)
+	if !ok {
+		return nil, false
+	}
+	combinedCols := len(rhsMatrixSets) * rhsCols
+	rhsBatch := make([]float32, totalRows*combinedCols)
+	for setIndex, rhsMatrices := range rhsMatrixSets {
+		if len(rhsMatrices) != len(lhsMatrices) {
+			return nil, false
+		}
+		for matrixIndex, rhsMatrix := range rhsMatrices {
+			if len(rhsMatrix) != rows*rhsCols {
+				return nil, false
+			}
+			for row := 0; row < rows; row++ {
+				srcBase := row * rhsCols
+				dstBase := (matrixIndex*rows+row)*combinedCols + setIndex*rhsCols
+				copy(rhsBatch[dstBase:dstBase+rhsCols], rhsMatrix[srcBase:srcBase+rhsCols])
+			}
+		}
+	}
+	out, ok := t.tryTrainerMatMul(lhsBatch, totalRows, lhsCols, rhsBatch, totalRows, combinedCols, true, false)
+	if !ok || len(out) != lhsCols*combinedCols {
+		return nil, false
+	}
+	results := make([][]float32, len(rhsMatrixSets))
+	for setIndex := range results {
+		results[setIndex] = make([]float32, lhsCols*rhsCols)
+	}
+	for row := 0; row < lhsCols; row++ {
+		srcBase := row * combinedCols
+		for setIndex := range results {
+			dstBase := row * rhsCols
+			chunk := out[srcBase+setIndex*rhsCols : srcBase+(setIndex+1)*rhsCols]
+			copy(results[setIndex][dstBase:dstBase+rhsCols], chunk)
+		}
+	}
+	return results, true
 }
 
 func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenceState, gradHiddenMatrices [][]float32, attentionQuery, attentionKey, attentionValue, attentionOutput *backend.Tensor, gradAttnQ, gradAttnK, gradAttnV, gradAttnO []float32, d int) ([][]float32, bool) {
