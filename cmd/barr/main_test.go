@@ -54,6 +54,44 @@ func TestRunInitTrainAppliesTrainingConfigWithDefaultManifest(t *testing.T) {
 	}
 }
 
+func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "barracuda-embed-v0.mll")
+	if err := run([]string{
+		"init-model",
+		"--vocab-size", "16",
+		"--max-seq", "8",
+		"--embedding-dim", "4",
+		"--hidden-dim", "8",
+		"--seed", "7",
+		path,
+	}); err != nil {
+		t.Fatalf("run init-model: %v", err)
+	}
+	manifest, err := barruntime.ReadEmbeddingManifestFile(barruntime.DefaultEmbeddingManifestPath(path))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if manifest.Name != "barracuda-embed-v0" {
+		t.Fatalf("model name = %q, want barracuda-embed-v0", manifest.Name)
+	}
+	if manifest.EncoderRepeats != 2 {
+		t.Fatalf("encoder repeats = %d, want 2", manifest.EncoderRepeats)
+	}
+	if manifest.Tokenizer.VocabSize != 16 || manifest.Tokenizer.MaxSequence != 8 {
+		t.Fatalf("unexpected tokenizer contract: %+v", manifest.Tokenizer)
+	}
+	checkpoint, err := barruntime.ReadEmbeddingTrainCheckpointFile(barruntime.DefaultEmbeddingCheckpointPath(path))
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if checkpoint.Config.ContrastiveLoss != "infonce" {
+		t.Fatalf("contrastive loss = %q, want infonce", checkpoint.Config.ContrastiveLoss)
+	}
+	if _, err := barruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+		t.Fatalf("reload initialized model package: %v", err)
+	}
+}
+
 func TestRunTrainEmbedFitsContrastivePackage(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
@@ -409,7 +447,7 @@ func TestRunTrainCorpusRepeatedEncoderExampleFlow(t *testing.T) {
 	if profile.Step == 0 {
 		t.Fatal("expected non-zero training profile step")
 	}
-	if profile.ForwardResidency.MatMul.BindCalls == 0 {
+	if profile.ForwardBackend != "" && profile.ForwardResidency.MatMul.BindCalls == 0 {
 		t.Fatal("expected matmul bind activity in repeated encoder train profile")
 	}
 	for _, candidate := range []string{

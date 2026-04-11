@@ -17,6 +17,14 @@ func getenv(name string, fallback string) string {
 	return value
 }
 
+func getenvAlias(name string, legacy string, fallback string) string {
+	let value = os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return getenv(legacy, fallback)
+}
+
 func envEnabled(name string) bool {
 	let value = strings.ToLower(os.Getenv(name))
 	return value == "1" || value == "true" || value == "yes"
@@ -85,21 +93,22 @@ func goBench(root string, pkg string, bench string, count string, benchtime stri
 	})
 }
 
-func tranquilSmoke(root string, assets string) error {
-	out, err := os.MkdirTemp("", "barracuda-tranquil-bench-*")
+func modelSmoke(root string, assets string) error {
+	out, err := os.MkdirTemp("", "barracuda-model-bench-*")
 	guard err == nil else return err
-	err = copyMatching(filepath.Join(assets, "tranquil-v0.*"), out)
+	let modelName = getenvAlias("BARR_BENCH_MODEL_NAME", "BARR_BENCH_TRANQUIL_NAME", "barracuda-embed-v0")
+	err = copyMatching(filepath.Join(assets, modelName+".*"), out)
 	guard err == nil else return err
 
-	let epochs = getenv("BARR_BENCH_TRANQUIL_EPOCHS", "1")
-	let batch = getenv("BARR_BENCH_TRANQUIL_BATCH", "256")
-	let lr = getenv("BARR_BENCH_TRANQUIL_LR", "0.005")
-	let temp = getenv("BARR_BENCH_TRANQUIL_TEMP", "0.05")
-	let evalEvery = getenv("BARR_BENCH_TRANQUIL_EVAL_EVERY", "4")
-	let train = getenv("BARR_BENCH_TRANQUIL_TRAIN", filepath.Join(assets, "train-mini.jsonl"))
-	let eval = getenv("BARR_BENCH_TRANQUIL_EVAL", filepath.Join(assets, "eval-mini.jsonl"))
+	let epochs = getenvAlias("BARR_BENCH_MODEL_EPOCHS", "BARR_BENCH_TRANQUIL_EPOCHS", "1")
+	let batch = getenvAlias("BARR_BENCH_MODEL_BATCH", "BARR_BENCH_TRANQUIL_BATCH", "256")
+	let lr = getenvAlias("BARR_BENCH_MODEL_LR", "BARR_BENCH_TRANQUIL_LR", "0.005")
+	let temp = getenvAlias("BARR_BENCH_MODEL_TEMP", "BARR_BENCH_TRANQUIL_TEMP", "0.05")
+	let evalEvery = getenvAlias("BARR_BENCH_MODEL_EVAL_EVERY", "BARR_BENCH_TRANQUIL_EVAL_EVERY", "4")
+	let train = getenvAlias("BARR_BENCH_MODEL_TRAIN", "BARR_BENCH_TRANQUIL_TRAIN", filepath.Join(assets, "train-mini.jsonl"))
+	let eval = getenvAlias("BARR_BENCH_MODEL_EVAL", "BARR_BENCH_TRANQUIL_EVAL", filepath.Join(assets, "eval-mini.jsonl"))
 
-	step("Tranquil training smoke")
+	step("Default model training smoke")
 	fmt.Println(f"output: {out}")
 	err = shell(root, "/usr/bin/time", []string{
 		"-v",
@@ -110,12 +119,12 @@ func tranquilSmoke(root string, assets string) error {
 		"--contrastive-loss", "infonce",
 		"--temperature", temp,
 		"--eval-every", evalEvery,
-		filepath.Join(out, "tranquil-v0.mll"),
+		filepath.Join(out, modelName+".mll"),
 		train,
 		eval,
 	})
 	guard err == nil else return err
-	return shell(root, "go", []string{"run", "./cmd/barr", "inspect", filepath.Join(out, "tranquil-v0.mll")})
+	return shell(root, "go", []string{"run", "./cmd/barr", "inspect", filepath.Join(out, modelName+".mll")})
 }
 
 func main() {
@@ -147,11 +156,14 @@ func main() {
 		}
 	}
 
-	let assets = os.Getenv("BARR_BENCH_TRANQUIL_ASSETS")
+	let mut assets = os.Getenv("BARR_BENCH_MODEL_ASSETS")
+	if assets == "" {
+		assets = os.Getenv("BARR_BENCH_TRANQUIL_ASSETS")
+	}
 	if assets != "" {
-		err = tranquilSmoke(root, assets)
+		err = modelSmoke(root, assets)
 		guard err == nil else {
-			fmt.Println(f"tranquil smoke failed: {err}")
+			fmt.Println(f"default model smoke failed: {err}")
 			os.Exit(1)
 		}
 	}

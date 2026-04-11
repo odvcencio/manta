@@ -225,6 +225,54 @@ func TestBuildTinyEmbedMaskedPooledSource(t *testing.T) {
 	}
 }
 
+func TestBuildEncoderTrainableQ8x2Preset(t *testing.T) {
+	bundle, err := Build(nil, Options{ModuleName: "encoder_trainable_q8x2", Preset: PresetEncoderTrainableQ8x2})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got := len(bundle.Artifact.Params); got != 7 {
+		t.Fatalf("param count = %d, want 7", got)
+	}
+	if got := len(bundle.Artifact.EntryPoints); got != 2 {
+		t.Fatalf("entrypoint count = %d, want 2", got)
+	}
+	if got := bundle.Artifact.EntryPoints[0].Name; got != "embed_pooled" {
+		t.Fatalf("entrypoint[0] = %q, want embed_pooled", got)
+	}
+	if got := strings.Join(bundle.Artifact.EntryPoints[0].Outputs[0].Type.Tensor.Shape, ","); got != "D" {
+		t.Fatalf("embed_pooled output shape = %q, want D", got)
+	}
+	if got := strings.Join(bundle.Artifact.EntryPoints[1].Outputs[0].Type.Tensor.Shape, ","); got != "B,D" {
+		t.Fatalf("embed_pooled_batch output shape = %q, want B,D", got)
+	}
+	for _, param := range bundle.Artifact.Params {
+		if !param.Trainable {
+			t.Fatalf("param %q is not trainable", param.Name)
+		}
+		if param.Type.Tensor == nil || param.Type.Tensor.DType != "q8" {
+			t.Fatalf("param %q dtype = %+v, want q8 tensor", param.Name, param.Type)
+		}
+	}
+	foundGELU := false
+	foundMaskedMeanPool := false
+	for _, kernel := range bundle.Artifact.Kernels {
+		for _, op := range kernel.Body {
+			if op.Op == "gelu" {
+				foundGELU = true
+			}
+			if op.Op == "mean_pool" && len(op.Inputs) == 2 {
+				foundMaskedMeanPool = true
+			}
+		}
+	}
+	if !foundGELU {
+		t.Fatal("expected GELU op in default encoder preset")
+	}
+	if !foundMaskedMeanPool {
+		t.Fatal("expected masked mean_pool op in default encoder preset")
+	}
+}
+
 func TestBuildTinyAttentionEmbedSource(t *testing.T) {
 	src := []byte(`
 param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable

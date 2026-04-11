@@ -3,7 +3,7 @@
 Barracuda has two benchmark layers:
 
 - Go microbenchmarks for isolated runtime kernels and trainer math.
-- End-to-end training smokes for the native embedding-training path used by `tranquil-v0`.
+- End-to-end training smokes for the native default embedding-model path.
 
 Run the default microbenchmarks with Ferrous Wheel:
 
@@ -17,13 +17,13 @@ Run CUDA microbenchmarks:
 BARR_BENCH_ROOT=$PWD BARR_BENCH_CUDA=1 ferrous-wheel run scripts/bench.fw
 ```
 
-Run the `tranquil-v0` training smoke from a local asset package:
+Run the default-model training smoke from a local asset package:
 
 ```bash
-BARR_BENCH_ROOT=$PWD BARR_BENCH_TRANQUIL_ASSETS=/path/to/corkscrewdb/assets/tranquil-v0 ferrous-wheel run scripts/bench.fw
+BARR_BENCH_ROOT=$PWD BARR_BENCH_MODEL_ASSETS=/path/to/assets/barracuda-embed-v0 ferrous-wheel run scripts/bench.fw
 ```
 
-The tranquil smoke copies the package into a temporary directory before training. It does not mutate the source asset directory.
+The model smoke copies the package into a temporary directory before training. It does not mutate the source asset directory.
 
 If you want a binary runner instead of `run` mode:
 
@@ -32,11 +32,11 @@ ferrous-wheel build scripts/bench.fw -o bin/barr-bench
 bin/barr-bench
 ```
 
-## Current Tranquil Smoke
+## Current Default Model Smoke
 
 The current reference smoke uses:
 
-- model package: `tranquil-v0`
+- model package: `barracuda-embed-v0`
 - encoder repeats: `2`
 - tokenizer vocab: `2454`
 - max sequence length: `256`

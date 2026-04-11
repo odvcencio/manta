@@ -13,6 +13,7 @@ import (
 
 	"github.com/odvcencio/barracuda/artifact/barr"
 	"github.com/odvcencio/barracuda/compiler"
+	"github.com/odvcencio/barracuda/models"
 	barruntime "github.com/odvcencio/barracuda/runtime"
 	"github.com/odvcencio/barracuda/runtime/backend"
 	"github.com/odvcencio/barracuda/runtime/backends/cuda"
@@ -46,6 +47,8 @@ func run(args []string) error {
 		return runInspect(args[1:])
 	case "export-mll":
 		return runExportMLL(args[1:])
+	case "init-model":
+		return runInitModel(args[1:])
 	case "init-train":
 		return runInitTrain(args[1:])
 	case "train-tokenizer":
@@ -290,6 +293,92 @@ func runExportMLL(args []string) error {
 		return err
 	}
 	fmt.Printf("exported %q -> %q\n", artifactPath, writtenPath)
+	return nil
+}
+
+func runInitModel(args []string) error {
+	fs := flag.NewFlagSet("init-model", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var name string
+	var vocabSize int
+	var maxSequence int
+	var embeddingDim int
+	var hiddenDim int
+	var seed int64
+	var learningRate float64
+	var weightDecay float64
+	var weightBits int
+	var optimizer string
+	var contrastiveLoss string
+	var temperature float64
+	fs.StringVar(&name, "name", "", "model name")
+	fs.IntVar(&vocabSize, "vocab-size", 0, "tokenizer vocab size")
+	fs.IntVar(&maxSequence, "max-seq", 0, "maximum token sequence length")
+	fs.IntVar(&embeddingDim, "embedding-dim", 0, "embedding/model dimension")
+	fs.IntVar(&hiddenDim, "hidden-dim", 0, "FFN hidden dimension")
+	fs.Int64Var(&seed, "seed", 0, "initialization seed")
+	fs.Float64Var(&learningRate, "lr", 0, "trainer learning rate")
+	fs.Float64Var(&weightDecay, "weight-decay", 0, "trainer weight decay")
+	fs.IntVar(&weightBits, "weight-bits", 0, "forward fake-quant bits")
+	fs.StringVar(&optimizer, "optimizer", "", "optimizer name")
+	fs.StringVar(&contrastiveLoss, "contrastive-loss", "", "contrastive loss: pair_mse or infonce")
+	fs.Float64Var(&temperature, "temperature", 0, "contrastive softmax temperature")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || fs.Arg(0) == "" {
+		return fmt.Errorf("usage: barr init-model [flags] <artifact.mll>")
+	}
+	if learningRate < 0 {
+		return fmt.Errorf("lr must be non-negative")
+	}
+	if weightDecay < 0 {
+		return fmt.Errorf("weight-decay must be non-negative")
+	}
+	if temperature < 0 {
+		return fmt.Errorf("temperature must be non-negative")
+	}
+	path := fs.Arg(0)
+	paths, err := models.InitDefaultEmbeddingPackage(path, models.DefaultEmbeddingPackageConfig{
+		Name:            name,
+		VocabSize:       vocabSize,
+		MaxSequence:     maxSequence,
+		EmbeddingDim:    embeddingDim,
+		HiddenDim:       hiddenDim,
+		Seed:            seed,
+		LearningRate:    float32(learningRate),
+		WeightDecay:     float32(weightDecay),
+		WeightBits:      weightBits,
+		Optimizer:       optimizer,
+		ContrastiveLoss: contrastiveLoss,
+		Temperature:     float32(temperature),
+	})
+	if err != nil {
+		return err
+	}
+	manifest, err := barruntime.ReadEmbeddingManifestFile(paths.EmbeddingManifestPath)
+	if err != nil {
+		return err
+	}
+	checkpoint, err := barruntime.ReadEmbeddingTrainCheckpointFile(paths.CheckpointPath)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("initialized default embedding model %q\n", manifest.Name)
+	fmt.Printf("artifact: %s\n", paths.ArtifactPath)
+	fmt.Printf("embedding manifest: %s\n", paths.EmbeddingManifestPath)
+	fmt.Printf("tokenizer contract: vocab=%d max_sequence=%d\n", manifest.Tokenizer.VocabSize, manifest.Tokenizer.MaxSequence)
+	fmt.Printf("encoder repeats: %d\n", manifest.EncoderRepeats)
+	fmt.Printf("training: optimizer=%s loss=%s lr=%.6f temperature=%.6f weight_bits=%d\n",
+		checkpoint.Config.Optimizer,
+		checkpoint.Config.ContrastiveLoss,
+		checkpoint.Config.LearningRate,
+		checkpoint.Config.Temperature,
+		checkpoint.Config.WeightBits,
+	)
+	fmt.Printf("weights: %s\n", paths.WeightFilePath)
+	fmt.Printf("checkpoint: %s\n", paths.CheckpointPath)
+	fmt.Printf("profile: %s\n", paths.TrainProfilePath)
 	return nil
 }
 
@@ -809,6 +898,7 @@ func printUsage() {
 	fmt.Println("  barr compile <source.bar> [output.mll]")
 	fmt.Println("  barr inspect <artifact.mll>")
 	fmt.Println("  barr export-mll <artifact.mll> [output.mll]")
+	fmt.Println("  barr init-model [flags] <artifact.mll>")
 	fmt.Println("  barr init-train [flags] <artifact.mll>")
 	fmt.Println("  barr train-tokenizer [flags] <artifact.mll> <corpus.txt>")
 	fmt.Println("  barr train-corpus [flags] <artifact.mll> <corpus.txt>")
@@ -819,6 +909,7 @@ func printUsage() {
 	fmt.Println("compile lowers a .bar source file into an .mll Barracuda artifact.")
 	fmt.Println("inspect summarizes an artifact and verifies its sibling package manifest when present.")
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Barracuda metadata in XBAR.")
+	fmt.Println("init-model creates the Barracuda-owned default quantized embedding training package.")
 	fmt.Println("init-train creates a native training package next to an artifact.")
 	fmt.Println("train-tokenizer builds a sibling .tokenizer.mll from a raw text corpus, using embedding-manifest vocab_size by default.")
 	fmt.Println("train-corpus trains tokenizer + mined text pairs + embedder in one Barracuda job from a raw text corpus.")
