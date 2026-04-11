@@ -248,7 +248,7 @@ func TestRunTrainEmbedPlanOnlyShowsWorkload(t *testing.T) {
 		"train_pairs/epoch=8",
 		"eval=4 contrastive examples",
 		"eval_pairs/pass=16",
-		"pairs(planned=64 actual=0)",
+		"pairs(planned=80 actual=0)",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("plan-only output missing %q\noutput:\n%s", want, output)

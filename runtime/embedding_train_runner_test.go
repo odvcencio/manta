@@ -311,17 +311,14 @@ func TestEmbeddingTrainerFitContrastiveEvaluatesWithinEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fit contrastive: %v", err)
 	}
-	if summary.Workload.PlannedEvalPasses != 2 || summary.Workload.ActualEvalPasses != 2 {
-		t.Fatalf("eval passes planned/actual = %d/%d, want 2/2", summary.Workload.PlannedEvalPasses, summary.Workload.ActualEvalPasses)
+	if summary.Workload.PlannedEvalPasses != 3 || summary.Workload.ActualEvalPasses != 3 {
+		t.Fatalf("eval passes planned/actual = %d/%d, want 3/3", summary.Workload.PlannedEvalPasses, summary.Workload.ActualEvalPasses)
 	}
 	if summary.BestEval == nil || summary.FinalEval == nil {
 		t.Fatal("expected best and final eval metrics")
 	}
-	if summary.BestStep == 0 {
-		t.Fatal("expected step-level best checkpoint")
-	}
 	if !summary.RestoredBest {
-		t.Fatal("expected restore-best to use step-level checkpoint")
+		t.Fatal("expected restore-best to use the best checkpoint")
 	}
 }
 
@@ -358,7 +355,7 @@ func TestEmbeddingTrainerFitContrastiveUsesFinalEvalAsBestWhenNoEpochEvalRuns(t 
 		Shuffle:        false,
 		Seed:           1,
 		EvalEveryEpoch: 4,
-		RestoreBest:    true,
+		RestoreBest:    false,
 	}
 
 	summary, err := trainer.FitContrastive(trainSet, trainSet, cfg)

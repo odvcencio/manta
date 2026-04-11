@@ -377,6 +377,11 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		}
 		return cloneEvalMetrics(evalMetrics), improved, nil
 	}
+	if len(evalSet) > 0 && cfg.RestoreBest {
+		if _, _, err := recordEval(0); err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("initial eval: %w", err)
+		}
+	}
 
 	for epoch := 1; epoch <= cfg.Epochs; epoch++ {
 		if cfg.Shuffle {
@@ -522,6 +527,9 @@ func EstimateContrastiveTrainWorkload(trainExamples, evalExamples int, cfg Embed
 	batches, trainPairsPerEpoch := contrastiveBatchWork(trainExamples, cfg.BatchSize)
 	evalPairsPerPass := contrastiveEvalPairs(evalExamples)
 	evalPasses := plannedEvalPassCount(evalExamples, cfg.Epochs, cfg.EvalEveryEpoch)
+	if cfg.RestoreBest && evalExamples > 0 {
+		evalPasses++
+	}
 	if cfg.EvalEverySteps > 0 && evalExamples > 0 {
 		evalPasses += (batches / cfg.EvalEverySteps) * cfg.Epochs
 	}
