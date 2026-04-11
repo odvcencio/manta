@@ -32,6 +32,15 @@ ferrous-wheel build scripts/bench.fw -o bin/barr-bench
 bin/barr-bench
 ```
 
+Capture CPU or heap profiles for any `barr` command with:
+
+```bash
+BARR_CPU_PROFILE=/tmp/barr.cpu.pprof go run ./cmd/barr train-embed ...
+BARR_MEM_PROFILE=/tmp/barr.mem.pprof go run ./cmd/barr train-embed ...
+```
+
+Then inspect with `go tool pprof -top /tmp/barr.cpu.pprof`.
+
 ## Current Default Model Smoke
 
 The current reference smoke uses:
@@ -88,6 +97,8 @@ The training hot path moved as follows on the same mini smoke:
 The main wins came from grouping real text batches by sequence length during backward, coalescing parameter-gradient matmuls into taller `X^T*dY` operations, grouping contrastive forward sequences by exact token length inside each original batch, promoting rank-3 x rank-3 CUDA matmul to `cublasSgemmStridedBatched`, allowing strided-batched matmul to handle transpose flags directly, and increasing the effective contrastive batch. The forward grouping keeps the full in-batch negative set intact and avoids padding, so attention math does not change.
 
 The Q/K/V multi-bound-right path is transfer progress: it reduces matmul run uploads from `4173.15 MB` to `3727.56 MB` while preserving each weight's resident quantized form. The concatenated shared-left gradient path and combined V/K gradient path are dispatch-count wins on top of that. Accumulated input gradients keep the Q/K/V weights resident and reduce matmul run downloads from `2208.41 MB` to `2000.00 MB`. Single-sync accumulation removes the redundant per-term CUDA syncs inside that primitive while keeping the same transfer profile. Batch-1024 A/B measured `845.15 train_examples/s`, `865437.87 train_pairs/s`, and `13644` matmul runs by default versus `748.52 train_examples/s`, `766485.96 train_pairs/s`, and `13644` matmul runs with `BARR_CUDA_DISABLE_ACCUMULATED_MATMUL_SINGLE_SYNC=1`.
+
+Ranked BPE tokenization removed a startup/data-ingest bottleneck before longer training runs. A direct batch-2048 `train-embed` CPU profile moved tokenizer encode time from `2.13s` cumulative (`BPETokenizer.Encode` -> `bpeMerge` -> `applyMerge`) to `0.25s` cumulative (`bpeMergeRanked`). End-to-end throughput remains dominated by training transfer/orchestration after tokenization, but corpus ingestion no longer burns a large fraction of host CPU.
 
 ## Batch Sweep
 

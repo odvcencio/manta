@@ -274,14 +274,20 @@ func decodeTokenizerMLL(data []byte) (TokenizerFile, error) {
 }
 
 type BPETokenizer struct {
-	tokenToID map[string]int32
-	merges    []TokenizerMerge
-	unknownID int32
-	bosID     int32
-	eosID     int32
-	hasBOS    bool
-	hasEOS    bool
-	maxLen    int
+	tokenToID  map[string]int32
+	merges     []TokenizerMerge
+	mergeRanks map[string]map[string]rankedBPEMerge
+	unknownID  int32
+	bosID      int32
+	eosID      int32
+	hasBOS     bool
+	hasEOS     bool
+	maxLen     int
+}
+
+type rankedBPEMerge struct {
+	rank  int
+	token string
 }
 
 func NewBPETokenizer(file TokenizerFile, manifest TokenizerManifest) (*BPETokenizer, error) {
@@ -294,6 +300,21 @@ func NewBPETokenizer(file TokenizerFile, manifest TokenizerManifest) (*BPETokeni
 	tokenToID := make(map[string]int32, len(file.Tokens))
 	for i, tok := range file.Tokens {
 		tokenToID[tok] = int32(i)
+	}
+	mergeRanks := make(map[string]map[string]rankedBPEMerge, len(file.Merges))
+	for rank, merge := range file.Merges {
+		rights := mergeRanks[merge.Left]
+		if rights == nil {
+			rights = map[string]rankedBPEMerge{}
+			mergeRanks[merge.Left] = rights
+		}
+		if _, exists := rights[merge.Right]; exists {
+			continue
+		}
+		rights[merge.Right] = rankedBPEMerge{
+			rank:  rank,
+			token: merge.Left + merge.Right,
+		}
 	}
 	padTok := file.PadToken
 	if padTok == "" {
@@ -317,10 +338,11 @@ func NewBPETokenizer(file TokenizerFile, manifest TokenizerManifest) (*BPETokeni
 		unknownID = id
 	}
 	out := &BPETokenizer{
-		tokenToID: tokenToID,
-		merges:    append([]TokenizerMerge(nil), file.Merges...),
-		unknownID: unknownID,
-		maxLen:    manifest.MaxSequence,
+		tokenToID:  tokenToID,
+		merges:     append([]TokenizerMerge(nil), file.Merges...),
+		mergeRanks: mergeRanks,
+		unknownID:  unknownID,
+		maxLen:     manifest.MaxSequence,
 	}
 	if id, ok := tokenToID[bosTok]; ok {
 		out.bosID = id
@@ -337,7 +359,7 @@ func (t *BPETokenizer) Encode(text string) ([]int32, []int32, error) {
 	if t == nil {
 		return nil, nil, fmt.Errorf("nil tokenizer")
 	}
-	toks := bpeMerge(splitChars(normalizeText(text)), t.merges)
+	toks := bpeMergeRanked(splitChars(normalizeText(text)), t.mergeRanks)
 	ids := make([]int32, 0, len(toks)+2)
 	if t.hasBOS {
 		ids = append(ids, t.bosID)
@@ -398,10 +420,73 @@ func splitChars(text string) []string {
 }
 
 func bpeMerge(tokens []string, merges []TokenizerMerge) []string {
-	for _, merge := range merges {
-		tokens = applyMerge(tokens, merge.Left, merge.Right)
+	return bpeMergeRanked(tokens, mergeRankLookup(merges))
+}
+
+func mergeRankLookup(merges []TokenizerMerge) map[string]map[string]rankedBPEMerge {
+	out := make(map[string]map[string]rankedBPEMerge, len(merges))
+	for rank, merge := range merges {
+		rights := out[merge.Left]
+		if rights == nil {
+			rights = map[string]rankedBPEMerge{}
+			out[merge.Left] = rights
+		}
+		if _, exists := rights[merge.Right]; exists {
+			continue
+		}
+		rights[merge.Right] = rankedBPEMerge{
+			rank:  rank,
+			token: merge.Left + merge.Right,
+		}
 	}
-	return tokens
+	return out
+}
+
+func bpeMergeRanked(tokens []string, merges map[string]map[string]rankedBPEMerge) []string {
+	if len(tokens) < 2 || len(merges) == 0 {
+		return tokens
+	}
+	for {
+		bestRank := int(^uint(0) >> 1)
+		var bestLeft, bestRight, bestToken string
+		found := false
+		for i := 0; i < len(tokens)-1; i++ {
+			rights := merges[tokens[i]]
+			if rights == nil {
+				continue
+			}
+			merge, ok := rights[tokens[i+1]]
+			if !ok || (found && merge.rank >= bestRank) {
+				continue
+			}
+			bestRank = merge.rank
+			bestLeft = tokens[i]
+			bestRight = tokens[i+1]
+			bestToken = merge.token
+			found = true
+		}
+		if !found {
+			return tokens
+		}
+		tokens = applyRankedMerge(tokens, bestLeft, bestRight, bestToken)
+	}
+}
+
+func applyRankedMerge(tokens []string, left, right, merged string) []string {
+	if len(tokens) < 2 {
+		return tokens
+	}
+	out := make([]string, 0, len(tokens))
+	for i := 0; i < len(tokens); {
+		if i < len(tokens)-1 && tokens[i] == left && tokens[i+1] == right {
+			out = append(out, merged)
+			i += 2
+			continue
+		}
+		out = append(out, tokens[i])
+		i++
+	}
+	return out
 }
 
 func applyMerge(tokens []string, left, right string) []string {

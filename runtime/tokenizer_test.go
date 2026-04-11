@@ -56,6 +56,30 @@ func TestBPETokenizerEncodeAppliesSpecialsAndTruncation(t *testing.T) {
 	assertInt32SliceEqual(t, mask, wantMask)
 }
 
+func TestBPETokenizerEncodeAppliesRankedOverlappingMerges(t *testing.T) {
+	file := TokenizerFile{
+		Version: TokenizerFileVersion,
+		Tokens: []string{
+			"[PAD]", "[UNK]", "[CLS]", "[SEP]",
+			"a", "b", "c", "ab", "abc",
+		},
+		Merges: []TokenizerMerge{
+			{Left: "a", Right: "b"},
+			{Left: "ab", Right: "c"},
+		},
+	}
+	tokenizer, err := NewBPETokenizer(file, TokenizerManifest{VocabSize: 9, MaxSequence: 8})
+	if err != nil {
+		t.Fatalf("new tokenizer: %v", err)
+	}
+	ids, mask, err := tokenizer.Encode("ab abc")
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	assertInt32SliceEqual(t, ids, []int32{2, 7, 1, 8, 3})
+	assertInt32SliceEqual(t, mask, []int32{1, 1, 1, 1, 1})
+}
+
 func TestTokenizeEmbeddingTextContrastiveExamples(t *testing.T) {
 	file := TokenizerFile{
 		Version: TokenizerFileVersion,

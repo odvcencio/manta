@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,10 +23,53 @@ import (
 )
 
 func main() {
+	stopProfile, err := startOptionalProfiles()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer stopProfile()
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func startOptionalProfiles() (func(), error) {
+	cpuPath := os.Getenv("BARR_CPU_PROFILE")
+	memPath := os.Getenv("BARR_MEM_PROFILE")
+	var cpuFile *os.File
+	if cpuPath != "" {
+		file, err := os.Create(cpuPath)
+		if err != nil {
+			return nil, fmt.Errorf("create CPU profile %q: %w", cpuPath, err)
+		}
+		if err := pprof.StartCPUProfile(file); err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("start CPU profile %q: %w", cpuPath, err)
+		}
+		cpuFile = file
+	}
+	return func() {
+		if cpuFile != nil {
+			pprof.StopCPUProfile()
+			_ = cpuFile.Close()
+			fmt.Fprintf(os.Stderr, "cpu profile: %s\n", cpuPath)
+		}
+		if memPath != "" {
+			runtime.GC()
+			file, err := os.Create(memPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "write memory profile %q: %v\n", memPath, err)
+				return
+			}
+			if err := pprof.WriteHeapProfile(file); err != nil {
+				fmt.Fprintf(os.Stderr, "write memory profile %q: %v\n", memPath, err)
+			}
+			_ = file.Close()
+			fmt.Fprintf(os.Stderr, "memory profile: %s\n", memPath)
+		}
+	}, nil
 }
 
 func run(args []string) error {
