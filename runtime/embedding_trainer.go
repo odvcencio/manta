@@ -1254,6 +1254,18 @@ func qkvMultiBoundRightEnabled() bool {
 	}
 }
 
+func sharedLeftMatMulEnabled() bool {
+	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_SHARED_LEFT_MATMUL") {
+		return false
+	}
+	switch os.Getenv("BARR_TRAIN_SHARED_LEFT_MATMUL") {
+	case "0", "false", "FALSE", "no", "NO":
+		return false
+	default:
+		return true
+	}
+}
+
 func batchedBackwardEnabled() bool {
 	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_BATCHED_BACKWARD") {
 		return false
@@ -3288,6 +3300,54 @@ func (t *EmbeddingTrainer) tryAccumulatedTransposeMatMul(lhsMatrices, rhsMatrice
 	return t.tryTrainerMatMul(lhsBatch, totalRows, lhsCols, rhsBatch, totalRows, rhsCols, true, false)
 }
 
+func (t *EmbeddingTrainer) trySharedLeftAccumulatedTransposeMatMuls(lhsMatrices [][]float32, rhsMatrixSets [][][]float32, rows, lhsCols, rhsCols int) ([][]float32, bool) {
+	if t == nil || t.forwardMatMul == nil || !sharedLeftMatMulEnabled() || len(lhsMatrices) == 0 || len(rhsMatrixSets) < 2 || rows == 0 || lhsCols == 0 || rhsCols == 0 {
+		return nil, false
+	}
+	shared, ok := t.forwardMatMul.(backend.SharedLeftMatMulAccelerator)
+	if !ok {
+		return nil, false
+	}
+	totalRows := len(lhsMatrices) * rows
+	lhsBatch, ok := flattenFixedFloat32Matrices(lhsMatrices, rows*lhsCols)
+	if !ok {
+		return nil, false
+	}
+	rhsTensors := make([]*backend.Tensor, len(rhsMatrixSets))
+	for i, rhsMatrices := range rhsMatrixSets {
+		if len(rhsMatrices) != len(lhsMatrices) {
+			return nil, false
+		}
+		rhsBatch, ok := flattenFixedFloat32Matrices(rhsMatrices, rows*rhsCols)
+		if !ok {
+			return nil, false
+		}
+		rhsTensors[i] = tensorF32View([]int{totalRows, rhsCols}, rhsBatch)
+	}
+	results, err := shared.RunMatMulsWithSharedLeft(
+		tensorF32View([]int{totalRows, lhsCols}, lhsBatch),
+		rhsTensors,
+		trainerF32TensorValueType(),
+		true,
+		false,
+	)
+	if err != nil || len(results) != len(rhsMatrixSets) {
+		return nil, false
+	}
+	out := make([][]float32, len(results))
+	for i, result := range results {
+		if len(result.Outputs) != 1 || result.Outputs[0] == nil {
+			return nil, false
+		}
+		data := result.Outputs[0].F32
+		if len(data) != lhsCols*rhsCols {
+			return nil, false
+		}
+		out[i] = data
+	}
+	return out, true
+}
+
 func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenceState, gradHiddenMatrices [][]float32, attentionQuery, attentionKey, attentionValue, attentionOutput *backend.Tensor, gradAttnQ, gradAttnK, gradAttnV, gradAttnO []float32, d int) ([][]float32, bool) {
 	if len(states) == 0 || len(states) != len(gradHiddenMatrices) || attentionQuery == nil || attentionKey == nil || attentionValue == nil || attentionOutput == nil {
 		return nil, false
@@ -3491,61 +3551,67 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 		gradVMatrices[i] = gradV
 	}
 
-	if out, ok := t.tryAccumulatedTransposeMatMul(inputMatrices, gradQMatrices, seqLen, d, d); ok {
-		addFloat32Slice(gradAttnQ, out)
+	if sharedGradWeights, ok := t.trySharedLeftAccumulatedTransposeMatMuls(inputMatrices, [][][]float32{gradQMatrices, gradKMatrices, gradVMatrices}, seqLen, d, d); ok {
+		addFloat32Slice(gradAttnQ, sharedGradWeights[0])
+		addFloat32Slice(gradAttnK, sharedGradWeights[1])
+		addFloat32Slice(gradAttnV, sharedGradWeights[2])
 	} else {
-		for i, state := range states {
-			gradAttnQStep := make([]float32, d*d)
-			if out, ok := t.tryTrainerMatMulBoundLeft(
-				state.inputBinding,
-				tensorF32View([]int{seqLen, d}, state.input),
-				tensorF32View([]int{seqLen, d}, gradQMatrices[i]),
-				true,
-				false,
-			); ok {
-				copy(gradAttnQStep, out)
-			} else {
-				fillHostMatMulTranspose(state.input, seqLen, d, gradQMatrices[i], seqLen, d, true, false, gradAttnQStep)
+		if out, ok := t.tryAccumulatedTransposeMatMul(inputMatrices, gradQMatrices, seqLen, d, d); ok {
+			addFloat32Slice(gradAttnQ, out)
+		} else {
+			for i, state := range states {
+				gradAttnQStep := make([]float32, d*d)
+				if out, ok := t.tryTrainerMatMulBoundLeft(
+					state.inputBinding,
+					tensorF32View([]int{seqLen, d}, state.input),
+					tensorF32View([]int{seqLen, d}, gradQMatrices[i]),
+					true,
+					false,
+				); ok {
+					copy(gradAttnQStep, out)
+				} else {
+					fillHostMatMulTranspose(state.input, seqLen, d, gradQMatrices[i], seqLen, d, true, false, gradAttnQStep)
+				}
+				addFloat32Slice(gradAttnQ, gradAttnQStep)
 			}
-			addFloat32Slice(gradAttnQ, gradAttnQStep)
 		}
-	}
-	if out, ok := t.tryAccumulatedTransposeMatMul(inputMatrices, gradKMatrices, seqLen, d, d); ok {
-		addFloat32Slice(gradAttnK, out)
-	} else {
-		for i, state := range states {
-			gradAttnKStep := make([]float32, d*d)
-			if out, ok := t.tryTrainerMatMulBoundLeft(
-				state.inputBinding,
-				tensorF32View([]int{seqLen, d}, state.input),
-				tensorF32View([]int{seqLen, d}, gradKMatrices[i]),
-				true,
-				false,
-			); ok {
-				copy(gradAttnKStep, out)
-			} else {
-				fillHostMatMulTranspose(state.input, seqLen, d, gradKMatrices[i], seqLen, d, true, false, gradAttnKStep)
+		if out, ok := t.tryAccumulatedTransposeMatMul(inputMatrices, gradKMatrices, seqLen, d, d); ok {
+			addFloat32Slice(gradAttnK, out)
+		} else {
+			for i, state := range states {
+				gradAttnKStep := make([]float32, d*d)
+				if out, ok := t.tryTrainerMatMulBoundLeft(
+					state.inputBinding,
+					tensorF32View([]int{seqLen, d}, state.input),
+					tensorF32View([]int{seqLen, d}, gradKMatrices[i]),
+					true,
+					false,
+				); ok {
+					copy(gradAttnKStep, out)
+				} else {
+					fillHostMatMulTranspose(state.input, seqLen, d, gradKMatrices[i], seqLen, d, true, false, gradAttnKStep)
+				}
+				addFloat32Slice(gradAttnK, gradAttnKStep)
 			}
-			addFloat32Slice(gradAttnK, gradAttnKStep)
 		}
-	}
-	if out, ok := t.tryAccumulatedTransposeMatMul(inputMatrices, gradVMatrices, seqLen, d, d); ok {
-		addFloat32Slice(gradAttnV, out)
-	} else {
-		for i, state := range states {
-			gradAttnVStep := make([]float32, d*d)
-			if out, ok := t.tryTrainerMatMulBoundLeft(
-				state.inputBinding,
-				tensorF32View([]int{seqLen, d}, state.input),
-				tensorF32View([]int{seqLen, d}, gradVMatrices[i]),
-				true,
-				false,
-			); ok {
-				copy(gradAttnVStep, out)
-			} else {
-				fillHostMatMulTranspose(state.input, seqLen, d, gradVMatrices[i], seqLen, d, true, false, gradAttnVStep)
+		if out, ok := t.tryAccumulatedTransposeMatMul(inputMatrices, gradVMatrices, seqLen, d, d); ok {
+			addFloat32Slice(gradAttnV, out)
+		} else {
+			for i, state := range states {
+				gradAttnVStep := make([]float32, d*d)
+				if out, ok := t.tryTrainerMatMulBoundLeft(
+					state.inputBinding,
+					tensorF32View([]int{seqLen, d}, state.input),
+					tensorF32View([]int{seqLen, d}, gradVMatrices[i]),
+					true,
+					false,
+				); ok {
+					copy(gradAttnVStep, out)
+				} else {
+					fillHostMatMulTranspose(state.input, seqLen, d, gradVMatrices[i], seqLen, d, true, false, gradAttnVStep)
+				}
+				addFloat32Slice(gradAttnV, gradAttnVStep)
 			}
-			addFloat32Slice(gradAttnV, gradAttnVStep)
 		}
 	}
 

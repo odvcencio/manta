@@ -19,7 +19,9 @@ type countingMatMulAccelerator struct {
 	maxRunBatches     int
 	boundRightRuns    int
 	multiBoundRuns    int
+	sharedLeftRuns    int
 	maxBoundRightRows int
+	maxSharedLeftRHS  int
 	bound             map[string]*backend.Tensor
 }
 
@@ -100,6 +102,35 @@ func (a *countingMatMulAccelerator) RunMatMulWithBoundRights(lhs *backend.Tensor
 			if rhs := a.bound[name]; rhs != nil && len(rhs.Shape) == 2 {
 				cols = rhs.Shape[1]
 			}
+		}
+		results[i] = backend.StepDispatchResult{Outputs: []*backend.Tensor{
+			backend.NewTensorF32([]int{rows, cols}, make([]float32, rows*cols)),
+		}}
+	}
+	return results, nil
+}
+func (a *countingMatMulAccelerator) RunMatMulsWithSharedLeft(lhs *backend.Tensor, rhs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+	a.sharedLeftRuns++
+	if len(rhs) > a.maxSharedLeftRHS {
+		a.maxSharedLeftRHS = len(rhs)
+	}
+	results := make([]backend.StepDispatchResult, len(rhs))
+	lhsRows := 0
+	lhsCols := 0
+	if lhs != nil && len(lhs.Shape) == 2 {
+		lhsRows = lhs.Shape[0]
+		lhsCols = lhs.Shape[1]
+	}
+	for i, right := range rhs {
+		rhsRows := 0
+		rhsCols := 0
+		if right != nil && len(right.Shape) == 2 {
+			rhsRows = right.Shape[0]
+			rhsCols = right.Shape[1]
+		}
+		rows, cols, ok := trainerMatMulShape(lhsRows, lhsCols, rhsRows, rhsCols, transposeLeft, transposeRight)
+		if !ok {
+			rows, cols = lhsCols, rhsCols
 		}
 		results[i] = backend.StepDispatchResult{Outputs: []*backend.Tensor{
 			backend.NewTensorF32([]int{rows, cols}, make([]float32, rows*cols)),
@@ -1628,6 +1659,46 @@ func TestEmbeddingTrainerQKVMultiBoundCanBeDisabled(t *testing.T) {
 	}
 	if fake.boundRightRuns == 0 {
 		t.Fatal("expected fallback bound-right matmuls when q/k/v coalescing is disabled")
+	}
+}
+
+func TestEmbeddingTrainerAttentionBackwardUsesSharedLeftQKVGradMatMul(t *testing.T) {
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+	trainer.config.ContrastiveLoss = "infonce"
+	trainer.config.Temperature = 0.05
+
+	if _, err := trainer.TrainContrastiveStep(tinyEncoderContrastiveDataset()); err != nil {
+		t.Fatalf("train contrastive step: %v", err)
+	}
+	if fake.sharedLeftRuns == 0 {
+		t.Fatal("expected attention backward to coalesce q/k/v gradient matmuls with a shared left input")
+	}
+	if fake.maxSharedLeftRHS < 3 {
+		t.Fatalf("max shared-left rhs count = %d, want at least 3", fake.maxSharedLeftRHS)
+	}
+}
+
+func TestEmbeddingTrainerSharedLeftQKVGradMatMulCanBeDisabled(t *testing.T) {
+	t.Setenv("BARR_TRAIN_DISABLE_SHARED_LEFT_MATMUL", "1")
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+	trainer.config.ContrastiveLoss = "infonce"
+	trainer.config.Temperature = 0.05
+
+	if _, err := trainer.TrainContrastiveStep(tinyEncoderContrastiveDataset()); err != nil {
+		t.Fatalf("train contrastive step: %v", err)
+	}
+	if fake.sharedLeftRuns != 0 {
+		t.Fatalf("shared-left matmul runs = %d, want disabled", fake.sharedLeftRuns)
 	}
 }
 

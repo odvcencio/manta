@@ -170,6 +170,12 @@ type MultiBoundRightMatMulAccelerator interface {
 	RunMatMulWithBoundRights(lhs *Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]StepDispatchResult, error)
 }
 
+// SharedLeftMatMulAccelerator optionally coalesces several matmuls that share
+// the same left input but use different non-resident right inputs.
+type SharedLeftMatMulAccelerator interface {
+	RunMatMulsWithSharedLeft(lhs *Tensor, rhs []*Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]StepDispatchResult, error)
+}
+
 // OptimizerAccelerator exposes a backend-owned optimizer update fast path.
 type OptimizerAccelerator interface {
 	Backend() barr.BackendKind

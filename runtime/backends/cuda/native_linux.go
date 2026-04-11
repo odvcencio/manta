@@ -1497,6 +1497,115 @@ func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightName
 	return results, nil
 }
 
+func (rt *deviceRuntime) runMatMulsWithSharedLeft(lhs *backend.Tensor, rhsInputs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+	if lhs == nil {
+		return nil, fmt.Errorf("cuda matmul lhs is nil")
+	}
+	if len(rhsInputs) == 0 {
+		return nil, fmt.Errorf("cuda matmul requires at least one rhs input")
+	}
+	type sharedLeftPlan struct {
+		rhs             *backend.Tensor
+		batches         int
+		rows            int
+		inner           int
+		cols            int
+		rhsBatched      bool
+		outShape        []int
+		lhsRows         int
+		lhsCols         int
+		rhsRows         int
+		rhsCols         int
+		downloadedBytes int64
+	}
+	plans := make([]sharedLeftPlan, len(rhsInputs))
+	for i, rhs := range rhsInputs {
+		if rhs == nil {
+			return nil, fmt.Errorf("cuda matmul rhs %d is nil", i)
+		}
+		batches, rows, inner, cols, rhsBatched, outShape, err := matmulLayout(lhs, rhs)
+		if transposeLeft || transposeRight {
+			batches, rows, inner, cols, rhsBatched, outShape, err = matmulLayoutWithTranspose(lhs, rhs, transposeLeft, transposeRight)
+		}
+		if err != nil {
+			return nil, err
+		}
+		lhsRows, lhsCols := batches*rows, inner
+		rhsRows, rhsCols := inner, cols
+		if transposeLeft || transposeRight || rhsBatched {
+			lhsRows, lhsCols = matrixShape(lhs)
+			rhsRows, rhsCols = matrixShape(rhs)
+		}
+		plans[i] = sharedLeftPlan{
+			rhs:             rhs,
+			batches:         batches,
+			rows:            rows,
+			inner:           inner,
+			cols:            cols,
+			rhsBatched:      rhsBatched,
+			outShape:        outShape,
+			lhsRows:         lhsRows,
+			lhsCols:         lhsCols,
+			rhsRows:         rhsRows,
+			rhsCols:         rhsCols,
+			downloadedBytes: int64(batches * rows * cols * 4),
+		}
+	}
+
+	compiled := cudaBuiltinMatMulCompiledKernel()
+	lhsBuf, err := rt.uploadMatMulScratchFloat32("matmul_lhs", lhs.F32)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]backend.StepDispatchResult, len(plans))
+	for i, plan := range plans {
+		runStart := time.Now()
+		runUploadedBytes := int64(len(plan.rhs.F32) * 4)
+		if i == 0 {
+			runUploadedBytes += int64(len(lhs.F32) * 4)
+		}
+		rhsBuf, err := rt.uploadMatMulScratchFloat32("matmul_rhs", plan.rhs.F32)
+		if err != nil {
+			return nil, err
+		}
+		outHost := make([]float32, plan.batches*plan.rows*plan.cols)
+		outBuf, err := rt.matMulScratchFloat32("matmul_out", len(outHost))
+		if err != nil {
+			return nil, err
+		}
+		launchAPI := "cublasSgemm"
+		if plan.rhsBatched {
+			if err := rt.matMulCublasStridedBatched(lhsBuf, rhsBuf, outBuf, C.int(plan.batches), C.int(plan.lhsRows), C.int(plan.lhsCols), C.int(plan.rhsRows), C.int(plan.rhsCols), transposeLeft, transposeRight); err != nil {
+				return nil, err
+			}
+			launchAPI = "cublasSgemmStridedBatched"
+		} else if err := rt.matMulCublas(lhsBuf, rhsBuf, outBuf, C.int(plan.lhsRows), C.int(plan.lhsCols), C.int(plan.rhsRows), C.int(plan.rhsCols), transposeLeft, transposeRight); err != nil {
+			return nil, err
+		}
+		if err := rt.downloadFloat32(outHost, outBuf); err != nil {
+			return nil, err
+		}
+		rt.recordMatMulRun(runStart, runUploadedBytes, plan.downloadedBytes, false, false)
+		results[i] = backend.StepDispatchResult{
+			Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, plan.outShape, outHost)},
+			VariantEntry: compiled.Entry,
+			SourceHash:   compiled.SourceHash,
+			Metadata: map[string]any{
+				"dispatch_mode":    "backend_native",
+				"execution_mode":   "cuda_device",
+				"device_execution": true,
+				"launch_api":       launchAPI,
+				"launch_compiler":  "cublas",
+				"backend_library":  "cublas",
+				"transpose_left":   transposeLeft,
+				"transpose_right":  transposeRight,
+				"shared_lhs":       true,
+			},
+		}
+	}
+	return results, nil
+}
+
 func (rt *deviceRuntime) runMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if lhs == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda matmul lhs is nil")

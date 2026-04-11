@@ -239,6 +239,72 @@ func TestCUDAMultiBoundRightMatMulUploadsLHSOnce(t *testing.T) {
 	}
 }
 
+func TestCUDASharedLeftMatMulUploadsLHSOnce(t *testing.T) {
+	accelAny, err := NewMatMulAccelerator()
+	if err != nil {
+		t.Fatalf("new matmul accelerator: %v", err)
+	}
+	if accelAny == nil {
+		t.Skip("no cuda matmul accelerator available")
+	}
+	defer accelAny.Close()
+	shared, ok := accelAny.(backend.SharedLeftMatMulAccelerator)
+	if !ok {
+		t.Fatal("cuda matmul accelerator does not implement shared-left matmul")
+	}
+
+	lhs := backend.NewTensorF32([]int{3, 2}, []float32{
+		1, 2,
+		3, 4,
+		5, 6,
+	})
+	rhsA := backend.NewTensorF32([]int{3, 2}, []float32{
+		1, 0,
+		0, 1,
+		1, 1,
+	})
+	rhsB := backend.NewTensorF32([]int{3, 2}, []float32{
+		2, 1,
+		1, 0,
+		0, 2,
+	})
+	results, err := shared.RunMatMulsWithSharedLeft(lhs, []*backend.Tensor{rhsA, rhsB}, barr.ValueType{
+		Kind: barr.ValueTensor,
+		Tensor: &barr.TensorType{
+			DType: "f32",
+		},
+	}, true, false)
+	if err != nil {
+		t.Fatalf("run shared-left matmul: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("result count = %d, want 2", len(results))
+	}
+	lhsT := []float32{
+		1, 3, 5,
+		2, 4, 6,
+	}
+	for i, rhs := range []*backend.Tensor{rhsA, rhsB} {
+		if len(results[i].Outputs) != 1 || results[i].Outputs[0] == nil {
+			t.Fatalf("result %d output count = %d, want 1", i, len(results[i].Outputs))
+		}
+		want := make([]float32, 4)
+		fillHostMatMul(lhsT, 2, 3, rhs.F32, 2, want)
+		assertTensorClose(t, results[i].Outputs[0], []int{2, 2}, want)
+		if results[i].Metadata["shared_lhs"] != true {
+			t.Fatalf("result %d shared_lhs = %v, want true", i, results[i].Metadata["shared_lhs"])
+		}
+	}
+	stats := accelAny.Stats()
+	wantUpload := int64((len(lhs.F32) + len(rhsA.F32) + len(rhsB.F32)) * 4)
+	if stats.RunUploadedBytes != wantUpload {
+		t.Fatalf("run uploaded bytes = %d, want one lhs upload plus rhs uploads %d", stats.RunUploadedBytes, wantUpload)
+	}
+	if stats.RunCalls != 2 {
+		t.Fatalf("run calls = %d, want 2", stats.RunCalls)
+	}
+}
+
 func TestCUDAStridedBatchedMatMulMatchesHost(t *testing.T) {
 	accelAny, err := NewMatMulAccelerator()
 	if err != nil {
