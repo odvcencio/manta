@@ -1236,7 +1236,10 @@ func batchedContrastiveForwardEnabled() bool {
 }
 
 func sequenceMatMulBindingsEnabled() bool {
-	return !trainEnvFlagEnabled("BARR_TRAIN_DISABLE_SEQUENCE_MATMUL_BINDINGS")
+	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_SEQUENCE_MATMUL_BINDINGS") {
+		return false
+	}
+	return trainEnvFlagEnabled("BARR_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS")
 }
 
 func batchedBackwardEnabled() bool {

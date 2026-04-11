@@ -51,12 +51,12 @@ The current reference smoke uses:
 Latest local CUDA result:
 
 ```text
-throughput: elapsed=10.624s examples/s=433.72 pairs/s=419453.87 train_examples/s=397.86 train_pairs/s=407407.98 eval_examples/s=1554.90 eval_pairs/s=796108.60 optimizer_steps/s=0.39
+throughput: elapsed=6.219s examples/s=741.00 pairs/s=716624.65 train_examples/s=690.69 train_pairs/s=707265.87 eval_examples/s=1775.70 eval_pairs/s=909159.16 optimizer_steps/s=0.67
 accelerators: forward=cuda optimizer=cuda activation=host contrastive=cuda
-profile delta: matmul_bind_calls=131102 matmul_runs=16464 matmul_run_upload_mb=4156.24 matmul_run_download_mb=2208.41 optimizer_updates=28 activation_calls=0 contrastive_calls=4
+profile delta: matmul_bind_calls=30 matmul_runs=16464 matmul_run_upload_mb=4173.15 matmul_run_download_mb=2208.41 optimizer_updates=28 activation_calls=0 contrastive_calls=4
 ```
 
-This is the promoted default benchmark path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, strided-batched cuBLAS for grouped attention matmuls, rank-3 transpose support for grouped attention backward, and batch-1024 contrastive training. The larger batch keeps the full in-batch negative set intact, improves contrastive signal, cuts optimizer/contrastive calls on this smoke, and reduces per-pair orchestration overhead. The CLI/runtime default remains conservative until Barracuda has an adaptive CPU/GPU batch policy.
+This is the promoted default benchmark path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, strided-batched cuBLAS for grouped attention matmuls, rank-3 transpose support for grouped attention backward, batch-1024 contrastive training, and sequence matmul bindings disabled by default. The larger batch keeps the full in-batch negative set intact, improves contrastive signal, cuts optimizer/contrastive calls on this smoke, and reduces per-pair orchestration overhead. Disabling per-sequence matmul bindings trades a small upload increase for a large reduction in backend binding churn. The CLI/runtime default remains conservative until Barracuda has an adaptive CPU/GPU batch policy.
 
 Read the throughput line with both lenses:
 
@@ -78,6 +78,7 @@ The training hot path moved as follows on the same mini smoke:
 | Rank-3 transpose batched attention backward | `82262.50` | `50208` |
 | Batch-512 benchmark smoke | `177192.16` | `28848` |
 | Batch-1024 default benchmark smoke | `407407.98` | `16464` |
+| Disable sequence matmul bindings by default | `707265.87` | `16464` |
 
 The main wins came from grouping real text batches by sequence length during backward, coalescing parameter-gradient matmuls into taller `X^T*dY` operations, grouping contrastive forward sequences by exact token length inside each original batch, promoting rank-3 x rank-3 CUDA matmul to `cublasSgemmStridedBatched`, allowing strided-batched matmul to handle transpose flags directly, and increasing the effective contrastive batch. The forward grouping keeps the full in-batch negative set intact and avoids padding, so attention math does not change.
 
@@ -87,11 +88,12 @@ Batch size is now the largest exposed training knob. On the same 4096-example mi
 
 | Batch | Run steps | Train examples/s | Train pairs/s | Matmul runs | Max RSS |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| `512` | `8` | `346.08` | `177192.16` | `28848` | `1.08 GB` |
-| `1024` | `4` | `397.86` | `407407.98` | `16464` | `1.62 GB` |
-| `2048` | `2` | `402.98` | `825309.13` | `9408` | `2.63 GB` |
+| `512` | `8` | `557.29` | `285329.93` | `28848` | `1.02 GB` |
+| `1024` | `4` | `690.69` | `707265.87` | `16464` | `1.51 GB` |
+| `2048` | `2` | `781.06` | `1599602.65` | `9408` | `2.51 GB` |
+| `4096` | `1` | `727.91` | `2981533.93` | `5616` | `4.50 GB` |
 
-Batch 2048 is a useful ceiling or large-corpus setting, but it only improves example throughput by about `1.3%` over 1024 on this mini smoke while halving optimizer steps. Batch 1024 is the benchmark default because it keeps multiple updates in the smoke and captures most of the real throughput win.
+Batch 2048 is a useful ceiling or large-corpus setting, but it halves optimizer steps on this mini smoke. Batch 4096 is one update and regresses example throughput despite very high pair throughput. Batch 1024 is the benchmark default because it keeps multiple updates in the smoke and captures most of the real throughput win.
 
 ## How Much Faster Can It Get?
 
@@ -99,15 +101,15 @@ The current profile still shows the next bottleneck is backend transfer/orchestr
 
 ```text
 MatMulRuns ~= 16464 per 4096-example mini smoke at batch 1024
-RunUploadedBytes ~= 4.16 GiB
+RunUploadedBytes ~= 4.17 GiB
 RunDownloadedBytes ~= 2.21 GiB
 ```
 
 Reasonable next targets:
 
-- `430-500 train_examples/s`: reduce host materialization and launch overhead inside same-length groups.
-- `500-650 train_examples/s`: keep forward/backward intermediates device-resident across full layer groups and move optimizer/activation state through the same device-resident path.
-- `650+ train_examples/s`: persistent device-resident training steps with fused attention/FFN backward and fewer per-layer dispatches.
+- `750-850 train_examples/s`: reduce host materialization and launch overhead inside same-length groups.
+- `850-1000 train_examples/s`: keep forward/backward intermediates device-resident across full layer groups and move optimizer/activation state through the same device-resident path.
+- `1000+ train_examples/s`: persistent device-resident training steps with fused attention/FFN backward and fewer per-layer dispatches.
 
 The practical ceiling for this tiny model is dominated by orchestration and host-device transfer, not raw GEMM throughput. Larger models will shift more time into actual math, but the same device-residency work is still required to get high GPU utilization.
 
@@ -124,6 +126,12 @@ BARR_TRAIN_DISABLE_BATCHED_FORWARD=1
 ```
 
 Disables the promoted batched forward path and returns to per-sequence forward encoding. Batched forward is enabled by default because the larger default-model run underfeeds the GPU unless forward work is coalesced aggressively.
+
+```bash
+BARR_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS=1
+```
+
+Re-enables per-sequence matmul bindings. These are disabled by default because batch-1024 grouped training spends more time binding and unbinding short-lived sequence tensors than it saves in uploads. Keep this for small-batch experiments and regression checks.
 
 ```bash
 BARR_TRAIN_ENABLE_ACTIVATION_ACCEL=1
