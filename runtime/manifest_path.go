@@ -10,5 +10,8 @@ func defaultManifestPath(artifactPath, suffix string) string {
 	if ext == "" {
 		return artifactPath + suffix
 	}
+	if ext == suffix {
+		return strings.TrimSuffix(artifactPath, ext) + ".sealed" + suffix
+	}
 	return strings.TrimSuffix(artifactPath, ext) + suffix
 }

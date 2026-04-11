@@ -92,6 +92,50 @@ func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
 	}
 }
 
+func TestRunInitModelTrainCorpusExportFlow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "barracuda-embed-v0.mll")
+	if err := run([]string{
+		"init-model",
+		"--vocab-size", "16",
+		"--max-seq", "8",
+		"--embedding-dim", "4",
+		"--hidden-dim", "8",
+		"--seed", "7",
+		path,
+	}); err != nil {
+		t.Fatalf("run init-model: %v", err)
+	}
+	corpusPath := filepath.Join(dir, "corpus.txt")
+	corpus := "" +
+		"ab ab cd. cd ab cd.\n" +
+		"cd cd ab. ab cd ab.\n" +
+		"ab cd ef. ef cd ab.\n" +
+		"ef ef ab. ab ef ef.\n"
+	if err := os.WriteFile(corpusPath, []byte(corpus), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := run([]string{"train-corpus", "--vocab-size", "16", "--min-freq", "1", "--epochs", "2", "--batch-size", "2", "--min-chars", "2", "--eval-pairs", "2", path, corpusPath}); err != nil {
+		t.Fatalf("run train-corpus: %v", err)
+	}
+	if _, err := barruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+		t.Fatalf("reload trained default package: %v", err)
+	}
+	if err := run([]string{"export-mll", path}); err != nil {
+		t.Fatalf("run export-mll: %v", err)
+	}
+	sealedPath := barruntime.DefaultMLLPath(path)
+	if sealedPath == path {
+		t.Fatalf("sealed export path reused artifact path %q", path)
+	}
+	if _, err := mll.ReadFile(sealedPath, mll.WithDigestVerification()); err != nil {
+		t.Fatalf("read sealed default model MLL: %v", err)
+	}
+	if err := run([]string{"inspect", path}); err != nil {
+		t.Fatalf("inspect trained default package after export: %v", err)
+	}
+}
+
 func TestRunTrainEmbedFitsContrastivePackage(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {

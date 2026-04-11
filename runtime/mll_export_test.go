@@ -15,6 +15,10 @@ func TestDefaultMLLPath(t *testing.T) {
 	if path != "/tmp/model.mll" {
 		t.Fatalf("DefaultMLLPath = %q, want %q", path, "/tmp/model.mll")
 	}
+	path = DefaultMLLPath("/tmp/model.mll")
+	if path != "/tmp/model.sealed.mll" {
+		t.Fatalf("DefaultMLLPath for .mll artifact = %q, want %q", path, "/tmp/model.sealed.mll")
+	}
 }
 
 func TestExportPackageToMLLWritesSealedContainer(t *testing.T) {

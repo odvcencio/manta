@@ -299,10 +299,15 @@ and eventually:
 ## CLI
 
 ```
-barr compile <source.bar> [output.barr]   Compile .bar source to .barr artifact
-barr run <artifact.barr> [entry]           Load and execute an artifact entry point
-barr demo [tiny_embed|tiny_decode|tiny_score|tiny_rerank|tiny_select]   Run a built-in preset module
-barr version                               Print version
+barr compile <source.bar> [output.mll]             Compile .bar source to a Barracuda artifact
+barr init-model [flags] <artifact.mll>             Create the default quantized embedding training package
+barr train-corpus [flags] <artifact.mll> <corpus>  Train tokenizer, mine pairs, and fit the embedder
+barr train-embed [flags] <artifact.mll> <train>    Fit an initialized package on token or text JSONL
+barr export-mll <artifact.mll> [output.mll]        Seal an artifact package into a weight-carrying MLL file
+barr inspect <artifact.mll>                        Inspect and verify an artifact package
+barr run <artifact.mll> [entry]                    Load and execute an artifact entry point
+barr demo [tiny_embed|tiny_decode|tiny_score]      Run a built-in preset module
+barr version                                      Print version
 ```
 
 ## Design Constraints
@@ -328,10 +333,10 @@ Barracuda keeps reproducible perf checks as Ferrous Wheel workflows.
 ```bash
 BARR_BENCH_ROOT=$PWD ferrous-wheel run scripts/bench.fw
 BARR_BENCH_ROOT=$PWD BARR_BENCH_CUDA=1 ferrous-wheel run scripts/bench.fw
-BARR_BENCH_ROOT=$PWD BARR_BENCH_TRANQUIL_ASSETS=/path/to/corkscrewdb/assets/tranquil-v0 ferrous-wheel run scripts/bench.fw
+BARR_BENCH_ROOT=$PWD BARR_BENCH_MODEL_ASSETS=/path/to/assets/barracuda-embed-v0 ferrous-wheel run scripts/bench.fw
 ```
 
-Current `tranquil-v0` CUDA smoke: `33328.94` train pairs/s on batch `256`, with grouped batched backward enabled by default. See `docs/benchmarks.md` for the full profile and the next perf targets.
+Current `barracuda-embed-v0` CUDA smoke: `33328.94` train pairs/s on batch `256`, with grouped batched backward enabled by default. See `docs/benchmarks.md` for the full profile and the next perf targets.
 
 ## License
 
