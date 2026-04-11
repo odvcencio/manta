@@ -1290,6 +1290,18 @@ func combinedAttentionVKGradMatMulEnabled() bool {
 	}
 }
 
+func accumulatedAttentionInputGradMatMulEnabled() bool {
+	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_ACCUMULATED_ATTENTION_INPUT_GRAD") {
+		return false
+	}
+	switch os.Getenv("BARR_TRAIN_ACCUMULATED_ATTENTION_INPUT_GRAD") {
+	case "0", "false", "FALSE", "no", "NO":
+		return false
+	default:
+		return true
+	}
+}
+
 func batchedBackwardEnabled() bool {
 	if trainEnvFlagEnabled("BARR_TRAIN_DISABLE_BATCHED_BACKWARD") {
 		return false
@@ -3438,6 +3450,54 @@ func (t *EmbeddingTrainer) tryCombinedAttentionValueKeyGradMatMul(attnScoreMatri
 	return out[:batches], out[batches:], true
 }
 
+func (t *EmbeddingTrainer) tryAccumulatedAttentionInputGradMatMul(gradQMatrices, gradKMatrices, gradVMatrices [][]float32, seqLen, d int, attentionQuery, attentionKey, attentionValue *backend.Tensor) ([][]float32, bool) {
+	if t == nil || t.forwardMatMul == nil || !accumulatedAttentionInputGradMatMulEnabled() || len(gradQMatrices) == 0 || len(gradQMatrices) != len(gradKMatrices) || len(gradQMatrices) != len(gradVMatrices) || seqLen == 0 || d == 0 {
+		return nil, false
+	}
+	accumulated, ok := t.forwardMatMul.(backend.AccumulatedBoundRightMatMulAccelerator)
+	if !ok {
+		return nil, false
+	}
+	for _, tensor := range []*backend.Tensor{attentionQuery, attentionKey, attentionValue} {
+		if tensor == nil || len(tensor.Shape) != 2 || tensor.Shape[0] != d || tensor.Shape[1] != d {
+			return nil, false
+		}
+	}
+	perMatrix := seqLen * d
+	gradQBatch, ok := flattenFixedFloat32Matrices(gradQMatrices, perMatrix)
+	if !ok {
+		return nil, false
+	}
+	gradKBatch, ok := flattenFixedFloat32Matrices(gradKMatrices, perMatrix)
+	if !ok {
+		return nil, false
+	}
+	gradVBatch, ok := flattenFixedFloat32Matrices(gradVMatrices, perMatrix)
+	if !ok {
+		return nil, false
+	}
+	totalRows := len(gradQMatrices) * seqLen
+	result, err := accumulated.RunAccumulatedMatMulsWithBoundRights(
+		[]*backend.Tensor{
+			tensorF32View([]int{totalRows, d}, gradQBatch),
+			tensorF32View([]int{totalRows, d}, gradKBatch),
+			tensorF32View([]int{totalRows, d}, gradVBatch),
+		},
+		[]string{t.attnQParam.Name, t.attnKParam.Name, t.attnVParam.Name},
+		trainerF32TensorValueType(),
+		false,
+		true,
+	)
+	if err != nil || len(result.Outputs) != 1 || result.Outputs[0] == nil {
+		return nil, false
+	}
+	out := result.Outputs[0].F32
+	if len(out) != len(gradQMatrices)*perMatrix {
+		return nil, false
+	}
+	return splitFloat32Views(out, len(gradQMatrices))
+}
+
 func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenceState, gradHiddenMatrices [][]float32, attentionQuery, attentionKey, attentionValue, attentionOutput *backend.Tensor, gradAttnQ, gradAttnK, gradAttnV, gradAttnO []float32, d int) ([][]float32, bool) {
 	if len(states) == 0 || len(states) != len(gradHiddenMatrices) || attentionQuery == nil || attentionKey == nil || attentionValue == nil || attentionOutput == nil {
 		return nil, false
@@ -3708,6 +3768,17 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 				addFloat32Slice(gradAttnV, gradAttnVStep)
 			}
 		}
+	}
+
+	if accumulatedGradInputs, ok := t.tryAccumulatedAttentionInputGradMatMul(gradQMatrices, gradKMatrices, gradVMatrices, seqLen, d, attentionQuery, attentionKey, attentionValue); ok {
+		gradInputs := make([][]float32, len(states))
+		for i := range states {
+			gradInput := make([]float32, seqLen*d)
+			copy(gradInput, accumulatedGradInputs[i])
+			addFloat32Slice(gradInput, gradResidualInputs[i])
+			gradInputs[i] = gradInput
+		}
+		return gradInputs, true
 	}
 
 	gradQInputs, okQ := t.tryBatchedBoundRightMatMul(gradQMatrices, seqLen, d, t.attnQParam.Name, attentionQuery, false, true)

@@ -20,8 +20,10 @@ type countingMatMulAccelerator struct {
 	boundRightRuns    int
 	multiBoundRuns    int
 	sharedLeftRuns    int
+	accumulatedRuns   int
 	maxBoundRightRows int
 	maxSharedLeftRHS  int
+	maxAccumTerms     int
 	maxRunOutputCols  int
 	bound             map[string]*backend.Tensor
 }
@@ -163,6 +165,49 @@ func (a *countingMatMulAccelerator) RunMatMulWithBoundRights(lhs *backend.Tensor
 		}}
 	}
 	return results, nil
+}
+func (a *countingMatMulAccelerator) RunAccumulatedMatMulsWithBoundRights(lhsInputs []*backend.Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+	a.accumulatedRuns++
+	a.boundRightRuns += len(rightNames)
+	if len(rightNames) > a.maxAccumTerms {
+		a.maxAccumTerms = len(rightNames)
+	}
+	if len(lhsInputs) != len(rightNames) || len(lhsInputs) == 0 {
+		return backend.StepDispatchResult{}, nil
+	}
+	var out []float32
+	var outShape []int
+	for i, lhs := range lhsInputs {
+		if lhs == nil || len(lhs.Shape) != 2 {
+			return backend.StepDispatchResult{}, nil
+		}
+		if lhs.Shape[0] > a.maxBoundRightRows {
+			a.maxBoundRightRows = lhs.Shape[0]
+		}
+		rhs := (*backend.Tensor)(nil)
+		if a.bound != nil {
+			rhs = a.bound[rightNames[i]]
+		}
+		if rhs == nil || len(rhs.Shape) != 2 {
+			return backend.StepDispatchResult{}, nil
+		}
+		outRows, outCols, ok := trainerMatMulShape(lhs.Shape[0], lhs.Shape[1], rhs.Shape[0], rhs.Shape[1], transposeLeft, transposeRight)
+		if !ok {
+			return backend.StepDispatchResult{}, nil
+		}
+		if i == 0 {
+			outShape = []int{outRows, outCols}
+			out = make([]float32, outRows*outCols)
+		} else if len(outShape) != 2 || outShape[0] != outRows || outShape[1] != outCols {
+			return backend.StepDispatchResult{}, nil
+		}
+		step := make([]float32, outRows*outCols)
+		fillHostMatMulTranspose(lhs.F32, lhs.Shape[0], lhs.Shape[1], rhs.F32, rhs.Shape[0], rhs.Shape[1], transposeLeft, transposeRight, step)
+		addFloat32Slice(out, step)
+	}
+	return backend.StepDispatchResult{Outputs: []*backend.Tensor{
+		backend.NewTensorF32(outShape, out),
+	}}, nil
 }
 func (a *countingMatMulAccelerator) RunMatMulsWithSharedLeft(lhs *backend.Tensor, rhs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
 	a.sharedLeftRuns++
@@ -1911,6 +1956,150 @@ func TestEmbeddingTrainerCombinedAttentionVKGradCanBeDisabled(t *testing.T) {
 	)
 	if ok {
 		t.Fatal("expected combined V/K gradient matmul to be disabled")
+	}
+}
+
+func TestEmbeddingTrainerAttentionBackwardUsesAccumulatedInputGradMatMul(t *testing.T) {
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+	trainer.config.ContrastiveLoss = "infonce"
+	trainer.config.Temperature = 0.05
+
+	if _, err := trainer.TrainContrastiveStep(tinyEncoderContrastiveDataset()); err != nil {
+		t.Fatalf("train contrastive step: %v", err)
+	}
+	if fake.accumulatedRuns == 0 {
+		t.Fatal("expected accumulated input-gradient bound-right matmul")
+	}
+	if fake.maxAccumTerms < 3 {
+		t.Fatalf("max accumulated terms = %d, want q/k/v terms", fake.maxAccumTerms)
+	}
+}
+
+func TestEmbeddingTrainerAccumulatedAttentionInputGradMatchesSeparateMatMuls(t *testing.T) {
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+
+	attentionQuery := backend.NewTensorF32([]int{2, 2}, []float32{
+		1, 2,
+		3, 4,
+	})
+	attentionKey := backend.NewTensorF32([]int{2, 2}, []float32{
+		-1, 0.5,
+		2, -0.25,
+	})
+	attentionValue := backend.NewTensorF32([]int{2, 2}, []float32{
+		0.25, 1.5,
+		-2, 3,
+	})
+	if err := fake.BindMatrix(trainer.attnQParam.Name, attentionQuery); err != nil {
+		t.Fatalf("bind q: %v", err)
+	}
+	if err := fake.BindMatrix(trainer.attnKParam.Name, attentionKey); err != nil {
+		t.Fatalf("bind k: %v", err)
+	}
+	if err := fake.BindMatrix(trainer.attnVParam.Name, attentionValue); err != nil {
+		t.Fatalf("bind v: %v", err)
+	}
+
+	gradQ := [][]float32{
+		{
+			1, -1,
+			0.5, 2,
+		},
+		{
+			-0.25, 3,
+			1.5, -2,
+		},
+	}
+	gradK := [][]float32{
+		{
+			2, 0.25,
+			-1.5, 1,
+		},
+		{
+			0.5, -0.5,
+			3, 1,
+		},
+	}
+	gradV := [][]float32{
+		{
+			-1, 4,
+			2, -0.75,
+		},
+		{
+			1, 2,
+			-3, 0.25,
+		},
+	}
+
+	got, ok := trainer.tryAccumulatedAttentionInputGradMatMul(gradQ, gradK, gradV, 2, 2, attentionQuery, attentionKey, attentionValue)
+	if !ok {
+		t.Fatal("expected accumulated attention input-gradient matmul to run")
+	}
+	if fake.accumulatedRuns != 1 {
+		t.Fatalf("accumulated runs = %d, want 1", fake.accumulatedRuns)
+	}
+	for i := range gradQ {
+		want := make([]float32, 4)
+		step := make([]float32, 4)
+		fillHostMatMulTranspose(gradQ[i], 2, 2, attentionQuery.F32, 2, 2, false, true, step)
+		addFloat32Slice(want, step)
+		for j := range step {
+			step[j] = 0
+		}
+		fillHostMatMulTranspose(gradK[i], 2, 2, attentionKey.F32, 2, 2, false, true, step)
+		addFloat32Slice(want, step)
+		for j := range step {
+			step[j] = 0
+		}
+		fillHostMatMulTranspose(gradV[i], 2, 2, attentionValue.F32, 2, 2, false, true, step)
+		addFloat32Slice(want, step)
+		assertTensorClose(t, backend.NewTensorF32([]int{2, 2}, got[i]), []int{2, 2}, want)
+	}
+}
+
+func TestEmbeddingTrainerAccumulatedAttentionInputGradCanBeDisabled(t *testing.T) {
+	t.Setenv("BARR_TRAIN_DISABLE_ACCUMULATED_ATTENTION_INPUT_GRAD", "1")
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+
+	attentionQuery := backend.NewTensorF32([]int{2, 2}, []float32{1, 0, 0, 1})
+	if err := fake.BindMatrix(trainer.attnQParam.Name, attentionQuery); err != nil {
+		t.Fatalf("bind q: %v", err)
+	}
+	if err := fake.BindMatrix(trainer.attnKParam.Name, attentionQuery); err != nil {
+		t.Fatalf("bind k: %v", err)
+	}
+	if err := fake.BindMatrix(trainer.attnVParam.Name, attentionQuery); err != nil {
+		t.Fatalf("bind v: %v", err)
+	}
+	if _, ok := trainer.tryAccumulatedAttentionInputGradMatMul(
+		[][]float32{{1, 2, 3, 4}},
+		[][]float32{{1, 2, 3, 4}},
+		[][]float32{{1, 2, 3, 4}},
+		2,
+		2,
+		attentionQuery,
+		attentionQuery,
+		attentionQuery,
+	); ok {
+		t.Fatal("expected accumulated attention input-gradient matmul to be disabled")
+	}
+	if fake.accumulatedRuns != 0 {
+		t.Fatalf("accumulated runs = %d, want disabled", fake.accumulatedRuns)
 	}
 }
 

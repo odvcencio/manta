@@ -51,12 +51,12 @@ The current reference smoke uses:
 Latest local CUDA result:
 
 ```text
-throughput: elapsed=5.49s examples/s=839.37 pairs/s=811761.38 train_examples/s=784.91 train_pairs/s=803746.93 eval_examples/s=1886.59 eval_pairs/s=965932.77 optimizer_steps/s=0.77
+throughput: elapsed=5.348s examples/s=861.59 pairs/s=833252.27 train_examples/s=806.41 train_pairs/s=825766.14 eval_examples/s=1903.73 eval_pairs/s=974707.71 optimizer_steps/s=0.79
 accelerators: forward=cuda optimizer=cuda activation=host contrastive=cuda
-profile delta: matmul_bind_calls=30 matmul_runs=14772 matmul_run_upload_mb=3727.56 matmul_run_download_mb=2208.41 optimizer_updates=28 activation_calls=0 contrastive_calls=4
+profile delta: matmul_bind_calls=30 matmul_runs=13644 matmul_run_upload_mb=3727.56 matmul_run_download_mb=2000.00 optimizer_updates=28 activation_calls=0 contrastive_calls=4
 ```
 
-This is the promoted default benchmark path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, strided-batched cuBLAS for grouped attention matmuls, rank-3 transpose support for grouped attention backward, batch-1024 contrastive training, sequence matmul bindings disabled by default, Q/K/V forward projection coalescing through a multi-bound-right CUDA path, Q/K/V attention-gradient accumulation through one concatenated shared-left GEMM, combined V/K attention backward gradients in one doubled-batch GEMM, and grouped activation-backward helpers kept behind the activation accelerator flag. The larger batch keeps the full in-batch negative set intact, improves contrastive signal, cuts optimizer/contrastive calls on this smoke, and reduces per-pair orchestration overhead. Disabling per-sequence matmul bindings trades a small upload increase for a large reduction in backend binding churn. Q/K/V coalescing preserves per-weight residency and quantization while uploading each shared left-hand activation once across query/key/value projections. Concatenated shared-left attention-gradient coalescing computes `input^T*[dQ|dK|dV]` as one standard GEMM, then splits the result back into the Q/K/V weight gradients. V/K gradient coalescing computes `scores^T*dMixed` and `dPreSoftmax^T*Q` in a single strided-batched dispatch because both use the same transpose shape. The CLI/runtime default remains conservative until Barracuda has an adaptive CPU/GPU batch policy.
+This is the promoted default benchmark path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, strided-batched cuBLAS for grouped attention matmuls, rank-3 transpose support for grouped attention backward, batch-1024 contrastive training, sequence matmul bindings disabled by default, Q/K/V forward projection coalescing through a multi-bound-right CUDA path, Q/K/V attention-gradient accumulation through one concatenated shared-left GEMM, combined V/K attention backward gradients in one doubled-batch GEMM, Q/K/V input-gradient accumulation into one resident-right output download, and grouped activation-backward helpers kept behind the activation accelerator flag. The larger batch keeps the full in-batch negative set intact, improves contrastive signal, cuts optimizer/contrastive calls on this smoke, and reduces per-pair orchestration overhead. Disabling per-sequence matmul bindings trades a small upload increase for a large reduction in backend binding churn. Q/K/V coalescing preserves per-weight residency and quantization while uploading each shared left-hand activation once across query/key/value projections. Concatenated shared-left attention-gradient coalescing computes `input^T*[dQ|dK|dV]` as one standard GEMM, then splits the result back into the Q/K/V weight gradients. V/K gradient coalescing computes `scores^T*dMixed` and `dPreSoftmax^T*Q` in a single strided-batched dispatch because both use the same transpose shape. Input-gradient coalescing computes `dQ*Wq^T + dK*Wk^T + dV*Wv^T` against resident Q/K/V weights and downloads the accumulated result once. The CLI/runtime default remains conservative until Barracuda has an adaptive CPU/GPU batch policy.
 
 Read the throughput line with both lenses:
 
@@ -82,10 +82,11 @@ The training hot path moved as follows on the same mini smoke:
 | Return grouped bound-right outputs as views | `742477.76` | `16464` |
 | Concatenate shared-left Q/K/V gradient matmul | `762372.72` | `15336` |
 | Combine attention V/K gradient matmuls | `803746.93` | `14772` |
+| Accumulate Q/K/V input gradients with resident weights | `825766.14` | `13644` |
 
 The main wins came from grouping real text batches by sequence length during backward, coalescing parameter-gradient matmuls into taller `X^T*dY` operations, grouping contrastive forward sequences by exact token length inside each original batch, promoting rank-3 x rank-3 CUDA matmul to `cublasSgemmStridedBatched`, allowing strided-batched matmul to handle transpose flags directly, and increasing the effective contrastive batch. The forward grouping keeps the full in-batch negative set intact and avoids padding, so attention math does not change.
 
-The Q/K/V multi-bound-right path is transfer progress: it reduces matmul run uploads from `4173.15 MB` to `3727.56 MB` while preserving each weight's resident quantized form. The concatenated shared-left gradient path and combined V/K gradient path are dispatch-count wins on top of that. Batch-1024 A/B measured `784.91 train_examples/s`, `803746.93 train_pairs/s`, and `14772` matmul runs by default versus `694.66 train_examples/s`, `711327.45 train_pairs/s`, and `15336` matmul runs with `BARR_TRAIN_DISABLE_COMBINED_ATTENTION_VK_GRAD=1`.
+The Q/K/V multi-bound-right path is transfer progress: it reduces matmul run uploads from `4173.15 MB` to `3727.56 MB` while preserving each weight's resident quantized form. The concatenated shared-left gradient path and combined V/K gradient path are dispatch-count wins on top of that. Accumulated input gradients keep the Q/K/V weights resident and reduce matmul run downloads from `2208.41 MB` to `2000.00 MB`. Batch-1024 A/B measured `806.41 train_examples/s`, `825766.14 train_pairs/s`, and `13644` matmul runs by default versus `737.85 train_examples/s`, `755554.14 train_pairs/s`, and `14772` matmul runs with `BARR_TRAIN_DISABLE_ACCUMULATED_ATTENTION_INPUT_GRAD=1`.
 
 ## Batch Sweep
 
@@ -94,7 +95,7 @@ Batch size is now the largest exposed training knob. On the same 4096-example mi
 | Batch | Run steps | Train examples/s | Train pairs/s | Matmul runs | Max RSS |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | `512` | `8` | `558.19` | `285791.12` | `28848` | `1.02 GB` |
-| `1024` | `4` | `784.91` | `803746.93` | `14772` | `1.52 GB` |
+| `1024` | `4` | `806.41` | `825766.14` | `13644` | `1.52 GB` |
 | `2048` | `2` | `827.20` | `1694107.56` | `9408` | `2.50 GB` |
 | `4096` | `1` | `741.49` | `3037152.08` | `5616` | `4.47 GB` |
 
@@ -105,9 +106,9 @@ Batch 2048 is a useful ceiling or large-corpus setting, but it halves optimizer 
 The current profile still shows the next bottleneck is backend transfer/orchestration, not raw math:
 
 ```text
-MatMulRuns ~= 14772 per 4096-example mini smoke at batch 1024
+MatMulRuns ~= 13644 per 4096-example mini smoke at batch 1024
 RunUploadedBytes ~= 3.73 GiB
-RunDownloadedBytes ~= 2.21 GiB
+RunDownloadedBytes ~= 2.00 GiB
 ```
 
 Reasonable next targets:
@@ -161,6 +162,12 @@ BARR_TRAIN_DISABLE_COMBINED_ATTENTION_VK_GRAD=1
 ```
 
 Disables only the combined V/K attention backward gradient path. This returns to separate strided-batched GEMMs for `scores^T*dMixed` and `dPreSoftmax^T*Q`.
+
+```bash
+BARR_TRAIN_DISABLE_ACCUMULATED_ATTENTION_INPUT_GRAD=1
+```
+
+Disables only the accumulated Q/K/V attention input-gradient path. This returns to three resident right-hand matmuls for `dQ*Wq^T`, `dK*Wk^T`, and `dV*Wv^T`, followed by host accumulation.
 
 ```bash
 BARR_TRAIN_ENABLE_ACTIVATION_ACCEL=1

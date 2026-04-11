@@ -239,6 +239,100 @@ func TestCUDAMultiBoundRightMatMulUploadsLHSOnce(t *testing.T) {
 	}
 }
 
+func TestCUDAAccumulatedBoundRightMatMulDownloadsOnce(t *testing.T) {
+	accelAny, err := NewMatMulAccelerator()
+	if err != nil {
+		t.Fatalf("new matmul accelerator: %v", err)
+	}
+	if accelAny == nil {
+		t.Skip("no cuda matmul accelerator available")
+	}
+	defer accelAny.Close()
+	accumulated, ok := accelAny.(backend.AccumulatedBoundRightMatMulAccelerator)
+	if !ok {
+		t.Fatal("cuda matmul accelerator does not implement accumulated bound-right matmul")
+	}
+
+	lhsA := backend.NewTensorF32([]int{2, 2}, []float32{
+		1.0, -0.5,
+		0.25, 0.75,
+	})
+	lhsB := backend.NewTensorF32([]int{2, 2}, []float32{
+		-1.0, 0.5,
+		2.0, -0.25,
+	})
+	rhsA := &backend.Tensor{
+		DType: "q8",
+		Shape: []int{2, 2},
+		F32: []float32{
+			0.9, -0.35,
+			0.2, 0.7,
+		},
+	}
+	rhsB := &backend.Tensor{
+		DType: "q8",
+		Shape: []int{2, 2},
+		F32: []float32{
+			0.1, 1.2,
+			-0.8, 0.4,
+		},
+	}
+	if err := accelAny.BindMatrix("rhs_a", rhsA); err != nil {
+		t.Fatalf("bind rhs_a: %v", err)
+	}
+	if err := accelAny.BindMatrix("rhs_b", rhsB); err != nil {
+		t.Fatalf("bind rhs_b: %v", err)
+	}
+	result, err := accumulated.RunAccumulatedMatMulsWithBoundRights([]*backend.Tensor{lhsA, lhsB}, []string{"rhs_a", "rhs_b"}, barr.ValueType{
+		Kind: barr.ValueTensor,
+		Tensor: &barr.TensorType{
+			DType: "f32",
+		},
+	}, false, true)
+	if err != nil {
+		t.Fatalf("run accumulated bound-right matmul: %v", err)
+	}
+	if len(result.Outputs) != 1 || result.Outputs[0] == nil {
+		t.Fatalf("output count = %d, want 1", len(result.Outputs))
+	}
+
+	transpose2 := func(in []float32) []float32 {
+		return []float32{
+			in[0], in[2],
+			in[1], in[3],
+		}
+	}
+	want := make([]float32, 4)
+	step := make([]float32, 4)
+	fillHostMatMul(lhsA.F32, 2, 2, transpose2(fakeQuantizeCopy(rhsA.F32, 8)), 2, step)
+	for i := range want {
+		want[i] += step[i]
+		step[i] = 0
+	}
+	fillHostMatMul(lhsB.F32, 2, 2, transpose2(fakeQuantizeCopy(rhsB.F32, 8)), 2, step)
+	for i := range want {
+		want[i] += step[i]
+	}
+	assertTensorClose(t, result.Outputs[0], []int{2, 2}, want)
+	if result.Metadata["accumulated_bound_rights"] != true {
+		t.Fatalf("accumulated_bound_rights = %v, want true", result.Metadata["accumulated_bound_rights"])
+	}
+	if result.Metadata["accumulated_download_once"] != true {
+		t.Fatalf("accumulated_download_once = %v, want true", result.Metadata["accumulated_download_once"])
+	}
+	stats := accelAny.Stats()
+	wantUpload := int64((len(lhsA.F32) + len(lhsB.F32)) * 4)
+	if stats.RunUploadedBytes != wantUpload {
+		t.Fatalf("run uploaded bytes = %d, want lhs uploads %d", stats.RunUploadedBytes, wantUpload)
+	}
+	if stats.RunDownloadedBytes != int64(len(want)*4) {
+		t.Fatalf("run downloaded bytes = %d, want one output download %d", stats.RunDownloadedBytes, len(want)*4)
+	}
+	if stats.RunCalls != 1 || stats.BoundRightCalls != 1 {
+		t.Fatalf("run calls=%d bound-right calls=%d, want 1/1 logical accumulated dispatch", stats.RunCalls, stats.BoundRightCalls)
+	}
+}
+
 func TestCUDASharedLeftMatMulUploadsLHSOnce(t *testing.T) {
 	accelAny, err := NewMatMulAccelerator()
 	if err != nil {

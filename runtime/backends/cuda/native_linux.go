@@ -442,7 +442,7 @@ static int barrCudaLaunchContrastiveGrad(BarrCudaRuntime* rt, BarrCudaKernel* ke
 	return barrCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int barrCudaMatMulCublas(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
+static int barrCudaMatMulCublasWithBeta(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, float betaValue, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -457,7 +457,7 @@ static int barrCudaMatMulCublas(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdevicept
 		return 1;
 	}
 	const float alpha = 1.0f;
-	const float beta = 0.0f;
+	const float beta = betaValue;
 	const float* lhsPtr = (const float*)(uintptr_t)lhs;
 	const float* rhsPtr = (const float*)(uintptr_t)rhs;
 	float* outPtr = (float*)(uintptr_t)out0;
@@ -487,6 +487,10 @@ static int barrCudaMatMulCublas(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdevicept
 		return 1;
 	}
 	return 0;
+}
+
+static int barrCudaMatMulCublas(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
+	return barrCudaMatMulCublasWithBeta(rt, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, transposeLeft, transposeRight, 0.0f, err);
 }
 
 static int barrCudaMatMulCublasStridedBatched(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int batches, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
@@ -1253,6 +1257,10 @@ func (rt *deviceRuntime) launchAuxContrastiveGrad(kernel *auxKernel, grid, block
 }
 
 func (rt *deviceRuntime) matMulCublas(lhs, rhs, out0 C.CUdeviceptr, lhsRows, lhsCols, rhsRows, rhsCols C.int, transposeLeft, transposeRight bool) error {
+	return rt.matMulCublasWithBeta(lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, transposeLeft, transposeRight, 0)
+}
+
+func (rt *deviceRuntime) matMulCublasWithBeta(lhs, rhs, out0 C.CUdeviceptr, lhsRows, lhsCols, rhsRows, rhsCols C.int, transposeLeft, transposeRight bool, beta float32) error {
 	var errStr *C.char
 	var left C.int
 	var right C.int
@@ -1262,7 +1270,7 @@ func (rt *deviceRuntime) matMulCublas(lhs, rhs, out0 C.CUdeviceptr, lhsRows, lhs
 	if transposeRight {
 		right = 1
 	}
-	if C.barrCudaMatMulCublas(rt.ptr, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, left, right, &errStr) != 0 {
+	if C.barrCudaMatMulCublasWithBeta(rt.ptr, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, left, right, C.float(beta), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1495,6 +1503,132 @@ func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightName
 		}
 	}
 	return results, nil
+}
+
+func (rt *deviceRuntime) runAccumulatedMatMulsWithBoundRights(lhsInputs []*backend.Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+	if len(lhsInputs) == 0 {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda accumulated matmul requires at least one lhs input")
+	}
+	if len(lhsInputs) != len(rightNames) {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda accumulated matmul lhs/right count mismatch: %d != %d", len(lhsInputs), len(rightNames))
+	}
+	type accumulatedBoundRightPlan struct {
+		lhs             *backend.Tensor
+		name            string
+		resident        residentMatrix
+		batches         int
+		rows            int
+		inner           int
+		cols            int
+		outShape        []int
+		lhsRows         int
+		lhsCols         int
+		rhsRows         int
+		rhsCols         int
+		uploadedBytes   int64
+		downloadedBytes int64
+	}
+	plans := make([]accumulatedBoundRightPlan, len(lhsInputs))
+	var outShape []int
+	var outElements int
+	for i, lhs := range lhsInputs {
+		if lhs == nil {
+			return backend.StepDispatchResult{}, fmt.Errorf("cuda accumulated matmul lhs %d is nil", i)
+		}
+		name := rightNames[i]
+		resident, ok := rt.residentMatrices[name]
+		if !ok {
+			return backend.StepDispatchResult{}, fmt.Errorf("cuda matmul binding %q is not resident", name)
+		}
+		rhsTensor := &backend.Tensor{DType: "f32", Shape: []int{resident.rows, resident.cols}}
+		batches, rows, inner, cols, rhsBatched, planOutShape, err := matmulLayout(lhs, rhsTensor)
+		if transposeLeft || transposeRight {
+			batches, rows, inner, cols, rhsBatched, planOutShape, err = matmulLayoutWithTranspose(lhs, rhsTensor, transposeLeft, transposeRight)
+		}
+		if err != nil {
+			return backend.StepDispatchResult{}, err
+		}
+		if rhsBatched {
+			return backend.StepDispatchResult{}, fmt.Errorf("cuda cached rhs matmul does not support batched rhs")
+		}
+		if i == 0 {
+			outShape = append([]int(nil), planOutShape...)
+			outElements = batches * rows * cols
+		} else if !sameIntSlice(outShape, planOutShape) {
+			return backend.StepDispatchResult{}, fmt.Errorf("cuda accumulated matmul output shape mismatch: %v != %v", planOutShape, outShape)
+		}
+		lhsRows, lhsCols := batches*rows, inner
+		rhsRows, rhsCols := inner, cols
+		if transposeLeft || transposeRight {
+			lhsRows, lhsCols = matrixShape(lhs)
+			rhsRows, rhsCols = resident.rows, resident.cols
+		}
+		plans[i] = accumulatedBoundRightPlan{
+			lhs:             lhs,
+			name:            name,
+			resident:        resident,
+			batches:         batches,
+			rows:            rows,
+			inner:           inner,
+			cols:            cols,
+			outShape:        planOutShape,
+			lhsRows:         lhsRows,
+			lhsCols:         lhsCols,
+			rhsRows:         rhsRows,
+			rhsCols:         rhsCols,
+			uploadedBytes:   int64(len(lhs.F32) * 4),
+			downloadedBytes: int64(batches * rows * cols * 4),
+		}
+	}
+
+	compiled := cudaBuiltinMatMulCompiledKernel()
+	runStart := time.Now()
+	var runUploadedBytes int64
+	outHost := make([]float32, outElements)
+	outBuf, err := rt.matMulScratchFloat32("matmul_accum_out", len(outHost))
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	bindings := make([]string, len(plans))
+	for i, plan := range plans {
+		runUploadedBytes += plan.uploadedBytes
+		bindings[i] = plan.name
+		lhsBuf, err := rt.uploadMatMulScratchFloat32("matmul_accum_lhs", plan.lhs.F32)
+		if err != nil {
+			return backend.StepDispatchResult{}, err
+		}
+		beta := float32(0)
+		if i > 0 {
+			beta = 1
+		}
+		if err := rt.matMulCublasWithBeta(lhsBuf, plan.resident.ptr, outBuf, C.int(plan.lhsRows), C.int(plan.lhsCols), C.int(plan.rhsRows), C.int(plan.rhsCols), transposeLeft, transposeRight, beta); err != nil {
+			return backend.StepDispatchResult{}, err
+		}
+	}
+	if err := rt.downloadFloat32(outHost, outBuf); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	rt.recordMatMulRun(runStart, runUploadedBytes, int64(len(outHost)*4), false, true)
+	return backend.StepDispatchResult{
+		Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, outShape, outHost)},
+		VariantEntry: compiled.Entry,
+		SourceHash:   compiled.SourceHash,
+		Metadata: map[string]any{
+			"dispatch_mode":             "backend_native",
+			"execution_mode":            "cuda_device",
+			"device_execution":          true,
+			"launch_api":                "cublasSgemmAccumulated",
+			"launch_compiler":           "cublas",
+			"backend_library":           "cublas",
+			"transpose_left":            transposeLeft,
+			"transpose_right":           transposeRight,
+			"rhs_bindings":              bindings,
+			"rhs_residency":             "device_resident",
+			"accumulated_bound_rights":  true,
+			"accumulated_cublas_calls":  len(plans),
+			"accumulated_download_once": true,
+		},
+	}, nil
 }
 
 func (rt *deviceRuntime) runMatMulsWithSharedLeft(lhs *backend.Tensor, rhsInputs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
@@ -1926,6 +2060,18 @@ func matrixShape(t *backend.Tensor) (rows, cols int) {
 		return 0, 0
 	}
 	return t.Shape[len(t.Shape)-2], t.Shape[len(t.Shape)-1]
+}
+
+func sameIntSlice(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func newStepOutputTensor(outputType barr.ValueType, shape []int, data []float32) *backend.Tensor {
