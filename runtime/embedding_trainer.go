@@ -1503,15 +1503,16 @@ func (t *EmbeddingTrainer) fillBatchedForwardWeightMatMul(states []*embeddingSeq
 		return
 	}
 	if t != nil && t.forwardMatMul != nil {
-		batchedLHS := make([]float32, 0, len(states)*rows*inner)
+		perInput := rows * inner
+		batchedLHS := make([]float32, len(states)*perInput)
 		valid := true
-		for _, state := range states {
+		for i, state := range states {
 			data := lhs(state)
-			if len(data) != rows*inner {
+			if len(data) != perInput {
 				valid = false
 				break
 			}
-			batchedLHS = append(batchedLHS, data...)
+			copy(batchedLHS[i*perInput:(i+1)*perInput], data)
 		}
 		if valid {
 			if out, ok := t.tryForwardWeightMatMul(batchedLHS, len(states)*rows, inner, rhsName, rhs, cols); ok && len(out) == len(states)*rows*cols {
@@ -2273,6 +2274,32 @@ func tensorF32View(shape []int, data []float32) *backend.Tensor {
 	}
 }
 
+func flattenFixedFloat32Matrices(matrices [][]float32, perMatrix int) ([]float32, bool) {
+	if len(matrices) == 0 || perMatrix <= 0 {
+		return nil, false
+	}
+	out := make([]float32, len(matrices)*perMatrix)
+	for i, matrix := range matrices {
+		if len(matrix) != perMatrix {
+			return nil, false
+		}
+		copy(out[i*perMatrix:(i+1)*perMatrix], matrix)
+	}
+	return out, true
+}
+
+func splitFloat32Views(out []float32, parts int) ([][]float32, bool) {
+	if parts <= 0 || len(out)%parts != 0 {
+		return nil, false
+	}
+	perMatrix := len(out) / parts
+	result := make([][]float32, parts)
+	for i := range result {
+		result[i] = out[i*perMatrix : (i+1)*perMatrix]
+	}
+	return result, true
+}
+
 func (t *EmbeddingTrainer) tryForwardMatMul(lhsData []float32, rows, inner int, rhs *backend.Tensor, cols int) ([]float32, bool) {
 	if rhs == nil {
 		return nil, false
@@ -2332,14 +2359,13 @@ func (t *EmbeddingTrainer) tryTrainerBatchedMatMulTranspose(lhsMatrices [][]floa
 		return nil, false
 	}
 	batches := len(lhsMatrices)
-	lhsBatch := make([]float32, 0, batches*lhsRows*lhsCols)
-	rhsBatch := make([]float32, 0, batches*rhsRows*rhsCols)
-	for i := range lhsMatrices {
-		if len(lhsMatrices[i]) != lhsRows*lhsCols || len(rhsMatrices[i]) != rhsRows*rhsCols {
-			return nil, false
-		}
-		lhsBatch = append(lhsBatch, lhsMatrices[i]...)
-		rhsBatch = append(rhsBatch, rhsMatrices[i]...)
+	lhsBatch, ok := flattenFixedFloat32Matrices(lhsMatrices, lhsRows*lhsCols)
+	if !ok {
+		return nil, false
+	}
+	rhsBatch, ok := flattenFixedFloat32Matrices(rhsMatrices, rhsRows*rhsCols)
+	if !ok {
+		return nil, false
 	}
 	result, err := t.forwardMatMul.RunMatMulWithTranspose(
 		[]*backend.Tensor{
@@ -2363,11 +2389,7 @@ func (t *EmbeddingTrainer) tryTrainerBatchedMatMulTranspose(lhsMatrices [][]floa
 	if len(out) != batches*perMatrix {
 		return nil, false
 	}
-	split := make([][]float32, batches)
-	for i := range split {
-		split[i] = out[i*perMatrix : (i+1)*perMatrix]
-	}
-	return split, true
+	return splitFloat32Views(out, batches)
 }
 
 func (t *EmbeddingTrainer) tryTrainerMatMulBoundLeft(lhsName string, lhs, rhs *backend.Tensor, transposeLeft, transposeRight bool) ([]float32, bool) {
@@ -2999,6 +3021,17 @@ func (t *EmbeddingTrainer) backpropProjectedFFNSequences(states []*embeddingSequ
 	gradOutputMatrices := make([][]float32, len(states))
 	gradActivatedPreMatrices := make([][]float32, len(states))
 	activatedMatrices := make([][]float32, len(states))
+	batchActivations := t != nil && t.activationAccel != nil
+	var (
+		projectedMatrices   [][]float32
+		ffnResidualMatrices [][]float32
+		ffnHiddenMatrices   [][]float32
+	)
+	if batchActivations {
+		projectedMatrices = make([][]float32, len(states))
+		ffnResidualMatrices = make([][]float32, len(states))
+		ffnHiddenMatrices = make([][]float32, len(states))
+	}
 	for i, state := range states {
 		gradOutputMatrix := make([]float32, seqLen*e)
 		for row := range state.tokens {
@@ -3008,10 +3041,25 @@ func (t *EmbeddingTrainer) backpropProjectedFFNSequences(states []*embeddingSequ
 			projectedBase := row * e
 			copy(gradOutputMatrix[projectedBase:projectedBase+e], gradProjected[i][projectedBase:projectedBase+e])
 		}
-		if t.ffnLayerNormEnabled() {
-			if out, ok := t.tryLayerNormBackwardRows(gradOutputMatrix, state.projected, state.ffnResidual, seqLen, e, state.projectedBinding, state.ffnResidualBinding); ok {
-				copy(gradOutputMatrix, out)
-			} else {
+		gradOutputMatrices[i] = gradOutputMatrix
+		activatedMatrices[i] = state.activated
+		if batchActivations {
+			projectedMatrices[i] = state.projected
+			ffnResidualMatrices[i] = state.ffnResidual
+			ffnHiddenMatrices[i] = state.ffnHidden
+		}
+	}
+	if t.ffnLayerNormEnabled() {
+		batchedLayerNorm := false
+		if batchActivations {
+			if out, ok := t.tryBatchedLayerNormBackwardRows(gradOutputMatrices, projectedMatrices, ffnResidualMatrices, seqLen, e); ok {
+				gradOutputMatrices = out
+				batchedLayerNorm = true
+			}
+		}
+		if !batchedLayerNorm {
+			for i, state := range states {
+				gradOutputMatrix := gradOutputMatrices[i]
 				for row := range state.tokens {
 					if state.mask[row] == 0 {
 						continue
@@ -3026,8 +3074,6 @@ func (t *EmbeddingTrainer) backpropProjectedFFNSequences(states []*embeddingSequ
 				}
 			}
 		}
-		gradOutputMatrices[i] = gradOutputMatrix
-		activatedMatrices[i] = state.activated
 	}
 
 	if out, ok := t.tryAccumulatedTransposeMatMul(activatedMatrices, gradOutputMatrices, seqLen, h, e); ok {
@@ -3063,11 +3109,16 @@ func (t *EmbeddingTrainer) backpropProjectedFFNSequences(states []*embeddingSequ
 
 	gradActivatedMatrices := make([][]float32, len(states))
 	hiddenMatrices := make([][]float32, len(states))
-	for i, state := range states {
-		gradActivated := make([]float32, seqLen*h)
-		if out, ok := t.tryGELUBackwardMul(gradActivatedPreMatrices[i], state.ffnHidden, seqLen, h, state.ffnHiddenBinding); ok {
-			copy(gradActivated, out)
-		} else {
+	batchedGELU := false
+	if batchActivations {
+		if out, ok := t.tryBatchedGELUBackwardMul(gradActivatedPreMatrices, ffnHiddenMatrices, seqLen, h); ok {
+			gradActivatedMatrices = out
+			batchedGELU = true
+		}
+	}
+	if !batchedGELU {
+		for i, state := range states {
+			gradActivated := make([]float32, seqLen*h)
 			for row := range state.tokens {
 				if state.mask[row] == 0 {
 					continue
@@ -3077,8 +3128,10 @@ func (t *EmbeddingTrainer) backpropProjectedFFNSequences(states []*embeddingSequ
 					gradActivated[ffnBase+col] = gradActivatedPreMatrices[i][ffnBase+col] * geluBackward(state.ffnHidden[ffnBase+col])
 				}
 			}
+			gradActivatedMatrices[i] = gradActivated
 		}
-		gradActivatedMatrices[i] = gradActivated
+	}
+	for i, state := range states {
 		hiddenMatrices[i] = state.hidden
 	}
 
@@ -3126,23 +3179,15 @@ func (t *EmbeddingTrainer) tryBatchedBoundRightMatMul(lhsMatrices [][]float32, r
 		return nil, false
 	}
 	totalRows := len(lhsMatrices) * rows
-	batched := make([]float32, 0, totalRows*cols)
-	for _, lhs := range lhsMatrices {
-		if len(lhs) != rows*cols {
-			return nil, false
-		}
-		batched = append(batched, lhs...)
+	batched, ok := flattenFixedFloat32Matrices(lhsMatrices, rows*cols)
+	if !ok {
+		return nil, false
 	}
 	out, ok := t.tryTrainerMatMulBoundRight(batched, totalRows, cols, rhsName, rhs, transposeLeft, transposeRight)
 	if !ok || len(out)%len(lhsMatrices) != 0 {
 		return nil, false
 	}
-	perMatrix := len(out) / len(lhsMatrices)
-	result := make([][]float32, len(lhsMatrices))
-	for i := range result {
-		result[i] = out[i*perMatrix : (i+1)*perMatrix]
-	}
-	return result, true
+	return splitFloat32Views(out, len(lhsMatrices))
 }
 
 func (t *EmbeddingTrainer) tryAccumulatedTransposeMatMul(lhsMatrices, rhsMatrices [][]float32, rows, lhsCols, rhsCols int) ([]float32, bool) {
@@ -3150,14 +3195,13 @@ func (t *EmbeddingTrainer) tryAccumulatedTransposeMatMul(lhsMatrices, rhsMatrice
 		return nil, false
 	}
 	totalRows := len(lhsMatrices) * rows
-	lhsBatch := make([]float32, 0, totalRows*lhsCols)
-	rhsBatch := make([]float32, 0, totalRows*rhsCols)
-	for i := range lhsMatrices {
-		if len(lhsMatrices[i]) != rows*lhsCols || len(rhsMatrices[i]) != rows*rhsCols {
-			return nil, false
-		}
-		lhsBatch = append(lhsBatch, lhsMatrices[i]...)
-		rhsBatch = append(rhsBatch, rhsMatrices[i]...)
+	lhsBatch, ok := flattenFixedFloat32Matrices(lhsMatrices, rows*lhsCols)
+	if !ok {
+		return nil, false
+	}
+	rhsBatch, ok := flattenFixedFloat32Matrices(rhsMatrices, rows*rhsCols)
+	if !ok {
+		return nil, false
 	}
 	return t.tryTrainerMatMul(lhsBatch, totalRows, lhsCols, rhsBatch, totalRows, rhsCols, true, false)
 }
@@ -3179,6 +3223,15 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 	gradAttnOutputs := make([][]float32, len(states))
 	gradResidualInputs := make([][]float32, len(states))
 	attnMixedMatrices := make([][]float32, len(states))
+	batchActivations := t != nil && t.activationAccel != nil
+	var (
+		attnHiddenMatrices   [][]float32
+		attnResidualMatrices [][]float32
+	)
+	if batchActivations {
+		attnHiddenMatrices = make([][]float32, len(states))
+		attnResidualMatrices = make([][]float32, len(states))
+	}
 	for i, state := range states {
 		gradAttnOutput := make([]float32, seqLen*d)
 		gradResidualInput := make([]float32, seqLen*d)
@@ -3189,13 +3242,35 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 				copy(gradResidualInput[base:base+d], gradAttnOutput[base:base+d])
 			}
 		}
-		if t.attentionLayerNormEnabled() {
-			if out, ok := t.tryLayerNormBackwardRows(gradAttnOutput, state.hidden, state.attnResidual, seqLen, d, state.hiddenBinding, state.attnResidualBinding); ok {
-				copy(gradAttnOutput, out)
+		gradAttnOutputs[i] = gradAttnOutput
+		gradResidualInputs[i] = gradResidualInput
+		attnMixedMatrices[i] = state.attnMixed
+		if batchActivations {
+			attnHiddenMatrices[i] = state.hidden
+			attnResidualMatrices[i] = state.attnResidual
+		}
+	}
+	if t.attentionLayerNormEnabled() {
+		batchedLayerNorm := false
+		if batchActivations {
+			if out, ok := t.tryBatchedLayerNormBackwardRows(gradAttnOutputs, attnHiddenMatrices, attnResidualMatrices, seqLen, d); ok {
+				gradAttnOutputs = out
 				if t.attentionResidualEnabled() {
-					copy(gradResidualInput, out)
+					for i := range gradResidualInputs {
+						gradResidualInputs[i] = out[i]
+					}
 				}
-			} else {
+				batchedLayerNorm = true
+			}
+		}
+		if !batchedLayerNorm {
+			for i, state := range states {
+				gradAttnOutput := gradAttnOutputs[i]
+				if t.attentionResidualEnabled() {
+					for j := range gradResidualInputs[i] {
+						gradResidualInputs[i][j] = 0
+					}
+				}
 				for row := 0; row < seqLen; row++ {
 					base := row * d
 					backwardLayerNormRow(
@@ -3205,14 +3280,11 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 						state.attnResidual[base:base+d],
 					)
 					if t.attentionResidualEnabled() {
-						copy(gradResidualInput[base:base+d], gradAttnOutput[base:base+d])
+						copy(gradResidualInputs[i][base:base+d], gradAttnOutput[base:base+d])
 					}
 				}
 			}
 		}
-		gradAttnOutputs[i] = gradAttnOutput
-		gradResidualInputs[i] = gradResidualInput
-		attnMixedMatrices[i] = state.attnMixed
 	}
 
 	if out, ok := t.tryAccumulatedTransposeMatMul(attnMixedMatrices, gradAttnOutputs, seqLen, d, d); ok {
@@ -3863,28 +3935,67 @@ func (t *EmbeddingTrainer) trySoftmaxBackwardRows(gradOut, probs []float32, rows
 }
 
 func (t *EmbeddingTrainer) tryBatchedSoftmaxBackwardRows(gradOutMatrices, probsMatrices [][]float32, rows, cols int) ([][]float32, bool) {
-	if len(gradOutMatrices) == 0 || len(gradOutMatrices) != len(probsMatrices) || rows == 0 || cols == 0 {
+	if t == nil || t.activationAccel == nil || len(gradOutMatrices) == 0 || len(gradOutMatrices) != len(probsMatrices) || rows == 0 || cols == 0 {
 		return nil, false
 	}
 	perMatrix := rows * cols
-	gradOut := make([]float32, 0, len(gradOutMatrices)*perMatrix)
-	probs := make([]float32, 0, len(probsMatrices)*perMatrix)
-	for i := range gradOutMatrices {
-		if len(gradOutMatrices[i]) != perMatrix || len(probsMatrices[i]) != perMatrix {
-			return nil, false
-		}
-		gradOut = append(gradOut, gradOutMatrices[i]...)
-		probs = append(probs, probsMatrices[i]...)
+	gradOut, ok := flattenFixedFloat32Matrices(gradOutMatrices, perMatrix)
+	if !ok {
+		return nil, false
+	}
+	probs, ok := flattenFixedFloat32Matrices(probsMatrices, perMatrix)
+	if !ok {
+		return nil, false
 	}
 	out, ok := t.trySoftmaxBackwardRows(gradOut, probs, len(gradOutMatrices)*rows, cols, "")
 	if !ok || len(out) != len(gradOut) {
 		return nil, false
 	}
-	result := make([][]float32, len(gradOutMatrices))
-	for i := range result {
-		result[i] = out[i*perMatrix : (i+1)*perMatrix]
+	return splitFloat32Views(out, len(gradOutMatrices))
+}
+
+func (t *EmbeddingTrainer) tryBatchedGELUBackwardMul(gradOutMatrices, preActMatrices [][]float32, rows, cols int) ([][]float32, bool) {
+	if t == nil || t.activationAccel == nil || len(gradOutMatrices) == 0 || len(gradOutMatrices) != len(preActMatrices) || rows == 0 || cols == 0 {
+		return nil, false
 	}
-	return result, true
+	perMatrix := rows * cols
+	gradOut, ok := flattenFixedFloat32Matrices(gradOutMatrices, perMatrix)
+	if !ok {
+		return nil, false
+	}
+	preAct, ok := flattenFixedFloat32Matrices(preActMatrices, perMatrix)
+	if !ok {
+		return nil, false
+	}
+	out, ok := t.tryGELUBackwardMul(gradOut, preAct, len(gradOutMatrices)*rows, cols, "")
+	if !ok || len(out) != len(gradOut) {
+		return nil, false
+	}
+	return splitFloat32Views(out, len(gradOutMatrices))
+}
+
+func (t *EmbeddingTrainer) tryBatchedLayerNormBackwardRows(gradOutMatrices, normalizedMatrices, preMatrices [][]float32, rows, cols int) ([][]float32, bool) {
+	if t == nil || t.activationAccel == nil || len(gradOutMatrices) == 0 || len(gradOutMatrices) != len(normalizedMatrices) || len(gradOutMatrices) != len(preMatrices) || rows == 0 || cols == 0 {
+		return nil, false
+	}
+	perMatrix := rows * cols
+	gradOut, ok := flattenFixedFloat32Matrices(gradOutMatrices, perMatrix)
+	if !ok {
+		return nil, false
+	}
+	normalized, ok := flattenFixedFloat32Matrices(normalizedMatrices, perMatrix)
+	if !ok {
+		return nil, false
+	}
+	pre, ok := flattenFixedFloat32Matrices(preMatrices, perMatrix)
+	if !ok {
+		return nil, false
+	}
+	out, ok := t.tryLayerNormBackwardRows(gradOut, normalized, pre, len(gradOutMatrices)*rows, cols, "", "")
+	if !ok || len(out) != len(gradOut) {
+		return nil, false
+	}
+	return splitFloat32Views(out, len(gradOutMatrices))
 }
 
 func (t *EmbeddingTrainer) tryLayerNormBackwardRows(gradOut, normalized, pre []float32, rows, cols int, normalizedBinding, preBinding string) ([]float32, bool) {

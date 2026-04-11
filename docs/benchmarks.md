@@ -51,12 +51,12 @@ The current reference smoke uses:
 Latest local CUDA result:
 
 ```text
-throughput: elapsed=5.977s examples/s=770.92 pairs/s=745564.70 train_examples/s=725.08 train_pairs/s=742477.76 eval_examples/s=1560.04 eval_pairs/s=798742.94 optimizer_steps/s=0.71
+throughput: elapsed=5.975s examples/s=771.26 pairs/s=745892.27 train_examples/s=723.74 train_pairs/s=741111.67 eval_examples/s=1624.62 eval_pairs/s=831804.78 optimizer_steps/s=0.71
 accelerators: forward=cuda optimizer=cuda activation=host contrastive=cuda
 profile delta: matmul_bind_calls=30 matmul_runs=16464 matmul_run_upload_mb=4173.15 matmul_run_download_mb=2208.41 optimizer_updates=28 activation_calls=0 contrastive_calls=4
 ```
 
-This is the promoted default benchmark path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, strided-batched cuBLAS for grouped attention matmuls, rank-3 transpose support for grouped attention backward, batch-1024 contrastive training, and sequence matmul bindings disabled by default. The larger batch keeps the full in-batch negative set intact, improves contrastive signal, cuts optimizer/contrastive calls on this smoke, and reduces per-pair orchestration overhead. Disabling per-sequence matmul bindings trades a small upload increase for a large reduction in backend binding churn. The CLI/runtime default remains conservative until Barracuda has an adaptive CPU/GPU batch policy.
+This is the promoted default benchmark path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, strided-batched cuBLAS for grouped attention matmuls, rank-3 transpose support for grouped attention backward, batch-1024 contrastive training, sequence matmul bindings disabled by default, and grouped activation-backward helpers kept behind the activation accelerator flag. The larger batch keeps the full in-batch negative set intact, improves contrastive signal, cuts optimizer/contrastive calls on this smoke, and reduces per-pair orchestration overhead. Disabling per-sequence matmul bindings trades a small upload increase for a large reduction in backend binding churn. The CLI/runtime default remains conservative until Barracuda has an adaptive CPU/GPU batch policy.
 
 Read the throughput line with both lenses:
 
@@ -138,4 +138,10 @@ Re-enables per-sequence matmul bindings. These are disabled by default because b
 BARR_TRAIN_ENABLE_ACTIVATION_ACCEL=1
 ```
 
-Enables CUDA/Metal activation backward acceleration. It is currently opt-in because the standalone activation kernels are upload/download-bound without broader activation residency.
+Enables CUDA/Metal activation backward acceleration. Activation backward now batches GELU, softmax, and layernorm across same-length groups before dispatching. On the batch-1024 mini smoke this reduces activation launches to `2568`, but it is still opt-in because standalone activation kernels are upload/download-bound without broader activation residency. A local CUDA opt-in run measured:
+
+```text
+throughput: elapsed=8.108s examples/s=568.33 pairs/s=549633.49 train_examples/s=522.53 train_pairs/s=535070.28 eval_examples/s=1901.79 eval_pairs/s=973718.32 optimizer_steps/s=0.51
+accelerators: forward=cuda optimizer=cuda activation=cuda contrastive=cuda
+profile delta: matmul_bind_calls=30 matmul_runs=16464 matmul_run_upload_mb=4173.15 matmul_run_download_mb=2208.41 optimizer_updates=28 activation_calls=2568 contrastive_calls=4
+```

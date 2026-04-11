@@ -1141,6 +1141,144 @@ func TestEmbeddingTrainerLayerNormBackwardAcceleratorMatchesHost(t *testing.T) {
 	assertTensorClose(t, backend.NewTensorF32([]int{2, 3}, got), []int{2, 3}, want)
 }
 
+func TestEmbeddingTrainerBatchedGELUBackwardAcceleratorMatchesHost(t *testing.T) {
+	t.Setenv("BARR_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	if trainer.activationAccel == nil {
+		t.Skip("no trainer activation accelerator available")
+	}
+	gradOut := [][]float32{
+		{
+			0.2, -0.1, 0.05,
+			-0.25, 0.4, -0.3,
+		},
+		{
+			-0.15, 0.35, -0.05,
+			0.45, -0.2, 0.1,
+		},
+	}
+	preAct := [][]float32{
+		{
+			-1.0, -0.5, 0.0,
+			0.5, 1.0, 1.5,
+		},
+		{
+			1.25, -1.25, 0.75,
+			-0.75, 0.25, -0.25,
+		},
+	}
+	got, ok := trainer.tryBatchedGELUBackwardMul(gradOut, preAct, 2, 3)
+	if !ok {
+		t.Fatal("accelerated batched gelu backward was not used")
+	}
+	if len(got) != len(gradOut) {
+		t.Fatalf("batched gelu outputs = %d, want %d", len(got), len(gradOut))
+	}
+	for batch := range got {
+		want := make([]float32, len(gradOut[batch]))
+		for i := range want {
+			want[i] = gradOut[batch][i] * geluBackward(preAct[batch][i])
+		}
+		assertTensorClose(t, backend.NewTensorF32([]int{2, 3}, got[batch]), []int{2, 3}, want)
+	}
+}
+
+func TestEmbeddingTrainerBatchedSoftmaxBackwardAcceleratorMatchesHost(t *testing.T) {
+	t.Setenv("BARR_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+	if trainer.activationAccel == nil {
+		t.Skip("no trainer activation accelerator available")
+	}
+	gradOut := [][]float32{
+		{
+			0.3, -0.1,
+			-0.2, 0.4,
+		},
+		{
+			0.1, -0.25,
+			0.35, -0.15,
+		},
+	}
+	probs := [][]float32{
+		{
+			0.7, 0.3,
+			0.25, 0.75,
+		},
+		{
+			0.6, 0.4,
+			0.1, 0.9,
+		},
+	}
+	got, ok := trainer.tryBatchedSoftmaxBackwardRows(gradOut, probs, 2, 2)
+	if !ok {
+		t.Fatal("accelerated batched softmax backward was not used")
+	}
+	if len(got) != len(gradOut) {
+		t.Fatalf("batched softmax outputs = %d, want %d", len(got), len(gradOut))
+	}
+	for batch := range got {
+		want := make([]float32, len(gradOut[batch]))
+		for row := 0; row < 2; row++ {
+			backwardSoftmaxRow(want[row*2:(row+1)*2], gradOut[batch][row*2:(row+1)*2], probs[batch][row*2:(row+1)*2])
+		}
+		assertTensorClose(t, backend.NewTensorF32([]int{2, 2}, got[batch]), []int{2, 2}, want)
+	}
+}
+
+func TestEmbeddingTrainerBatchedLayerNormBackwardAcceleratorMatchesHost(t *testing.T) {
+	t.Setenv("BARR_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
+	if trainer.activationAccel == nil {
+		t.Skip("no trainer activation accelerator available")
+	}
+	gradOut := [][]float32{
+		{
+			0.2, -0.1, 0.3,
+			-0.4, 0.25, 0.15,
+		},
+		{
+			-0.35, 0.05, 0.45,
+			0.1, -0.3, 0.2,
+		},
+	}
+	pre := [][]float32{
+		{
+			1.2, -0.4, 0.1,
+			0.5, 1.0, -0.5,
+		},
+		{
+			-1.0, 0.75, 0.25,
+			1.5, -0.25, 0.0,
+		},
+	}
+	normalized := make([][]float32, len(pre))
+	for batch := range pre {
+		normalized[batch] = make([]float32, len(pre[batch]))
+		for row := 0; row < 2; row++ {
+			layerNormRow(normalized[batch][row*3:(row+1)*3], pre[batch][row*3:(row+1)*3])
+		}
+	}
+	got, ok := trainer.tryBatchedLayerNormBackwardRows(gradOut, normalized, pre, 2, 3)
+	if !ok {
+		t.Fatal("accelerated batched layernorm backward was not used")
+	}
+	if len(got) != len(gradOut) {
+		t.Fatalf("batched layernorm outputs = %d, want %d", len(got), len(gradOut))
+	}
+	for batch := range got {
+		want := make([]float32, len(gradOut[batch]))
+		for row := 0; row < 2; row++ {
+			backwardLayerNormRow(
+				want[row*3:(row+1)*3],
+				gradOut[batch][row*3:(row+1)*3],
+				normalized[batch][row*3:(row+1)*3],
+				pre[batch][row*3:(row+1)*3],
+			)
+		}
+		assertTensorClose(t, backend.NewTensorF32([]int{2, 3}, got[batch]), []int{2, 3}, want)
+	}
+}
+
 func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
 	t.Setenv("BARR_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
