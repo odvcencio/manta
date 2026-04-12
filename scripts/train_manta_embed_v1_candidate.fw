@@ -1,0 +1,778 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+type candidateConfig struct {
+	Root                string
+	ModelName           string
+	CreatedUTC          string
+	RunID               string
+	RunDir              string
+	LogDir              string
+	DatasetSHAFile      string
+	ArtifactSHAFile     string
+	GitCommit           string
+	DirtyAllowed        bool
+	Corpus              string
+	TrainJSONL          string
+	EvalJSONL           string
+	HardEvalJSONL       string
+	TokenizerPath       string
+	TrainMode           string
+	VocabSize           string
+	MaxSeq              string
+	EmbeddingDim        string
+	HiddenDim           string
+	InitSeed            string
+	WeightBits          string
+	Epochs              string
+	BatchSize           string
+	LR                  string
+	ContrastiveLoss     string
+	Temperature         string
+	EvalEvery           string
+	EvalEverySteps      string
+	Patience            string
+	MinDelta            string
+	SelectMetric        string
+	MinFreq             string
+	MinChars            string
+	MaxPairs            string
+	EvalPairs           string
+	ProgressEvery       string
+	LengthBucketBatches string
+	BarrBin             string
+	Artifact            string
+	SealedArtifact      string
+}
+
+func usage() {
+	fmt.Println(`Train and package a production candidate for manta-embed-v1.
+
+Required input mode, choose one:
+  MANTA_CORPUS=/path/to/corpus.txt
+  MANTA_TRAIN_JSONL=/path/to/train.jsonl MANTA_EVAL_JSONL=/path/to/eval.jsonl
+
+Production holdout:
+  MANTA_HARD_EVAL_JSONL=/path/to/hard-eval.jsonl
+
+The workflow refuses /tmp inputs and dirty repositories by default. Override only for
+local smoke checks:
+  MANTA_ALLOW_TMP=1 MANTA_ALLOW_DIRTY=1 MANTA_ALLOW_NO_HARD_EVAL=1
+
+Run:
+  MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
+
+Common knobs:
+  MANTA_REPO_ROOT=/path/to/manta
+  MANTA_RUN_ROOT=/data/manta/runs
+  MANTA_RUN_ID=manta-embed-v1-20260412
+  MANTA_EPOCHS=3
+  MANTA_BATCH_SIZE=1024
+  MANTA_LR=0.005
+  MANTA_TEMPERATURE=0.05
+  MANTA_SELECT_METRIC=mrr
+  MANTA_MIN_MRR=0.45
+  MANTA_MIN_TOP1=0.20
+  MANTA_MIN_PAIR_ACCURACY=0.70`)
+}
+
+func getenv(name string, fallback string) string {
+	let value = os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envEnabled(name string) bool {
+	let value = strings.ToLower(os.Getenv(name))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func step(label string) {
+	fmt.Println(f"\n== {label} ==")
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+func findRoot() (string, error) {
+	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	if hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	let pwd = os.Getenv("PWD")
+	if hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+}
+
+func requireFile(path string, label string) (string, error) {
+	guard path != "" else return "", fmt.Errorf("%s is required", label)
+	abs, err := filepath.Abs(path)
+	guard err == nil else return "", err
+	info, err := os.Stat(abs)
+	guard err == nil else return "", fmt.Errorf("%s does not exist: %s", label, abs)
+	guard !info.IsDir() else return "", fmt.Errorf("%s is a directory: %s", label, abs)
+	return abs, nil
+}
+
+func rejectTmpPath(label string, path string) error {
+	if envEnabled("MANTA_ALLOW_TMP") {
+		return nil
+	}
+	if strings.HasPrefix(path, "/tmp/") || strings.HasPrefix(path, "/var/tmp/") {
+		return fmt.Errorf("%s is under a temporary directory: %s (set MANTA_ALLOW_TMP=1 only for local smoke checks)", label, path)
+	}
+	return nil
+}
+
+func commandOutput(dir string, name string, args []string) (string, error) {
+	let cmd = exec.Command(name, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("%s %s: %w\n%s", name, strings.Join(args, " "), err, string(out))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func requireCleanRepo(root string) error {
+	if envEnabled("MANTA_ALLOW_DIRTY") {
+		return nil
+	}
+	out, err := commandOutput(root, "git", []string{"status", "--porcelain"})
+	guard err == nil else return err
+	guard out == "" else return fmt.Errorf("repository has uncommitted changes; commit them or set MANTA_ALLOW_DIRTY=1 for a local smoke")
+	return nil
+}
+
+func runCmd(cfg candidateConfig, label string, logName string, name string, args []string) error {
+	step(label)
+	logPath := filepath.Join(cfg.LogDir, logName)
+	cmdPath := logPath + ".cmd"
+	let rendered = renderCommand(name, args)
+	err := os.WriteFile(cmdPath, []byte(rendered+"\n"), 0o644)
+	guard err == nil else return err
+	fmt.Println(f"+ {rendered}")
+
+	logFile, err := os.Create(logPath)
+	guard err == nil else return err
+	defer logFile.Close()
+
+	let cmd = exec.Command(name, args...)
+	cmd.Dir = cfg.Root
+	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+	err = cmd.Run()
+	guard err == nil else return fmt.Errorf("%s failed; see %s: %w", label, logPath, err)
+	return nil
+}
+
+func renderCommand(name string, args []string) string {
+	parts := []string{shellQuote(name)}
+	for arg in args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	guard err == nil else return "", err
+	defer f.Close()
+	h := sha256.New()
+	_, err = io.Copy(h, f)
+	guard err == nil else return "", err
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func appendSHA256(manifestPath string, path string) error {
+	sum, err := sha256File(path)
+	guard err == nil else return err
+	line := fmt.Sprintf("%s  %s\n", sum, path)
+	f, err := os.OpenFile(manifestPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	guard err == nil else return err
+	defer f.Close()
+	_, err = f.WriteString(line)
+	return err
+}
+
+func writeArtifactSHA256(cfg candidateConfig) error {
+	entries, err := os.ReadDir(cfg.RunDir)
+	guard err == nil else return err
+	paths := []string{}
+	for entry in entries {
+		if entry.IsDir() {
+			continue
+		}
+		let name = entry.Name()
+		if strings.HasSuffix(name, ".mll") || strings.HasSuffix(name, ".jsonl") || strings.HasSuffix(name, ".txt") {
+			paths = append(paths, filepath.Join(cfg.RunDir, name))
+		}
+	}
+	sort.Strings(paths)
+	f, err := os.Create(cfg.ArtifactSHAFile)
+	guard err == nil else return err
+	defer f.Close()
+	for path in paths {
+		sum, err := sha256File(path)
+		guard err == nil else return err
+		_, err = f.WriteString(fmt.Sprintf("%s  %s\n", sum, path))
+		guard err == nil else return err
+	}
+	return nil
+}
+
+func writeSelectedEnvironment(cfg candidateConfig) error {
+	lines := []string{}
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "MANTA_") ||
+			strings.HasPrefix(env, "BARR_") ||
+			strings.HasPrefix(env, "CUDA") ||
+			strings.HasPrefix(env, "CUBLAS") ||
+			strings.HasPrefix(env, "CGO_") ||
+			strings.HasPrefix(env, "GO") {
+			lines = append(lines, env)
+		}
+	}
+	sort.Strings(lines)
+	err := os.WriteFile(filepath.Join(cfg.RunDir, "environment.txt"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	guard err == nil else return err
+	out, err := commandOutput(cfg.Root, "go", []string{"version"})
+	guard err == nil else return err
+	return os.WriteFile(filepath.Join(cfg.RunDir, "go-version.txt"), []byte(out+"\n"), 0o644)
+}
+
+func jsonString(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	value = strings.ReplaceAll(value, "\"", "\\\"")
+	value = strings.ReplaceAll(value, "\n", "\\n")
+	value = strings.ReplaceAll(value, "\r", "\\r")
+	value = strings.ReplaceAll(value, "\t", "\\t")
+	return "\"" + value + "\""
+}
+
+func jsonBool(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func writeManifest(cfg candidateConfig, status string) error {
+	sealedSHA := ""
+	if _, err := os.Stat(cfg.SealedArtifact); err == nil {
+		sum, err := sha256File(cfg.SealedArtifact)
+		guard err == nil else return err
+		sealedSHA = sum
+	}
+	let updated = time.Now().UTC().Format(time.RFC3339)
+	body := fmt.Sprintf(`{
+  "schema": "manta.embedding_candidate.v1",
+  "status": %s,
+  "created_utc": %s,
+  "updated_utc": %s,
+  "run_id": %s,
+  "run_dir": %s,
+  "repo": {
+    "root": %s,
+    "commit": %s,
+    "dirty_allowed": %s
+  },
+  "model": {
+    "name": %s,
+    "vocab_size": %s,
+    "max_sequence": %s,
+    "embedding_dim": %s,
+    "hidden_dim": %s,
+    "seed": %s
+  },
+  "training": {
+    "mode": %s,
+    "epochs": %s,
+    "batch_size": %s,
+    "learning_rate": %s,
+    "contrastive_loss": %s,
+    "temperature": %s,
+    "select_metric": %s,
+    "eval_every": %s,
+    "eval_every_steps": %s
+  },
+  "inputs": {
+    "corpus": %s,
+    "train_jsonl": %s,
+    "eval_jsonl": %s,
+    "hard_eval_jsonl": %s,
+    "tokenizer": %s
+  },
+  "outputs": {
+    "artifact": %s,
+    "sealed_artifact": %s,
+    "sealed_sha256": %s,
+    "logs": %s,
+    "datasets_sha256": %s,
+    "artifacts_sha256": %s
+  }
+}
+`,
+		jsonString(status),
+		jsonString(cfg.CreatedUTC),
+		jsonString(updated),
+		jsonString(cfg.RunID),
+		jsonString(cfg.RunDir),
+		jsonString(cfg.Root),
+		jsonString(cfg.GitCommit),
+		jsonBool(cfg.DirtyAllowed),
+		jsonString(cfg.ModelName),
+		cfg.VocabSize,
+		cfg.MaxSeq,
+		cfg.EmbeddingDim,
+		cfg.HiddenDim,
+		cfg.InitSeed,
+		jsonString(cfg.TrainMode),
+		cfg.Epochs,
+		cfg.BatchSize,
+		cfg.LR,
+		jsonString(cfg.ContrastiveLoss),
+		cfg.Temperature,
+		jsonString(cfg.SelectMetric),
+		cfg.EvalEvery,
+		cfg.EvalEverySteps,
+		jsonString(cfg.Corpus),
+		jsonString(cfg.TrainJSONL),
+		jsonString(cfg.EvalJSONL),
+		jsonString(cfg.HardEvalJSONL),
+		jsonString(cfg.TokenizerPath),
+		jsonString(cfg.Artifact),
+		jsonString(cfg.SealedArtifact),
+		jsonString(sealedSHA),
+		jsonString(cfg.LogDir),
+		jsonString(cfg.DatasetSHAFile),
+		jsonString(cfg.ArtifactSHAFile),
+	)
+	return os.WriteFile(filepath.Join(cfg.RunDir, "manifest.json"), []byte(body), 0o644)
+}
+
+func metricValue(logPath string, metric string) (string, error) {
+	data, err := os.ReadFile(logPath)
+	guard err == nil else return "", err
+	let fields = strings.Fields(string(data))
+	let prefix = metric + "="
+	value := ""
+	for field in fields {
+		if strings.HasPrefix(field, prefix) {
+			value = strings.TrimSuffix(strings.TrimPrefix(field, prefix), ",")
+		}
+	}
+	guard value != "" else return "", fmt.Errorf("metric %s not found in %s", metric, logPath)
+	return value, nil
+}
+
+func requireMetricMin(logPath string, metric string, minimum string) error {
+	if minimum == "" {
+		return nil
+	}
+	got, err := metricValue(logPath, metric)
+	guard err == nil else return err
+	var gotFloat float64
+	var minFloat float64
+	_, err = fmt.Sscanf(got, "%f", &gotFloat)
+	guard err == nil else return err
+	_, err = fmt.Sscanf(minimum, "%f", &minFloat)
+	guard err == nil else return err
+	guard gotFloat >= minFloat else return fmt.Errorf("metric %s=%s is below required minimum %s", metric, got, minimum)
+	return nil
+}
+
+func requireMetricMax(logPath string, metric string, maximum string) error {
+	if maximum == "" {
+		return nil
+	}
+	got, err := metricValue(logPath, metric)
+	guard err == nil else return err
+	var gotFloat float64
+	var maxFloat float64
+	_, err = fmt.Sscanf(got, "%f", &gotFloat)
+	guard err == nil else return err
+	_, err = fmt.Sscanf(maximum, "%f", &maxFloat)
+	guard err == nil else return err
+	guard gotFloat <= maxFloat else return fmt.Errorf("metric %s=%s is above allowed maximum %s", metric, got, maximum)
+	return nil
+}
+
+func requireEvalOnlyZeroUpdates(logPath string) error {
+	data, err := os.ReadFile(logPath)
+	guard err == nil else return err
+	guard strings.Contains(string(data), "optimizer_updates=0") else return fmt.Errorf("eval-only run updated optimizer state or did not report optimizer_updates=0: %s", logPath)
+	return nil
+}
+
+func copyFile(src string, dst string) error {
+	data, err := os.ReadFile(src)
+	guard err == nil else return err
+	info, err := os.Stat(src)
+	guard err == nil else return err
+	return os.WriteFile(dst, data, info.Mode())
+}
+
+func copyPackageForEval(cfg candidateConfig, name string) (string, error) {
+	let scratch = filepath.Join(cfg.RunDir, "eval-scratch-"+name)
+	err := os.RemoveAll(scratch)
+	guard err == nil else return "", err
+	err = os.MkdirAll(scratch, 0o755)
+	guard err == nil else return "", err
+	matches, err := filepath.Glob(filepath.Join(cfg.RunDir, cfg.ModelName+".*"))
+	guard err == nil else return "", err
+	guard len(matches) > 0 else return "", fmt.Errorf("no package files found in %s", cfg.RunDir)
+	for src in matches {
+		err = copyFile(src, filepath.Join(scratch, filepath.Base(src)))
+		guard err == nil else return "", err
+	}
+	return filepath.Join(scratch, cfg.ModelName+".mll"), nil
+}
+
+func prepareConfig(root string) (candidateConfig, error) {
+	let modelName = getenv("MANTA_MODEL_NAME", "manta-embed-v1")
+	let runID = getenv("MANTA_RUN_ID", modelName+"-"+time.Now().UTC().Format("20060102T150405Z"))
+	let runRoot = getenv("MANTA_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir, err := filepath.Abs(getenv("MANTA_RUN_DIR", filepath.Join(runRoot, runID)))
+	guard err == nil else return candidateConfig{}, err
+	err = rejectTmpPath("run directory", runDir)
+	guard err == nil else return candidateConfig{}, err
+	if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
+		return candidateConfig{}, fmt.Errorf("run directory already exists and is not empty: %s", runDir)
+	}
+	err = os.MkdirAll(filepath.Join(runDir, "bin"), 0o755)
+	guard err == nil else return candidateConfig{}, err
+	err = os.MkdirAll(filepath.Join(runDir, "logs"), 0o755)
+	guard err == nil else return candidateConfig{}, err
+	err = os.MkdirAll(filepath.Join(runDir, "profiles"), 0o755)
+	guard err == nil else return candidateConfig{}, err
+
+	cfg := candidateConfig{
+		Root:                root,
+		ModelName:           modelName,
+		CreatedUTC:          time.Now().UTC().Format(time.RFC3339),
+		RunID:               runID,
+		RunDir:              runDir,
+		LogDir:              filepath.Join(runDir, "logs"),
+		DatasetSHAFile:      filepath.Join(runDir, "datasets.sha256"),
+		ArtifactSHAFile:     filepath.Join(runDir, "artifacts.sha256"),
+		DirtyAllowed:        envEnabled("MANTA_ALLOW_DIRTY"),
+		VocabSize:           getenv("MANTA_VOCAB_SIZE", "2454"),
+		MaxSeq:              getenv("MANTA_MAX_SEQ", "256"),
+		EmbeddingDim:        getenv("MANTA_EMBEDDING_DIM", "128"),
+		HiddenDim:           getenv("MANTA_HIDDEN_DIM", "256"),
+		InitSeed:            getenv("MANTA_INIT_SEED", "1"),
+		WeightBits:          getenv("MANTA_WEIGHT_BITS", "8"),
+		Epochs:              getenv("MANTA_EPOCHS", "3"),
+		BatchSize:           getenv("MANTA_BATCH_SIZE", "1024"),
+		LR:                  getenv("MANTA_LR", "0.005"),
+		ContrastiveLoss:     getenv("MANTA_CONTRASTIVE_LOSS", "infonce"),
+		Temperature:         getenv("MANTA_TEMPERATURE", "0.05"),
+		EvalEvery:           getenv("MANTA_EVAL_EVERY", "1"),
+		EvalEverySteps:      getenv("MANTA_EVAL_EVERY_STEPS", "4"),
+		Patience:            getenv("MANTA_PATIENCE", "3"),
+		MinDelta:            getenv("MANTA_MIN_DELTA", "0"),
+		SelectMetric:        getenv("MANTA_SELECT_METRIC", "mrr"),
+		MinFreq:             getenv("MANTA_MIN_FREQ", "1"),
+		MinChars:            getenv("MANTA_MIN_CHARS", "20"),
+		MaxPairs:            getenv("MANTA_MAX_PAIRS", "0"),
+		EvalPairs:           getenv("MANTA_EVAL_PAIRS", "512"),
+		ProgressEvery:       getenv("MANTA_PROGRESS_EVERY", "0"),
+		LengthBucketBatches: getenv("MANTA_LENGTH_BUCKET_BATCHES", "1"),
+		BarrBin:             filepath.Join(runDir, "bin", "barr"),
+		Artifact:            filepath.Join(runDir, modelName+".mll"),
+		SealedArtifact:      filepath.Join(runDir, modelName+".sealed.mll"),
+	}
+
+	err = os.WriteFile(cfg.DatasetSHAFile, []byte(""), 0o644)
+	guard err == nil else return candidateConfig{}, err
+
+	cfg.GitCommit, err = commandOutput(root, "git", []string{"rev-parse", "HEAD"})
+	guard err == nil else return candidateConfig{}, err
+	err = requireCleanRepo(root)
+	guard err == nil else return candidateConfig{}, err
+
+	cfg.Corpus = os.Getenv("MANTA_CORPUS")
+	cfg.TrainJSONL = os.Getenv("MANTA_TRAIN_JSONL")
+	cfg.EvalJSONL = os.Getenv("MANTA_EVAL_JSONL")
+	cfg.HardEvalJSONL = os.Getenv("MANTA_HARD_EVAL_JSONL")
+	cfg.TokenizerPath = os.Getenv("MANTA_TOKENIZER")
+
+	if cfg.Corpus != "" {
+		guard cfg.TrainJSONL == "" && cfg.EvalJSONL == "" else return candidateConfig{}, fmt.Errorf("choose MANTA_CORPUS or MANTA_TRAIN_JSONL/MANTA_EVAL_JSONL, not both")
+		cfg.Corpus, err = requireFile(cfg.Corpus, "MANTA_CORPUS")
+		guard err == nil else return candidateConfig{}, err
+		err = rejectTmpPath("corpus", cfg.Corpus)
+		guard err == nil else return candidateConfig{}, err
+		cfg.TrainMode = "corpus"
+		err = appendSHA256(cfg.DatasetSHAFile, cfg.Corpus)
+		guard err == nil else return candidateConfig{}, err
+	} else {
+		cfg.TrainJSONL, err = requireFile(cfg.TrainJSONL, "MANTA_TRAIN_JSONL")
+		guard err == nil else return candidateConfig{}, err
+		cfg.EvalJSONL, err = requireFile(cfg.EvalJSONL, "MANTA_EVAL_JSONL")
+		guard err == nil else return candidateConfig{}, err
+		err = rejectTmpPath("train dataset", cfg.TrainJSONL)
+		guard err == nil else return candidateConfig{}, err
+		err = rejectTmpPath("eval dataset", cfg.EvalJSONL)
+		guard err == nil else return candidateConfig{}, err
+		cfg.TrainMode = "prepared_jsonl"
+		err = appendSHA256(cfg.DatasetSHAFile, cfg.TrainJSONL)
+		guard err == nil else return candidateConfig{}, err
+		err = appendSHA256(cfg.DatasetSHAFile, cfg.EvalJSONL)
+		guard err == nil else return candidateConfig{}, err
+	}
+
+	if cfg.HardEvalJSONL != "" {
+		cfg.HardEvalJSONL, err = requireFile(cfg.HardEvalJSONL, "MANTA_HARD_EVAL_JSONL")
+		guard err == nil else return candidateConfig{}, err
+		err = rejectTmpPath("hard eval dataset", cfg.HardEvalJSONL)
+		guard err == nil else return candidateConfig{}, err
+		err = appendSHA256(cfg.DatasetSHAFile, cfg.HardEvalJSONL)
+		guard err == nil else return candidateConfig{}, err
+	} else if !envEnabled("MANTA_ALLOW_NO_HARD_EVAL") {
+		return candidateConfig{}, fmt.Errorf("MANTA_HARD_EVAL_JSONL is required for a production candidate (set MANTA_ALLOW_NO_HARD_EVAL=1 only for local smoke checks)")
+	}
+
+	if cfg.TokenizerPath != "" {
+		cfg.TokenizerPath, err = requireFile(cfg.TokenizerPath, "MANTA_TOKENIZER")
+		guard err == nil else return candidateConfig{}, err
+		err = rejectTmpPath("tokenizer", cfg.TokenizerPath)
+		guard err == nil else return candidateConfig{}, err
+		err = appendSHA256(cfg.DatasetSHAFile, cfg.TokenizerPath)
+		guard err == nil else return candidateConfig{}, err
+	}
+
+	return cfg, nil
+}
+
+func trainCommonArgs(cfg candidateConfig) []string {
+	args := []string{
+		"--epochs", cfg.Epochs,
+		"--batch-size", cfg.BatchSize,
+		"--lr", cfg.LR,
+		"--contrastive-loss", cfg.ContrastiveLoss,
+		"--temperature", cfg.Temperature,
+		"--eval-every", cfg.EvalEvery,
+		"--eval-every-steps", cfg.EvalEverySteps,
+		"--patience", cfg.Patience,
+		"--min-delta", cfg.MinDelta,
+		"--select-metric", cfg.SelectMetric,
+		"--progress-every", cfg.ProgressEvery,
+	}
+	if envEnabled("MANTA_LENGTH_BUCKET_BATCHES") || cfg.LengthBucketBatches == "1" || strings.ToLower(cfg.LengthBucketBatches) == "true" {
+		args = append(args, "--length-bucket-batches")
+	}
+	return args
+}
+
+func runCandidate(cfg candidateConfig) (candidateConfig, error) {
+	err := writeSelectedEnvironment(cfg)
+	guard err == nil else return cfg, err
+	err = writeManifest(cfg, "started")
+	guard err == nil else return cfg, err
+
+	if !envEnabled("MANTA_SKIP_TESTS") {
+		err = runCmd(cfg, "Go package gate", "go-test.log", "go", []string{"test", "./cmd/barr", "./runtime", "./models", "-count=1"})
+		guard err == nil else return cfg, err
+	}
+	err = runCmd(cfg, "Build barr CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.BarrBin, "./cmd/barr"})
+	guard err == nil else return cfg, err
+
+	err = runCmd(cfg, "Initialize "+cfg.ModelName, "init-model.log", cfg.BarrBin, []string{
+		"init-model",
+		"--name", cfg.ModelName,
+		"--vocab-size", cfg.VocabSize,
+		"--max-seq", cfg.MaxSeq,
+		"--embedding-dim", cfg.EmbeddingDim,
+		"--hidden-dim", cfg.HiddenDim,
+		"--seed", cfg.InitSeed,
+		"--weight-bits", cfg.WeightBits,
+		"--lr", cfg.LR,
+		"--contrastive-loss", cfg.ContrastiveLoss,
+		"--temperature", cfg.Temperature,
+		cfg.Artifact,
+	})
+	guard err == nil else return cfg, err
+
+	let common = trainCommonArgs(cfg)
+	tokenizerForEval := cfg.TokenizerPath
+	if cfg.TrainMode == "corpus" {
+		args := append([]string{"train-corpus"}, common...)
+		args = append(args,
+			"--vocab-size", cfg.VocabSize,
+			"--min-freq", cfg.MinFreq,
+			"--min-chars", cfg.MinChars,
+			"--max-pairs", cfg.MaxPairs,
+			"--eval-pairs", cfg.EvalPairs,
+			"--tokenizer", filepath.Join(cfg.RunDir, cfg.ModelName+".tokenizer.mll"),
+			"--train-pairs", filepath.Join(cfg.RunDir, cfg.ModelName+".train.jsonl"),
+			"--eval-pairs-path", filepath.Join(cfg.RunDir, cfg.ModelName+".eval.jsonl"),
+			cfg.Artifact,
+			cfg.Corpus,
+		)
+		err = runCmd(cfg, "Train "+cfg.ModelName+" from corpus", "train.log", cfg.BarrBin, args)
+		guard err == nil else return cfg, err
+		cfg.TrainJSONL = filepath.Join(cfg.RunDir, cfg.ModelName+".train.jsonl")
+		cfg.EvalJSONL = filepath.Join(cfg.RunDir, cfg.ModelName+".eval.jsonl")
+		tokenizerForEval = filepath.Join(cfg.RunDir, cfg.ModelName+".tokenizer.mll")
+		err = appendSHA256(cfg.DatasetSHAFile, cfg.TrainJSONL)
+		guard err == nil else return cfg, err
+		err = appendSHA256(cfg.DatasetSHAFile, cfg.EvalJSONL)
+		guard err == nil else return cfg, err
+		err = appendSHA256(cfg.DatasetSHAFile, tokenizerForEval)
+		guard err == nil else return cfg, err
+	} else {
+		args := append([]string{"train-embed"}, common...)
+		if cfg.TokenizerPath != "" {
+			args = append(args, "--tokenizer", cfg.TokenizerPath)
+		}
+		args = append(args, cfg.Artifact, cfg.TrainJSONL, cfg.EvalJSONL)
+		planArgs := append([]string{"train-embed", "--plan-only"}, common...)
+		if cfg.TokenizerPath != "" {
+			planArgs = append(planArgs, "--tokenizer", cfg.TokenizerPath)
+		}
+		planArgs = append(planArgs, cfg.Artifact, cfg.TrainJSONL, cfg.EvalJSONL)
+		err = runCmd(cfg, "Plan prepared JSONL training workload", "train-plan.log", cfg.BarrBin, planArgs)
+		guard err == nil else return cfg, err
+		err = runCmd(cfg, "Train "+cfg.ModelName+" from prepared JSONL", "train.log", cfg.BarrBin, args)
+		guard err == nil else return cfg, err
+	}
+
+	evalCandidate, err := copyPackageForEval(cfg, "validation")
+	guard err == nil else return cfg, err
+	evalArgs := []string{"train-embed", "--eval-only"}
+	if tokenizerForEval != "" {
+		evalArgs = append(evalArgs, "--tokenizer", tokenizerForEval)
+	}
+	evalArgs = append(evalArgs, evalCandidate, cfg.EvalJSONL)
+	err = runCmd(cfg, "Final validation eval-only", "final-eval.log", cfg.BarrBin, evalArgs)
+	guard err == nil else return cfg, err
+	err = requireEvalOnlyZeroUpdates(filepath.Join(cfg.LogDir, "final-eval.log"))
+	guard err == nil else return cfg, err
+
+	gateLog := filepath.Join(cfg.LogDir, "final-eval.log")
+	if cfg.HardEvalJSONL != "" {
+		hardCandidate, err := copyPackageForEval(cfg, "hard")
+		guard err == nil else return cfg, err
+		hardArgs := []string{"train-embed", "--eval-only"}
+		if tokenizerForEval != "" {
+			hardArgs = append(hardArgs, "--tokenizer", tokenizerForEval)
+		}
+		hardArgs = append(hardArgs, hardCandidate, cfg.HardEvalJSONL)
+		err = runCmd(cfg, "Hard holdout eval-only", "hard-eval.log", cfg.BarrBin, hardArgs)
+		guard err == nil else return cfg, err
+		gateLog = filepath.Join(cfg.LogDir, "hard-eval.log")
+		err = requireEvalOnlyZeroUpdates(gateLog)
+		guard err == nil else return cfg, err
+	}
+
+	err = requireMetricMin(gateLog, "mrr", os.Getenv("MANTA_MIN_MRR"))
+	guard err == nil else return cfg, err
+	err = requireMetricMin(gateLog, "top1", os.Getenv("MANTA_MIN_TOP1"))
+	guard err == nil else return cfg, err
+	err = requireMetricMin(gateLog, "top5", os.Getenv("MANTA_MIN_TOP5"))
+	guard err == nil else return cfg, err
+	err = requireMetricMin(gateLog, "top10", os.Getenv("MANTA_MIN_TOP10"))
+	guard err == nil else return cfg, err
+	err = requireMetricMin(gateLog, "accuracy", os.Getenv("MANTA_MIN_PAIR_ACCURACY"))
+	guard err == nil else return cfg, err
+	err = requireMetricMin(gateLog, "margin", os.Getenv("MANTA_MIN_SCORE_MARGIN"))
+	guard err == nil else return cfg, err
+	err = requireMetricMax(gateLog, "loss", os.Getenv("MANTA_MAX_LOSS"))
+	guard err == nil else return cfg, err
+	err = requireMetricMax(gateLog, "mean_rank", os.Getenv("MANTA_MAX_MEAN_RANK"))
+	guard err == nil else return cfg, err
+
+	err = runCmd(cfg, "Inspect training package", "inspect-package.log", cfg.BarrBin, []string{"inspect", cfg.Artifact})
+	guard err == nil else return cfg, err
+	inspectData, err := os.ReadFile(filepath.Join(cfg.LogDir, "inspect-package.log"))
+	guard err == nil else return cfg, err
+	guard strings.Contains(string(inspectData), "package verify: OK") else return cfg, fmt.Errorf("training package verification did not pass")
+
+	err = runCmd(cfg, "Export sealed MLL", "export-mll.log", cfg.BarrBin, []string{"export-mll", cfg.Artifact, cfg.SealedArtifact})
+	guard err == nil else return cfg, err
+	err = runCmd(cfg, "Inspect sealed MLL", "inspect-sealed.log", cfg.BarrBin, []string{"inspect", cfg.SealedArtifact})
+	guard err == nil else return cfg, err
+	sealedData, err := os.ReadFile(filepath.Join(cfg.LogDir, "inspect-sealed.log"))
+	guard err == nil else return cfg, err
+	guard strings.Contains(string(sealedData), "package verify: OK") else return cfg, fmt.Errorf("sealed package verification did not pass")
+
+	err = writeArtifactSHA256(cfg)
+	guard err == nil else return cfg, err
+	err = writeManifest(cfg, "success")
+	guard err == nil else return cfg, err
+	return cfg, nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	guard err == nil else {
+		fmt.Println(f"failed to resolve repo root: {err}")
+		os.Exit(1)
+	}
+	cfg, err := prepareConfig(root)
+	guard err == nil else {
+		fmt.Println(f"candidate config failed: {err}")
+		os.Exit(1)
+	}
+	cfg, err = runCandidate(cfg)
+	guard err == nil else {
+		_ = writeManifest(cfg, "failed")
+		fmt.Println(f"candidate run failed: {err}")
+		os.Exit(1)
+	}
+	sum, err := sha256File(cfg.SealedArtifact)
+	guard err == nil else {
+		fmt.Println(f"candidate completed but sealed sha failed: {err}")
+		os.Exit(1)
+	}
+	step("Production candidate ready")
+	fmt.Println(f"run_dir={cfg.RunDir}")
+	fmt.Println(f"sealed_artifact={cfg.SealedArtifact}")
+	fmt.Println(f"sealed_sha256={sum}")
+}
