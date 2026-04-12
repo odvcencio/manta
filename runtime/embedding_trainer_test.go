@@ -1440,6 +1440,27 @@ func TestTrainerActivationAccelModeFromEnv(t *testing.T) {
 	}
 }
 
+func TestFastGELUApproximationIsOptIn(t *testing.T) {
+	t.Setenv("MANTA_TRAIN_ENABLE_FAST_GELU", "")
+	if fastGELUEnabled() {
+		t.Fatal("fast GELU enabled by default")
+	}
+	t.Setenv("MANTA_TRAIN_ENABLE_FAST_GELU", "1")
+	if !fastGELUEnabled() {
+		t.Fatal("fast GELU env did not enable approximation")
+	}
+	x := float32(1.25)
+	if geluForwardMode(x, true) == geluForwardMode(x, false) {
+		t.Fatal("fast GELU forward unexpectedly matched precise path exactly")
+	}
+	if geluBackwardMode(x, true) == geluBackwardMode(x, false) {
+		t.Fatal("fast GELU backward unexpectedly matched precise path exactly")
+	}
+	if fastTanh(4) != 1 || fastTanh(-4) != -1 {
+		t.Fatal("fast tanh did not clamp outside approximation range")
+	}
+}
+
 func TestEmbeddingTrainerGELUBackwardAcceleratorMatchesHost(t *testing.T) {
 	t.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)

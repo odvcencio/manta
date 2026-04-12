@@ -70,6 +70,8 @@ The production workflow defaults `MANTA_EVAL_EVERY_STEPS=0`. Keep within-epoch e
 
 Eval-only candidate gates batch pairwise forward encodes by exact token length. `MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE` defaults to `256`; set `MANTA_TRAIN_DISABLE_BATCHED_PAIR_EVAL=1` only for scalar A/B checks.
 
+`MANTA_TRAIN_ENABLE_FAST_GELU=1` is available for throughput experiments. It changes GELU math from precise tanh to a bounded rational tanh approximation, so use it only when the exact-GELU candidate and fast-GELU candidate are both evaluated against validation and hard holdout gates.
+
 ## Metric Thresholds
 
 The default acquired eval files are pairwise positive/negative judgments with one deterministic sampled negative per positive. The initial release gates are:

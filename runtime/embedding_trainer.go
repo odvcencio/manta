@@ -1596,6 +1596,10 @@ func batchedBackwardEnabled() bool {
 	}
 }
 
+func fastGELUEnabled() bool {
+	return trainEnvFlagEnabled("MANTA_TRAIN_ENABLE_FAST_GELU")
+}
+
 func activationAccelMaxElements() int {
 	limit := 1 << 20
 	if raw := trainEnv("MANTA_TRAIN_ACTIVATION_ACCEL_MAX_ELEMENTS"); raw != "" {
@@ -1832,9 +1836,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 			if captureBindings {
 				state.ffnHiddenBinding = t.bindSequenceTensor(state, "ffn_hidden", tensorF32View([]int{seqLen, h}, state.ffnHidden), false, t.fullActivationBackwardAccelEnabled() && bindFullActivation)
 			}
-			for i, value := range state.ffnHidden {
-				state.activated[i] = geluForward(value)
-			}
+			fillGELUForward(state.activated, state.ffnHidden, fastGELUEnabled())
 			if captureBindings {
 				state.activatedBinding = t.bindSequenceTensor(state, "activated", tensorF32View([]int{seqLen, h}, state.activated), true, false)
 			}
@@ -2610,9 +2612,7 @@ func (t *EmbeddingTrainer) encodeLayer(tokens, mask []int32, input []float32, at
 		if captureBindings {
 			state.ffnHiddenBinding = t.bindSequenceTensor(state, "ffn_hidden", tensorF32View([]int{len(tokens), h}, state.ffnHidden), false, t.fullActivationBackwardAccelEnabled())
 		}
-		for i, value := range state.ffnHidden {
-			state.activated[i] = geluForward(value)
-		}
+		fillGELUForward(state.activated, state.ffnHidden, fastGELUEnabled())
 		if captureBindings {
 			state.activatedBinding = t.bindSequenceTensor(state, "activated", tensorF32View([]int{len(tokens), h}, state.activated), true, false)
 		}
@@ -3408,7 +3408,8 @@ func (t *EmbeddingTrainer) backpropProjectedFFNSequence(state *embeddingSequence
 	}
 	gradActivated := make([]float32, seqLen*h)
 	acceleratedGELU := false
-	if !state.skipUnboundActivationBackward(state.ffnHiddenBinding) {
+	fastGELU := fastGELUEnabled()
+	if !fastGELU && !state.skipUnboundActivationBackward(state.ffnHiddenBinding) {
 		if out, ok := t.tryGELUBackwardMul(gradActivatedPre, state.ffnHidden, seqLen, h, state.ffnHiddenBinding); ok {
 			copy(gradActivated, out)
 			acceleratedGELU = true
@@ -3420,9 +3421,7 @@ func (t *EmbeddingTrainer) backpropProjectedFFNSequence(state *embeddingSequence
 				continue
 			}
 			ffnBase := row * h
-			for col := 0; col < h; col++ {
-				gradActivated[ffnBase+col] = gradActivatedPre[ffnBase+col] * geluBackward(state.ffnHidden[ffnBase+col])
-			}
+			fillGELUBackwardMul(gradActivated[ffnBase:ffnBase+h], gradActivatedPre[ffnBase:ffnBase+h], state.ffnHidden[ffnBase:ffnBase+h], fastGELU)
 		}
 	}
 	gradHiddenStep := make([]float32, d*h)
@@ -3661,7 +3660,8 @@ func (t *EmbeddingTrainer) backpropProjectedFFNSequences(states []*embeddingSequ
 	gradActivatedMatrices := make([][]float32, len(states))
 	hiddenMatrices := make([][]float32, len(states))
 	batchedGELU := false
-	if batchActivations {
+	fastGELU := fastGELUEnabled()
+	if batchActivations && !fastGELU {
 		if out, ok := t.tryBatchedGELUBackwardMul(gradActivatedPreMatrices, ffnHiddenMatrices, seqLen, h); ok {
 			gradActivatedMatrices = out
 			batchedGELU = true
@@ -3675,9 +3675,7 @@ func (t *EmbeddingTrainer) backpropProjectedFFNSequences(states []*embeddingSequ
 					continue
 				}
 				ffnBase := row * h
-				for col := 0; col < h; col++ {
-					gradActivated[ffnBase+col] = gradActivatedPreMatrices[i][ffnBase+col] * geluBackward(state.ffnHidden[ffnBase+col])
-				}
+				fillGELUBackwardMul(gradActivated[ffnBase:ffnBase+h], gradActivatedPreMatrices[i][ffnBase:ffnBase+h], state.ffnHidden[ffnBase:ffnBase+h], fastGELU)
 			}
 			gradActivatedMatrices[i] = gradActivated
 		}
@@ -4832,6 +4830,31 @@ func geluForward(x float32) float32 {
 	return 0.5 * x * (1 + float32(math.Tanh(float64(inner))))
 }
 
+func geluForwardMode(x float32, fast bool) float32 {
+	if !fast {
+		return geluForward(x)
+	}
+	return geluForwardFast(x)
+}
+
+func fillGELUForward(dst, src []float32, fast bool) {
+	if fast {
+		for i, value := range src {
+			dst[i] = geluForwardFast(value)
+		}
+		return
+	}
+	for i, value := range src {
+		dst[i] = geluForward(value)
+	}
+}
+
+func geluForwardFast(x float32) float32 {
+	cubic := x * x * x
+	inner := float32(0.7978845608) * (x + float32(0.044715)*cubic)
+	return 0.5 * x * (1 + fastTanh(inner))
+}
+
 func geluBackward(x float32) float32 {
 	cubic := x * x * x
 	inner := float32(0.7978845608) * (x + float32(0.044715)*cubic)
@@ -4839,6 +4862,54 @@ func geluBackward(x float32) float32 {
 	sech2 := 1 - tanhInner*tanhInner
 	innerGrad := float32(0.7978845608) * (1 + float32(3*0.044715)*x*x)
 	return 0.5*(1+tanhInner) + 0.5*x*sech2*innerGrad
+}
+
+func geluBackwardMode(x float32, fast bool) float32 {
+	if !fast {
+		return geluBackward(x)
+	}
+	return geluBackwardFast(x)
+}
+
+func fillGELUBackwardMul(dst, gradOut, preAct []float32, fast bool) {
+	if fast {
+		for i, value := range preAct {
+			dst[i] = gradOut[i] * geluBackwardFast(value)
+		}
+		return
+	}
+	for i, value := range preAct {
+		dst[i] = gradOut[i] * geluBackward(value)
+	}
+}
+
+func geluBackwardFast(x float32) float32 {
+	cubic := x * x * x
+	inner := float32(0.7978845608) * (x + float32(0.044715)*cubic)
+	tanhInner := fastTanh(inner)
+	innerGrad := float32(0.7978845608) * (1 + float32(3*0.044715)*x*x)
+	return 0.5*(1+tanhInner) + 0.5*x*fastTanhDerivative(inner)*innerGrad
+}
+
+func fastTanh(x float32) float32 {
+	if x >= 3 {
+		return 1
+	}
+	if x <= -3 {
+		return -1
+	}
+	x2 := x * x
+	return x * (27 + x2) / (27 + 9*x2)
+}
+
+func fastTanhDerivative(x float32) float32 {
+	if x >= 3 || x <= -3 {
+		return 0
+	}
+	x2 := x * x
+	diff := x2 - 9
+	den := 3 + x2
+	return (diff * diff) / (9 * den * den)
 }
 
 func (t *EmbeddingTrainer) hiddenProjectionData() []float32 {

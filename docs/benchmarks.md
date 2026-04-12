@@ -141,6 +141,8 @@ Prepared JSONL production runs can now pretokenize once with `manta tokenize-emb
 
 Unbound activation acceleration now has a default shape ceiling so `MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL=1` does not route long-document activation groups through standalone upload/download kernels. On the tokenized acquired 4096 train / 512 eval split, fully unbounded CUDA activation regressed to `1m42.293s` and `42420.11` train pairs/s with `744` activation calls. Host activation measured `1m0.212s` and `73554.96` train pairs/s. Shape-limited opt-in measured `1m0.321s` and `73329.90` train pairs/s with `694` activation calls and identical train/eval metrics. On the smaller 512 / 128 tokenized smoke, the same shape-limited opt-in path measured `25239.78` train pairs/s versus `23997.21` for the host-activation default in the A/B run. Keep activation acceleration as an experiment until activation residency removes the extra transfers.
 
+Fast GELU is available as an opt-in training math approximation for candidate-throughput experiments. `MANTA_TRAIN_ENABLE_FAST_GELU=1` replaces the precise tanh call in host GELU forward/backward with a bounded rational tanh approximation and keeps GELU backward on the host so forward/backward use matching math. On the tokenized 512 train / 128 eval smoke, precise GELU measured `24191.69` train pairs/s and fast GELU measured `32525.01` train pairs/s; eval AUC moved from `0.580322` to `0.581543`. On the tokenized 4096 train / 512 eval split, fast GELU measured `86779.56` train pairs/s versus the prior clean precise-GELU baseline of `73554.96`; eval AUC moved from `0.548126` to `0.547104`. Treat this as a speed/quality knob for candidate runs and keep the exact GELU default until larger validation clears the tradeoff.
+
 Batched matmul upload staging now detects already-contiguous split views and uploads the backing span directly instead of copying those views into scratch first. On the same acquired-text 512 train / 128 eval profile, trainer elapsed moved from `7.577s` to `6.396s`, `runtime.memmove` moved from `1.07s` to `0.58s`, `runtime.memclrNoHeapPointers` moved from `0.78s` to `0.60s`, and `flattenFixedFloat32MatricesScratch` was down to `0.34s` cumulative. Matmul counters again stayed unchanged at `2788` runs, `5838.20 MB` uploaded, and `2990.88 MB` downloaded; the win is less host staging around the same CUDA work.
 
 Trainer-owned scratch buffers now reuse transient float32 flattening inputs for batched matmul dispatches. On the same direct batch-2048 CPU profile, `flattenFixedFloat32Matrices` moved from roughly `0.72s` cumulative to `0.09s` cumulative. The remaining host-side allocation/copy profile is mostly broader activation/state materialization and unavoidable host-device transfer until full device residency lands.
@@ -243,6 +245,12 @@ MANTA_CUDA_DISABLE_ACCUMULATED_MATMUL_SINGLE_SYNC=1
 ```
 
 Disables CUDA single-sync accumulation inside the backend accumulated resident-right matmul primitive. This keeps the same logical training path but synchronizes after each accumulated cuBLAS term, which is useful for A/B testing backend launch overhead.
+
+```bash
+MANTA_TRAIN_ENABLE_FAST_GELU=1
+```
+
+Uses a bounded rational tanh approximation for host GELU forward/backward. This is opt-in because it changes training math. It can materially improve CPU-bound trainer throughput while the model still uses host activation math, but production candidates should compare validation and hard-holdout metrics against exact GELU before promotion.
 
 ```bash
 MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL=1
