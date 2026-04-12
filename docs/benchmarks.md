@@ -28,7 +28,7 @@ The model smoke copies the package into a temporary directory before training. I
 Evaluate an existing candidate package against a token JSONL or text-pair JSONL eval file without running optimizer steps:
 
 ```bash
-go run ./cmd/barr train-embed --eval-only /path/to/manta-embed-v1.mll /path/to/eval-mini.jsonl
+go run ./cmd/manta train-embed --eval-only /path/to/manta-embed-v1.mll /path/to/eval-mini.jsonl
 ```
 
 When the package has a sibling `.tokenizer.mll`, text eval JSONL is tokenized automatically. Pass `--tokenizer /path/to/tokenizer.mll` to use an explicit tokenizer.
@@ -38,18 +38,18 @@ For a production candidate run with acquired BEIR-format datasets, provenance, m
 If you want a binary runner instead of `run` mode:
 
 ```bash
-ferrous-wheel build scripts/bench.fw -o bin/barr-bench
-bin/barr-bench
+ferrous-wheel build scripts/bench.fw -o bin/manta-bench
+bin/manta-bench
 ```
 
-Capture CPU or heap profiles for any `barr` command with:
+Capture CPU or heap profiles for any `manta` command with:
 
 ```bash
-MANTA_CPU_PROFILE=/tmp/barr.cpu.pprof go run ./cmd/barr train-embed ...
-MANTA_MEM_PROFILE=/tmp/barr.mem.pprof go run ./cmd/barr train-embed ...
+MANTA_CPU_PROFILE=/tmp/manta.cpu.pprof go run ./cmd/manta train-embed ...
+MANTA_MEM_PROFILE=/tmp/manta.mem.pprof go run ./cmd/manta train-embed ...
 ```
 
-Then inspect with `go tool pprof -top /tmp/barr.cpu.pprof`.
+Then inspect with `go tool pprof -top /tmp/manta.cpu.pprof`.
 
 For repeatable GPU A/B profiles, use the Ferrous Wheel harness:
 
@@ -64,6 +64,7 @@ ferrous-wheel run scripts/profile_manta_gpu_efficiency.fw
 ```
 
 The profile harness copies `.mll` package assets per variant, runs `train-embed`, writes each variant's `run.log`, `time.txt`, `cpu.pprof`, and `pprof-top.txt`, then writes a root `summary.tsv` with throughput and accelerator counters.
+Set `MANTA_GPU_PROFILE_NO_TOKENIZER=1` when profiling already-tokenized JSONL so the copied sibling tokenizer does not force text mode.
 
 ## Current Default Model Smoke
 
@@ -135,6 +136,8 @@ Ranked BPE tokenization removed a startup/data-ingest bottleneck before longer t
 Ranked BPE now compacts each selected merge in place instead of allocating a fresh token slice for every merge pass. On the acquired-text 512 train / 128 eval CPU profile, `applyRankedMerge` moved from `0.86s` cumulative to `0.45s`; total tokenizer encode time moved from `3.39s` to `3.10s`. The full run remains dominated by backend orchestration, memory clearing, and host-device traffic, so this is a data-ingest allocation cut rather than a matmul-counter change.
 
 Prepared-text ingestion now keeps a trainer-local tokenization cache across train and eval loading. On the same acquired-text 512 train / 128 eval profile, with `1.38x` repeated text fields, `BPETokenizer.Encode` moved from `3.57s` cumulative to `1.98s`, train text tokenization moved from `2.82s` to `1.60s`, pair eval text tokenization moved from `0.75s` to `0.38s`, and trainer elapsed moved from `8.414s` to `7.577s`. Matmul counters stayed unchanged at `2788` runs, `5838.20 MB` uploaded, and `2990.88 MB` downloaded; this is an in-memory ingest optimization, and candidate packages, tokenizers, train profiles, checkpoints, and sealed outputs remain `.mll` artifacts.
+
+Prepared JSONL production runs can now pretokenize once with `manta tokenize-embed` and train with `manta train-embed --no-tokenizer`. On the 512 train / 128 eval mini smoke, a same-code text JSONL profile still spent `3.61s` cumulative in `BPETokenizer.Encode` (`22.59%` of CPU samples), while the token JSONL profile removed tokenizer encode from the hot path. The GPU counters were identical for the two runs at `2712` matmul runs, `5838.20 MB` uploaded, and `2988.88 MB` downloaded; text measured `24948.46` train pairs/s and token JSONL measured `22414.32` train pairs/s in one noisy pair of local runs. Treat this as a training-profile cleanup and reproducibility win, not a claimed device-throughput gain.
 
 Batched matmul upload staging now detects already-contiguous split views and uploads the backing span directly instead of copying those views into scratch first. On the same acquired-text 512 train / 128 eval profile, trainer elapsed moved from `7.577s` to `6.396s`, `runtime.memmove` moved from `1.07s` to `0.58s`, `runtime.memclrNoHeapPointers` moved from `0.78s` to `0.60s`, and `flattenFixedFloat32MatricesScratch` was down to `0.34s` cumulative. Matmul counters again stayed unchanged at `2788` runs, `5838.20 MB` uploaded, and `2990.88 MB` downloaded; the win is less host staging around the same CUDA work.
 

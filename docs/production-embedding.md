@@ -61,6 +61,9 @@ ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
 
 `MANTA_THRESHOLDS_ENV` loads the acquisition workflow's current gate file and records its SHA256 in the run manifest. Explicitly exported `MANTA_*` values still override values from that file. Set `MANTA_TOKENIZER=/path/to/tokenizer.mll` when you want to reuse an existing tokenizer instead of training one from `MANTA_TOKENIZER_CORPUS`.
 
+When prepared JSONL is text and a tokenizer is available, the production workflow tokenizes train, validation, and hard-eval JSONL into run-local token files before training. Training and eval then read token JSONL directly, which front-loads BPE cost, makes the optimizer profile reflect model work, and records the generated token files in `datasets.sha256`.
+Use `manta train-embed --no-tokenizer` when directly training token JSONL beside a sibling tokenizer; otherwise the CLI intentionally auto-discovers that tokenizer and treats the JSONL as text.
+
 Contrastive training uses pair-length-aware bucketing by default so batches reach larger exact-length matmul groups. `MANTA_TRAIN_LENGTH_BUCKET_WINDOW` controls the shuffled sort window; larger values can improve grouping but must be profiled because they reduce local length randomness and can increase per-batch working-set pressure.
 
 The production workflow defaults `MANTA_EVAL_EVERY_STEPS=0`. Keep within-epoch eval disabled for full candidate runs unless you are debugging convergence; epoch eval, final validation eval, and hard holdout eval still run and are enough for release gating. On the acquired full split, step-level eval every 4 batches adds many full eval passes and dominates transfer without improving the optimizer update itself.
@@ -130,6 +133,13 @@ Text-pair JSONL:
 ```
 
 Positive-only text pairs can train contrastively. Mixed positive/negative text pairs are valid for eval-only gates.
+
+Token-pair eval JSONL:
+
+```json
+{"left_tokens":[1,2,3],"right_tokens":[1,2,3],"left_mask":[1,1,1],"right_mask":[1,1,1],"target":1}
+{"left_tokens":[1,2,3],"right_tokens":[9,8],"left_mask":[1,1,1],"right_mask":[1,1],"target":0}
+```
 
 ## Release Gate
 

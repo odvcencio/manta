@@ -1,10 +1,10 @@
 # Manta
 
-Manta is an inference-first GPU language and runtime stack. It compiles `.bar` source into backend-neutral `.barr` execution plans for GPU-accelerated embedding, reranking, retrieval-time scoring, and decode-time inference. Write the model-facing compute once, then run it on NVIDIA (CUDA) or Apple Silicon (Metal) with the same artifact and the same entrypoint contract.
+Manta is an inference-first GPU language and runtime stack. It compiles `.manta` source into backend-neutral `.mll` execution plans for GPU-accelerated embedding, reranking, retrieval-time scoring, and decode-time inference. Write the model-facing compute once, then run it on NVIDIA (CUDA) or Apple Silicon (Metal) with the same artifact and the same entrypoint contract.
 
 - **Inference-first product surface** with `kernel` and `pipeline` abstractions
 - **Three-level IR pipeline**: HIR (typed) -> MIR (semantic) -> LIR (scheduled)
-- **Portable artifact format** (`.barr`): compile once, deploy anywhere
+- **Portable artifact format** (`.mll`): compile once, deploy anywhere
 - **Dual backend**: CUDA and Metal from the same source
 - **First-class KV cache**: `kv_cache` type with `kv_read`/`kv_write` for autoregressive decoding
 - **TurboQuant-native direction**: Manta is designed to consume and emit quantized tensors and quantized vectors without repacking through a separate framework
@@ -22,18 +22,18 @@ That means the language and runtime should bias toward:
 - low-friction query-time embedding and scoring entrypoints
 - rerank/select entrypoints that can return ids directly
 - inference kernels that can consume TurboQuant-native layouts directly
-- portable `.barr` artifacts that CorkScrewDB can load without rewriting host code
+- portable `.mll` artifacts that CorkScrewDB can load without rewriting host code
 - sealed MLL package exports that carry model definition, weights, tokenizer, memory plan, and metadata together
 
 ## Install
 
 ```bash
-go install github.com/odvcencio/manta/cmd/barr@latest
+go install github.com/odvcencio/manta/cmd/manta@latest
 ```
 
 ## Quick Start
 
-Write a `.bar` source file:
+Write a `.manta` source file:
 
 ```manta
 param token_embedding: f16[V, D] @weight("weights/token_embedding")
@@ -53,18 +53,18 @@ pipeline embed(tokens: i32[T]) -> f16[T, E] {
 Compile and run:
 
 ```bash
-barr compile embed.bar embed.barr
-barr run embed.barr embed
+manta compile embed.manta embed.mll
+manta run embed.mll embed
 ```
 
 Or use the built-in demo:
 
 ```bash
-barr demo tiny_embed
-barr demo tiny_decode
-barr demo tiny_score
-barr demo tiny_rerank
-barr demo tiny_select
+manta demo tiny_embed
+manta demo tiny_decode
+manta demo tiny_score
+manta demo tiny_rerank
+manta demo tiny_select
 ```
 
 ## Language
@@ -150,7 +150,7 @@ kv_write(cache, value)         // expression statement (side effect)
 ## Compilation Pipeline
 
 ```
-.bar source
+.manta source
   |  Parse (recursive descent)
   v
 Syntax AST
@@ -165,7 +165,7 @@ MIR -- tensor-semantic operations (gather, matmul, softmax, ...)
 LIR -- scheduled plan: buffers, kernels, schedule hints, storage classes
   |
   v
-.barr artifact -- JSON, backend-neutral, CUDA + Metal kernel variants
+.mll artifact -- JSON, backend-neutral, CUDA + Metal kernel variants
 ```
 
 ### Intermediate representations
@@ -191,11 +191,11 @@ These map to thread blocks (CUDA) or threadgroups (Metal) at the backend level.
 
 ## Artifact Format
 
-The `.barr` artifact (version `barr/v0alpha1`) is a JSON-serialized execution plan:
+The `.mll` artifact carries a Manta execution plan:
 
 ```json
 {
-  "version": "barr/v0alpha1",
+  "version": "manta/v0alpha1",
   "name": "tiny_embed",
   "params": [{"name": "token_embedding", "binding": "weights/token_embedding", ...}],
   "entry_points": [{"name": "embed", "kind": "pipeline", ...}],
@@ -222,15 +222,16 @@ Artifacts are validated on load: all referenced buffers, kernels, and entry poin
 
 ```go
 import (
-    "github.com/odvcencio/manta/artifact/barr"
+    mantaartifact "github.com/odvcencio/manta/artifact/manta"
     "github.com/odvcencio/manta/runtime"
+    "github.com/odvcencio/manta/runtime/backend"
     "github.com/odvcencio/manta/runtime/backends/cuda"
     "github.com/odvcencio/manta/runtime/backends/metal"
 )
 
 rt := runtime.New(cuda.New(), metal.New())
 
-prog, err := rt.LoadFile(ctx, "model.barr",
+prog, err := rt.LoadFile(ctx, "model.mll",
     runtime.WithWeight("token_embedding", embeddingData),
     runtime.WithWeight("projection", projectionData),
 )
@@ -251,13 +252,13 @@ For promoted kernel classes, the runtime can compile and launch backend-native k
 
 ```go
 type Backend interface {
-    Kind() barr.BackendKind
-    CanLoad(mod *barr.Module) bool
-    Load(ctx context.Context, mod *barr.Module, weights map[string]WeightBinding) (Executor, error)
+    Kind() mantaartifact.BackendKind
+    CanLoad(mod *mantaartifact.Module) bool
+    Load(ctx context.Context, mod *mantaartifact.Module, weights map[string]WeightBinding) (Executor, error)
 }
 
 type Executor interface {
-    Backend() barr.BackendKind
+    Backend() mantaartifact.BackendKind
     Run(ctx context.Context, req Request) (Result, error)
 }
 ```
@@ -285,7 +286,7 @@ Manta is being shaped around two concrete deployment targets:
 1. standalone inference binaries written in Go
 2. CorkScrewDB as a runtime host for embedding, reranking, and quantized vector-aware scoring
 
-That means `.barr` artifacts should be good at:
+That means `.mll` artifacts should be good at:
 
 - `embed(tokens) -> embeddings`
 - `score(query, docs) -> scores`
@@ -300,16 +301,18 @@ and eventually:
 ## CLI
 
 ```
-barr compile <source.bar> [output.mll]             Compile .bar source to a Manta artifact
-barr init-model [flags] <artifact.mll>             Create the default quantized embedding training package
-barr train-corpus [flags] <artifact.mll> <corpus>  Train tokenizer, mine pairs, and fit the embedder
-barr train-embed [flags] <artifact.mll> <train>    Fit an initialized package on token or text JSONL
-barr train-embed --eval-only <artifact.mll> <eval> Evaluate a package without optimizer steps
-barr export-mll <artifact.mll> [output.mll]        Seal an artifact package into a weight-carrying MLL file
-barr inspect <artifact.mll>                        Inspect and verify an artifact package
-barr run <artifact.mll> [entry]                    Load and execute an artifact entry point
-barr demo [tiny_embed|tiny_decode|tiny_score]      Run a built-in preset module
-barr version                                      Print version
+manta compile <source.manta> [output.mll]             Compile .manta source to a Manta artifact
+manta init-model [flags] <artifact.mll>             Create the default quantized embedding training package
+manta train-corpus [flags] <artifact.mll> <corpus>  Train tokenizer, mine pairs, and fit the embedder
+manta tokenize-embed <artifact.mll> <text> <tokens> Convert text JSONL to reusable token JSONL
+manta train-embed [flags] <artifact.mll> <train>    Fit an initialized package on token or text JSONL
+manta train-embed --eval-only <artifact.mll> <eval> Evaluate a package without optimizer steps
+manta train-embed --no-tokenizer <artifact.mll> <tokens> Force token JSONL beside a tokenizer
+manta export-mll <artifact.mll> [output.mll]        Seal an artifact package into a weight-carrying MLL file
+manta inspect <artifact.mll>                        Inspect and verify an artifact package
+manta run <artifact.mll> [entry]                    Load and execute an artifact entry point
+manta demo [tiny_embed|tiny_decode|tiny_score]      Run a built-in preset module
+manta version                                      Print version
 ```
 
 For production-grade `manta-embed-v1` candidate training, use `scripts/acquire_manta_embed_v1_datasets.fw` followed by `scripts/train_manta_embed_v1_candidate.fw`; they record dataset hashes, repo provenance, eval-only gates, sealed export, and artifact hashes. See `docs/production-embedding.md`.
@@ -326,8 +329,8 @@ The compiler, IR pipeline, artifact format, semantic analysis, runtime, and CLI 
 ## Development
 
 ```bash
-CGO_ENABLED=0 go test ./artifact/barr ./cmd/barr ./compiler ./models ./runtime/backend ./runtime/backends/metal ./syntax
-go build ./cmd/barr/
+CGO_ENABLED=0 go test ./artifact/manta ./cmd/manta ./compiler ./models ./runtime/backend ./runtime/backends/metal ./syntax
+go build ./cmd/manta/
 ```
 
 CUDA-backed runtime tests require a working CUDA device and should be run separately from the no-cgo public gate.

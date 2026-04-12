@@ -10,8 +10,8 @@ func TestTrainEmbeddingPackageFromContrastiveFiles(t *testing.T) {
 	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
 	path := writeTinyTrainingPackage(t, trainer)
 
-	trainPath := path[:len(path)-len(".barr")] + ".pairs.jsonl"
-	evalPath := path[:len(path)-len(".barr")] + ".eval.jsonl"
+	trainPath := path[:len(path)-len(".mll")] + ".pairs.jsonl"
+	evalPath := path[:len(path)-len(".mll")] + ".eval.jsonl"
 	trainSet := []EmbeddingContrastiveExample{
 		{QueryTokens: []int32{0}, PositiveTokens: []int32{0}, QueryMask: []int32{1}, PositiveMask: []int32{1}},
 		{QueryTokens: []int32{1}, PositiveTokens: []int32{1}, QueryMask: []int32{1}, PositiveMask: []int32{1}},
@@ -55,8 +55,8 @@ func TestTrainFFNEmbeddingPackageFromContrastiveFiles(t *testing.T) {
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
 	path := writeTinyTrainingPackage(t, trainer)
 
-	trainPath := path[:len(path)-len(".barr")] + ".pairs.jsonl"
-	evalPath := path[:len(path)-len(".barr")] + ".eval.jsonl"
+	trainPath := path[:len(path)-len(".mll")] + ".pairs.jsonl"
+	evalPath := path[:len(path)-len(".mll")] + ".eval.jsonl"
 	trainSet := []EmbeddingContrastiveExample{
 		{QueryTokens: []int32{0}, PositiveTokens: []int32{0}, QueryMask: []int32{1}, PositiveMask: []int32{1}},
 		{QueryTokens: []int32{1}, PositiveTokens: []int32{1}, QueryMask: []int32{1}, PositiveMask: []int32{1}},
@@ -107,8 +107,8 @@ func TestTrainAttentionEmbeddingPackageFromContrastiveFiles(t *testing.T) {
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	path := writeTinyTrainingPackage(t, trainer)
 
-	trainPath := path[:len(path)-len(".barr")] + ".pairs.jsonl"
-	evalPath := path[:len(path)-len(".barr")] + ".eval.jsonl"
+	trainPath := path[:len(path)-len(".mll")] + ".pairs.jsonl"
+	evalPath := path[:len(path)-len(".mll")] + ".eval.jsonl"
 	trainSet := []EmbeddingContrastiveExample{
 		{QueryTokens: []int32{0}, PositiveTokens: []int32{0}, QueryMask: []int32{1}, PositiveMask: []int32{1}},
 		{QueryTokens: []int32{1}, PositiveTokens: []int32{1}, QueryMask: []int32{1}, PositiveMask: []int32{1}},
@@ -161,8 +161,8 @@ func TestTrainEncoderEmbeddingPackageFromContrastiveFiles(t *testing.T) {
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.02)
 	path := writeTinyTrainingPackage(t, trainer)
 
-	trainPath := path[:len(path)-len(".barr")] + ".pairs.jsonl"
-	evalPath := path[:len(path)-len(".barr")] + ".eval.jsonl"
+	trainPath := path[:len(path)-len(".mll")] + ".pairs.jsonl"
+	evalPath := path[:len(path)-len(".mll")] + ".eval.jsonl"
 	trainSet := tinyEncoderContrastiveDataset()
 	if err := WriteEmbeddingContrastiveExamplesFile(trainPath, trainSet); err != nil {
 		t.Fatalf("write train dataset: %v", err)
@@ -224,8 +224,8 @@ func TestTrainEmbeddingPackageFromTextContrastiveFiles(t *testing.T) {
 		t.Fatalf("write tokenizer: %v", err)
 	}
 
-	trainPath := path[:len(path)-len(".barr")] + ".text-pairs.jsonl"
-	evalPath := path[:len(path)-len(".barr")] + ".text-eval.jsonl"
+	trainPath := path[:len(path)-len(".mll")] + ".text-pairs.jsonl"
+	evalPath := path[:len(path)-len(".mll")] + ".text-eval.jsonl"
 	trainSet := []EmbeddingTextContrastiveExample{
 		{Query: "a", Positive: "a"},
 		{Query: "b", Positive: "b"},
@@ -307,6 +307,48 @@ func TestTrainEmbeddingPackageFromCorpusFile(t *testing.T) {
 	}
 }
 
+func TestTrainEmbeddingPackageFromContrastiveFilesAcceptsTokenPairEval(t *testing.T) {
+	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
+	path := writeTinyTrainingPackage(t, trainer)
+
+	trainPath := path[:len(path)-len(".mll")] + ".pairs.jsonl"
+	evalPath := path[:len(path)-len(".mll")] + ".eval-pairs.jsonl"
+	trainSet := []EmbeddingContrastiveExample{
+		{QueryTokens: []int32{0}, PositiveTokens: []int32{0}, QueryMask: []int32{1}, PositiveMask: []int32{1}},
+		{QueryTokens: []int32{1}, PositiveTokens: []int32{1}, QueryMask: []int32{1}, PositiveMask: []int32{1}},
+	}
+	evalSet := []EmbeddingPairExample{
+		{LeftTokens: []int32{0}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+		{LeftTokens: []int32{0}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 0},
+	}
+	if err := WriteEmbeddingContrastiveExamplesFile(trainPath, trainSet); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	if err := WriteEmbeddingPairExamplesFile(evalPath, evalSet); err != nil {
+		t.Fatalf("write eval pair dataset: %v", err)
+	}
+
+	summary, _, err := TrainEmbeddingPackageFromContrastiveFiles(path, trainPath, evalPath, EmbeddingTrainRunConfig{
+		Epochs:      2,
+		BatchSize:   2,
+		Shuffle:     true,
+		Seed:        7,
+		RestoreBest: true,
+	})
+	if err != nil {
+		t.Fatalf("train package with token pair eval: %v", err)
+	}
+	if summary.FinalEval == nil {
+		t.Fatal("expected final eval metrics in summary")
+	}
+	if summary.FinalEval.PairCount != len(evalSet) {
+		t.Fatalf("final eval pair count = %d, want %d", summary.FinalEval.PairCount, len(evalSet))
+	}
+	if summary.Workload.EvalMode != "pairwise" {
+		t.Fatalf("eval mode = %q, want pairwise", summary.Workload.EvalMode)
+	}
+}
+
 func TestTrainEmbeddingPackageFromTextContrastiveFilesAcceptsLabeledEvalPairs(t *testing.T) {
 	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
 	path := writeTinyTrainingPackage(t, trainer)
@@ -321,8 +363,8 @@ func TestTrainEmbeddingPackageFromTextContrastiveFilesAcceptsLabeledEvalPairs(t 
 		t.Fatalf("write tokenizer: %v", err)
 	}
 
-	trainPath := path[:len(path)-len(".barr")] + ".text-pairs.jsonl"
-	evalPath := path[:len(path)-len(".barr")] + ".text-eval.jsonl"
+	trainPath := path[:len(path)-len(".mll")] + ".text-pairs.jsonl"
+	evalPath := path[:len(path)-len(".mll")] + ".text-eval.jsonl"
 	trainData := "" +
 		"{\"query\":\"a\",\"positive\":\"a\"}\n" +
 		"{\"query\":\"b\",\"positive\":\"b\"}\n"
@@ -359,7 +401,7 @@ func TestTrainEmbeddingPackageFromTextContrastiveFilesAcceptsLabeledEvalPairs(t 
 
 func writeTinyTrainingPackage(t *testing.T, trainer *EmbeddingTrainer) string {
 	t.Helper()
-	path := t.TempDir() + "/tiny_train_embed_q8.barr"
+	path := t.TempDir() + "/tiny_train_embed_q8.mll"
 	if _, err := trainer.WriteTrainingPackage(path); err != nil {
 		t.Fatalf("write training package: %v", err)
 	}

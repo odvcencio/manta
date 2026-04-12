@@ -580,7 +580,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"strings"
 	"time"
 	"unsafe"
 
@@ -1363,9 +1362,6 @@ func cudaEnvFlagEnabled(name string) bool {
 func cudaEnv(name string) string {
 	if value, ok := os.LookupEnv(name); ok {
 		return value
-	}
-	if strings.HasPrefix(name, "MANTA_") {
-		return os.Getenv("BARR_" + strings.TrimPrefix(name, "MANTA_"))
 	}
 	return ""
 }

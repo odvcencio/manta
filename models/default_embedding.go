@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/compiler"
-	barruntime "github.com/odvcencio/manta/runtime"
+	mantaruntime "github.com/odvcencio/manta/runtime"
 )
 
 const DefaultEmbeddingModelName = "manta-embed-v1"
@@ -32,16 +32,16 @@ type DefaultEmbeddingPackageConfig struct {
 
 // InitDefaultEmbeddingPackage compiles Manta's default trainable embedding
 // shape and writes a native training package ready for train-corpus/train-embed.
-func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig) (barruntime.EmbeddingTrainPackagePaths, error) {
+func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig) (mantaruntime.EmbeddingTrainPackagePaths, error) {
 	if path == "" {
-		return barruntime.EmbeddingTrainPackagePaths{}, fmt.Errorf("output artifact path is required")
+		return mantaruntime.EmbeddingTrainPackagePaths{}, fmt.Errorf("output artifact path is required")
 	}
 	cfg = cfg.normalized()
 	if err := cfg.validate(); err != nil {
-		return barruntime.EmbeddingTrainPackagePaths{}, err
+		return mantaruntime.EmbeddingTrainPackagePaths{}, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return barruntime.EmbeddingTrainPackagePaths{}, err
+		return mantaruntime.EmbeddingTrainPackagePaths{}, err
 	}
 
 	moduleName := moduleNameForModel(cfg.Name)
@@ -50,17 +50,17 @@ func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig)
 		Preset:     compiler.PresetEncoderTrainableQ8x2,
 	})
 	if err != nil {
-		return barruntime.EmbeddingTrainPackagePaths{}, err
+		return mantaruntime.EmbeddingTrainPackagePaths{}, err
 	}
-	if err := barr.WriteFile(path, bundle.Artifact); err != nil {
-		return barruntime.EmbeddingTrainPackagePaths{}, err
+	if err := mantaartifact.WriteFile(path, bundle.Artifact); err != nil {
+		return mantaruntime.EmbeddingTrainPackagePaths{}, err
 	}
 
 	manifest := DefaultEmbeddingManifest(cfg)
-	if err := manifest.WriteFile(barruntime.DefaultEmbeddingManifestPath(path)); err != nil {
-		return barruntime.EmbeddingTrainPackagePaths{}, err
+	if err := manifest.WriteFile(mantaruntime.DefaultEmbeddingManifestPath(path)); err != nil {
+		return mantaruntime.EmbeddingTrainPackagePaths{}, err
 	}
-	return barruntime.InitializeEmbeddingTrainerPackageWithManifest(path, manifest, cfg.trainConfig(), barruntime.EmbeddingTrainInitOptions{
+	return mantaruntime.InitializeEmbeddingTrainerPackageWithManifest(path, manifest, cfg.trainConfig(), mantaruntime.EmbeddingTrainInitOptions{
 		Seed: cfg.Seed,
 		ShapeSizes: map[string]int{
 			"D": cfg.EmbeddingDim,
@@ -71,9 +71,9 @@ func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig)
 
 // DefaultEmbeddingManifest returns the serving/training contract for the
 // built-in default embedding model shape.
-func DefaultEmbeddingManifest(cfg DefaultEmbeddingPackageConfig) barruntime.EmbeddingManifest {
+func DefaultEmbeddingManifest(cfg DefaultEmbeddingPackageConfig) mantaruntime.EmbeddingManifest {
 	cfg = cfg.normalized()
-	return barruntime.EmbeddingManifest{
+	return mantaruntime.EmbeddingManifest{
 		Name:                  cfg.Name,
 		PooledEntry:           "embed_pooled",
 		BatchEntry:            "embed_pooled_batch",
@@ -93,7 +93,7 @@ func DefaultEmbeddingManifest(cfg DefaultEmbeddingPackageConfig) barruntime.Embe
 		FFNResidual:           true,
 		FFNLayerNorm:          true,
 		ProjectionParam:       "projection",
-		Tokenizer: barruntime.TokenizerManifest{
+		Tokenizer: mantaruntime.TokenizerManifest{
 			VocabSize:   cfg.VocabSize,
 			MaxSequence: cfg.MaxSequence,
 			PadID:       0,
@@ -166,8 +166,8 @@ func (cfg DefaultEmbeddingPackageConfig) validate() error {
 	return nil
 }
 
-func (cfg DefaultEmbeddingPackageConfig) trainConfig() barruntime.EmbeddingTrainConfig {
-	return barruntime.EmbeddingTrainConfig{
+func (cfg DefaultEmbeddingPackageConfig) trainConfig() mantaruntime.EmbeddingTrainConfig {
+	return mantaruntime.EmbeddingTrainConfig{
 		LearningRate:    cfg.LearningRate,
 		WeightDecay:     cfg.WeightDecay,
 		WeightBits:      cfg.WeightBits,

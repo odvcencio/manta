@@ -20,6 +20,7 @@ type profileConfig struct {
 	TrainJSONL     string
 	EvalJSONL      string
 	TokenizerPath  string
+	NoTokenizer    bool
 	Epochs         string
 	BatchSize      string
 	LR             string
@@ -47,6 +48,7 @@ Common:
   MANTA_GPU_PROFILE_RUN_ROOT=$PWD/runs
   MANTA_GPU_PROFILE_RUN_ID=gpu-efficiency-20260412
   MANTA_GPU_PROFILE_MODEL=manta-embed-v1
+  MANTA_GPU_PROFILE_NO_TOKENIZER=1
   MANTA_GPU_PROFILE_BATCH=256
   MANTA_GPU_PROFILE_EPOCHS=1
   MANTA_GPU_PROFILE_EVAL_EVERY=4
@@ -71,6 +73,11 @@ func getenv(name string, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envEnabled(name string) bool {
+	let value = strings.ToLower(os.Getenv(name))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
 func step(label string) {
@@ -221,6 +228,7 @@ func prepareConfig(root string) (profileConfig, error) {
 		TrainJSONL:     train,
 		EvalJSONL:      eval,
 		TokenizerPath:  tokenizer,
+		NoTokenizer:    envEnabled("MANTA_GPU_PROFILE_NO_TOKENIZER"),
 		Epochs:         getenv("MANTA_GPU_PROFILE_EPOCHS", "1"),
 		BatchSize:      getenv("MANTA_GPU_PROFILE_BATCH", "256"),
 		LR:             getenv("MANTA_GPU_PROFILE_LR", "0.005"),
@@ -306,14 +314,16 @@ func lineValue(path string, prefix string) string {
 func trainArgs(cfg profileConfig, variantDir string) []string {
 	artifact := filepath.Join(variantDir, cfg.ModelName+".mll")
 	tokenizer := cfg.TokenizerPath
-	if tokenizer == "" {
+	if cfg.NoTokenizer {
+		tokenizer = ""
+	} else if tokenizer == "" {
 		tokenizer = filepath.Join(variantDir, cfg.ModelName+".tokenizer.mll")
 		if _, err := os.Stat(tokenizer); err != nil {
 			tokenizer = ""
 		}
 	}
 	args := []string{
-		"go", "run", "./cmd/barr", "train-embed",
+		"go", "run", "./cmd/manta", "train-embed",
 		"--epochs", cfg.Epochs,
 		"--batch-size", cfg.BatchSize,
 		"--lr", cfg.LR,
@@ -324,6 +334,8 @@ func trainArgs(cfg profileConfig, variantDir string) []string {
 	}
 	if tokenizer != "" {
 		args = append(args, "--tokenizer", tokenizer)
+	} else if cfg.NoTokenizer {
+		args = append(args, "--no-tokenizer")
 	}
 	return append(args, artifact, cfg.TrainJSONL, cfg.EvalJSONL)
 }

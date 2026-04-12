@@ -14,26 +14,12 @@ func getenv(name string, fallback string) string {
 	if value != "" {
 		return value
 	}
-	let legacy = legacyEnvName(name)
-	if legacy != "" {
-		let legacyValue = os.Getenv(legacy)
-		if legacyValue != "" {
-			return legacyValue
-		}
-	}
 	return fallback
 }
 
 func envEnabled(name string) bool {
 	let value = strings.ToLower(getenv(name, ""))
 	return value == "1" || value == "true" || value == "yes"
-}
-
-func legacyEnvName(name string) string {
-	if strings.HasPrefix(name, "MANTA_") {
-		return "BARR_" + strings.TrimPrefix(name, "MANTA_")
-	}
-	return ""
 }
 
 func shell(dir string, name string, args []string) error {
@@ -118,7 +104,7 @@ func modelSmoke(root string, assets string) error {
 	fmt.Println(f"output: {out}")
 	err = shell(root, "/usr/bin/time", []string{
 		"-v",
-		"go", "run", "./cmd/barr", "train-embed",
+		"go", "run", "./cmd/manta", "train-embed",
 		"--epochs", epochs,
 		"--batch-size", batch,
 		"--lr", lr,
@@ -130,7 +116,7 @@ func modelSmoke(root string, assets string) error {
 		eval,
 	})
 	guard err == nil else return err
-	return shell(root, "go", []string{"run", "./cmd/barr", "inspect", filepath.Join(out, modelName+".mll")})
+	return shell(root, "go", []string{"run", "./cmd/manta", "inspect", filepath.Join(out, modelName+".mll")})
 }
 
 func main() {

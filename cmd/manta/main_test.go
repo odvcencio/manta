@@ -8,15 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/compiler"
-	barruntime "github.com/odvcencio/manta/runtime"
+	mantaruntime "github.com/odvcencio/manta/runtime"
 	mll "github.com/odvcencio/mll"
 )
 
 func TestFormatTrainThroughputIncludesExamplePairAndStepRates(t *testing.T) {
-	summary := barruntime.EmbeddingTrainRunSummary{
-		Workload: barruntime.EmbeddingTrainWorkload{
+	summary := mantaruntime.EmbeddingTrainRunSummary{
+		Workload: mantaruntime.EmbeddingTrainWorkload{
 			ActualTotalExamples: 100,
 			ActualTotalPairs:    10000,
 			ActualTrainExamples: 80,
@@ -53,11 +53,11 @@ func TestRunInitTrainCreatesTrainingPackage(t *testing.T) {
 		t.Fatalf("run init-train: %v", err)
 	}
 	for _, candidate := range []string{
-		barruntime.DefaultWeightFilePath(path),
-		barruntime.DefaultMemoryPlanPath(path),
-		barruntime.DefaultEmbeddingTrainManifestPath(path),
-		barruntime.DefaultEmbeddingCheckpointPath(path),
-		barruntime.DefaultEmbeddingTrainProfilePath(path),
+		mantaruntime.DefaultWeightFilePath(path),
+		mantaruntime.DefaultMemoryPlanPath(path),
+		mantaruntime.DefaultEmbeddingTrainManifestPath(path),
+		mantaruntime.DefaultEmbeddingCheckpointPath(path),
+		mantaruntime.DefaultEmbeddingTrainProfilePath(path),
 	} {
 		if _, err := os.Stat(candidate); err != nil {
 			t.Fatalf("expected package file %q: %v", candidate, err)
@@ -70,7 +70,7 @@ func TestRunInitTrainAppliesTrainingConfigWithDefaultManifest(t *testing.T) {
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", "--lr", "0.0125", "--weight-decay", "0.001", "--contrastive-loss", "infonce", "--temperature", "0.05", path}); err != nil {
 		t.Fatalf("run init-train: %v", err)
 	}
-	checkpoint, err := barruntime.ReadEmbeddingTrainCheckpointFile(barruntime.DefaultEmbeddingCheckpointPath(path))
+	checkpoint, err := mantaruntime.ReadEmbeddingTrainCheckpointFile(mantaruntime.DefaultEmbeddingCheckpointPath(path))
 	if err != nil {
 		t.Fatalf("read checkpoint: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("run init-model: %v", err)
 	}
-	manifest, err := barruntime.ReadEmbeddingManifestFile(barruntime.DefaultEmbeddingManifestPath(path))
+	manifest, err := mantaruntime.ReadEmbeddingManifestFile(mantaruntime.DefaultEmbeddingManifestPath(path))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
@@ -114,14 +114,14 @@ func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
 	if manifest.Tokenizer.VocabSize != 16 || manifest.Tokenizer.MaxSequence != 8 {
 		t.Fatalf("unexpected tokenizer contract: %+v", manifest.Tokenizer)
 	}
-	checkpoint, err := barruntime.ReadEmbeddingTrainCheckpointFile(barruntime.DefaultEmbeddingCheckpointPath(path))
+	checkpoint, err := mantaruntime.ReadEmbeddingTrainCheckpointFile(mantaruntime.DefaultEmbeddingCheckpointPath(path))
 	if err != nil {
 		t.Fatalf("read checkpoint: %v", err)
 	}
 	if checkpoint.Config.ContrastiveLoss != "infonce" {
 		t.Fatalf("contrastive loss = %q, want infonce", checkpoint.Config.ContrastiveLoss)
 	}
-	if _, err := barruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload initialized model package: %v", err)
 	}
 }
@@ -152,13 +152,13 @@ func TestRunInitModelTrainCorpusExportFlow(t *testing.T) {
 	if err := run([]string{"train-corpus", "--vocab-size", "16", "--min-freq", "1", "--epochs", "2", "--batch-size", "2", "--min-chars", "2", "--eval-pairs", "2", path, corpusPath}); err != nil {
 		t.Fatalf("run train-corpus: %v", err)
 	}
-	if _, err := barruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained default package: %v", err)
 	}
 	if err := run([]string{"export-mll", path}); err != nil {
 		t.Fatalf("run export-mll: %v", err)
 	}
-	sealedPath := barruntime.DefaultMLLPath(path)
+	sealedPath := mantaruntime.DefaultMLLPath(path)
 	if sealedPath == path {
 		t.Fatalf("sealed export path reused artifact path %q", path)
 	}
@@ -188,25 +188,25 @@ func TestRunTrainEmbedFitsContrastivePackage(t *testing.T) {
 	}
 	trainPath := filepath.Join(t.TempDir(), "train.jsonl")
 	evalPath := filepath.Join(t.TempDir(), "eval.jsonl")
-	examples := []barruntime.EmbeddingContrastiveExample{
+	examples := []mantaruntime.EmbeddingContrastiveExample{
 		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
 		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
 		{QueryTokens: []int32{3, 4}, PositiveTokens: []int32{3, 4}},
 		{QueryTokens: []int32{4, 5}, PositiveTokens: []int32{4, 5}},
 	}
-	if err := barruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
 		t.Fatalf("write train dataset: %v", err)
 	}
-	if err := barruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
+	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
 		t.Fatalf("write eval dataset: %v", err)
 	}
 	if err := run([]string{"train-embed", "--epochs", "2", "--batch-size", "2", "--lr", "0.003", "--contrastive-loss", "infonce", "--temperature", "0.07", path, trainPath, evalPath}); err != nil {
 		t.Fatalf("run train-embed: %v", err)
 	}
-	if _, err := barruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
-	checkpoint, err := barruntime.ReadEmbeddingTrainCheckpointFile(barruntime.DefaultEmbeddingCheckpointPath(path))
+	checkpoint, err := mantaruntime.ReadEmbeddingTrainCheckpointFile(mantaruntime.DefaultEmbeddingCheckpointPath(path))
 	if err != nil {
 		t.Fatalf("read checkpoint: %v", err)
 	}
@@ -226,13 +226,13 @@ func TestRunRenameEmbedRewritesPackageIdentity(t *testing.T) {
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
 		t.Fatalf("run init-train: %v", err)
 	}
-	tokenizer := barruntime.TokenizerFile{
-		Version:      barruntime.TokenizerFileVersion,
+	tokenizer := mantaruntime.TokenizerFile{
+		Version:      mantaruntime.TokenizerFileVersion,
 		Tokens:       []string{"<pad>", "<unk>", "alpha", "beta"},
 		PadToken:     "<pad>",
 		UnknownToken: "<unk>",
 	}
-	if err := tokenizer.WriteFile(barruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
 	renamedPath := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
@@ -241,31 +241,31 @@ func TestRunRenameEmbedRewritesPackageIdentity(t *testing.T) {
 		t.Fatalf("run rename-embed: %v", err)
 	}
 
-	mod, err := barr.ReadFile(renamedPath)
+	mod, err := mantaartifact.ReadFile(renamedPath)
 	if err != nil {
 		t.Fatalf("read renamed artifact: %v", err)
 	}
 	if mod.Name != "manta-embed-v1" {
 		t.Fatalf("module name = %q, want manta-embed-v1", mod.Name)
 	}
-	manifest, err := barruntime.ReadEmbeddingManifestFile(barruntime.DefaultEmbeddingManifestPath(renamedPath))
+	manifest, err := mantaruntime.ReadEmbeddingManifestFile(mantaruntime.DefaultEmbeddingManifestPath(renamedPath))
 	if err != nil {
 		t.Fatalf("read renamed manifest: %v", err)
 	}
 	if manifest.Name != "manta-embed-v1" {
 		t.Fatalf("manifest name = %q, want manta-embed-v1", manifest.Name)
 	}
-	checkpoint, err := barruntime.ReadEmbeddingTrainCheckpointFile(barruntime.DefaultEmbeddingCheckpointPath(renamedPath))
+	checkpoint, err := mantaruntime.ReadEmbeddingTrainCheckpointFile(mantaruntime.DefaultEmbeddingCheckpointPath(renamedPath))
 	if err != nil {
 		t.Fatalf("read renamed checkpoint: %v", err)
 	}
 	if checkpoint.Manifest.Name != "manta-embed-v1" {
 		t.Fatalf("checkpoint manifest name = %q, want manta-embed-v1", checkpoint.Manifest.Name)
 	}
-	if _, err := os.Stat(barruntime.DefaultTokenizerPath(renamedPath)); err != nil {
+	if _, err := os.Stat(mantaruntime.DefaultTokenizerPath(renamedPath)); err != nil {
 		t.Fatalf("renamed tokenizer sidecar missing: %v", err)
 	}
-	if _, err := barruntime.LoadEmbeddingTrainerPackage(renamedPath); err != nil {
+	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(renamedPath); err != nil {
 		t.Fatalf("reload renamed package: %v", err)
 	}
 }
@@ -277,16 +277,16 @@ func TestRunTrainEmbedPlanOnlyShowsWorkload(t *testing.T) {
 	}
 	trainPath := filepath.Join(t.TempDir(), "train.jsonl")
 	evalPath := filepath.Join(t.TempDir(), "eval.jsonl")
-	examples := []barruntime.EmbeddingContrastiveExample{
+	examples := []mantaruntime.EmbeddingContrastiveExample{
 		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
 		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
 		{QueryTokens: []int32{3, 4}, PositiveTokens: []int32{3, 4}},
 		{QueryTokens: []int32{4, 5}, PositiveTokens: []int32{4, 5}},
 	}
-	if err := barruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
 		t.Fatalf("write train dataset: %v", err)
 	}
-	if err := barruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
+	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
 		t.Fatalf("write eval dataset: %v", err)
 	}
 	output := captureRunOutput(t, []string{"train-embed", "--plan-only", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath})
@@ -311,11 +311,11 @@ func TestRunTrainEmbedEvalOnlyUsesSingleContrastiveDataset(t *testing.T) {
 		t.Fatalf("run init-train: %v", err)
 	}
 	evalPath := filepath.Join(t.TempDir(), "eval.jsonl")
-	examples := []barruntime.EmbeddingContrastiveExample{
+	examples := []mantaruntime.EmbeddingContrastiveExample{
 		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
 		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
 	}
-	if err := barruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
+	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
 		t.Fatalf("write eval dataset: %v", err)
 	}
 
@@ -340,11 +340,11 @@ func TestRunTrainEmbedEvalOnlyUsesSingleTextPairDataset(t *testing.T) {
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
 		t.Fatalf("run init-train: %v", err)
 	}
-	tokenizer := barruntime.TokenizerFile{
-		Version: barruntime.TokenizerFileVersion,
+	tokenizer := mantaruntime.TokenizerFile{
+		Version: mantaruntime.TokenizerFileVersion,
 		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
 	}
-	if err := tokenizer.WriteFile(barruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
 	evalPath := filepath.Join(t.TempDir(), "eval-text.jsonl")
@@ -378,31 +378,31 @@ func TestRunTrainEmbedFitsTextContrastivePackage(t *testing.T) {
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
 		t.Fatalf("run init-train: %v", err)
 	}
-	tokenizer := barruntime.TokenizerFile{
-		Version: barruntime.TokenizerFileVersion,
+	tokenizer := mantaruntime.TokenizerFile{
+		Version: mantaruntime.TokenizerFileVersion,
 		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
 	}
-	if err := tokenizer.WriteFile(barruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
 	trainPath := filepath.Join(t.TempDir(), "train-text.jsonl")
 	evalPath := filepath.Join(t.TempDir(), "eval-text.jsonl")
-	examples := []barruntime.EmbeddingTextContrastiveExample{
+	examples := []mantaruntime.EmbeddingTextContrastiveExample{
 		{Query: "ab", Positive: "ab"},
 		{Query: "cd", Positive: "cd"},
 		{Query: "ab", Positive: "ab"},
 		{Query: "cd", Positive: "cd"},
 	}
-	if err := barruntime.WriteEmbeddingTextContrastiveExamplesFile(trainPath, examples); err != nil {
+	if err := mantaruntime.WriteEmbeddingTextContrastiveExamplesFile(trainPath, examples); err != nil {
 		t.Fatalf("write train text dataset: %v", err)
 	}
-	if err := barruntime.WriteEmbeddingTextContrastiveExamplesFile(evalPath, examples); err != nil {
+	if err := mantaruntime.WriteEmbeddingTextContrastiveExamplesFile(evalPath, examples); err != nil {
 		t.Fatalf("write eval text dataset: %v", err)
 	}
 	if err := run([]string{"train-embed", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath}); err != nil {
 		t.Fatalf("run train-embed text: %v", err)
 	}
-	if _, err := barruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
 }
@@ -412,11 +412,11 @@ func TestRunTrainEmbedFitsTextContrastivePackageWithLabeledEvalPairs(t *testing.
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
 		t.Fatalf("run init-train: %v", err)
 	}
-	tokenizer := barruntime.TokenizerFile{
-		Version: barruntime.TokenizerFileVersion,
+	tokenizer := mantaruntime.TokenizerFile{
+		Version: mantaruntime.TokenizerFileVersion,
 		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
 	}
-	if err := tokenizer.WriteFile(barruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
 	trainPath := filepath.Join(t.TempDir(), "train-text.jsonl")
@@ -436,7 +436,7 @@ func TestRunTrainEmbedFitsTextContrastivePackageWithLabeledEvalPairs(t *testing.
 	if err := run([]string{"train-embed", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath}); err != nil {
 		t.Fatalf("run train-embed text with labeled eval: %v", err)
 	}
-	if _, err := barruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
 }
@@ -453,7 +453,7 @@ func TestRunInspectReadsPackageManifest(t *testing.T) {
 
 func TestRunInspectShowsRepeatedEncoderEmbeddingDetails(t *testing.T) {
 	dir := t.TempDir()
-	srcPath := copyExampleFile(t, dir, "encoder_trainable_q8x2.bar")
+	srcPath := copyExampleFile(t, dir, "encoder_trainable_q8x2.manta")
 	artifactPath := filepath.Join(dir, "encoder_trainable_q8x2.mll")
 	copyExampleFile(t, dir, "encoder_trainable_q8x2.embedding.mll")
 	if err := run([]string{"compile", srcPath, artifactPath}); err != nil {
@@ -480,7 +480,7 @@ func TestRunExportMLLWritesContainer(t *testing.T) {
 	if err := run([]string{"export-mll", path}); err != nil {
 		t.Fatalf("run export-mll: %v", err)
 	}
-	outPath := barruntime.DefaultMLLPath(path)
+	outPath := mantaruntime.DefaultMLLPath(path)
 	if _, err := os.Stat(outPath); err != nil {
 		t.Fatalf("expected MLL file %q: %v", outPath, err)
 	}
@@ -498,19 +498,69 @@ func TestRunTrainTokenizerWritesSiblingTokenizer(t *testing.T) {
 	if err := run([]string{"train-tokenizer", "--vocab-size", "12", path, corpusPath}); err != nil {
 		t.Fatalf("run train-tokenizer: %v", err)
 	}
-	tokenizerPath := barruntime.DefaultTokenizerPath(path)
+	tokenizerPath := mantaruntime.DefaultTokenizerPath(path)
 	if _, err := os.Stat(tokenizerPath); err != nil {
 		t.Fatalf("expected tokenizer file %q: %v", tokenizerPath, err)
 	}
-	if _, err := barruntime.ReadTokenizerFile(tokenizerPath); err != nil {
+	if _, err := mantaruntime.ReadTokenizerFile(tokenizerPath); err != nil {
 		t.Fatalf("read tokenizer file: %v", err)
 	}
-	manifest, err := barruntime.ReadEmbeddingManifestFile(barruntime.DefaultEmbeddingManifestPath(path))
+	manifest, err := mantaruntime.ReadEmbeddingManifestFile(mantaruntime.DefaultEmbeddingManifestPath(path))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
 	if manifest.Tokenizer.VocabSize != 11 {
 		t.Fatalf("expected manifest vocab size to track tokenizer, got %d", manifest.Tokenizer.VocabSize)
+	}
+}
+
+func TestRunTokenizeEmbedWritesTokenDatasets(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	tokenizer := mantaruntime.TokenizerFile{
+		Version: mantaruntime.TokenizerFileVersion,
+		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
+	}
+	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+
+	dir := t.TempDir()
+	trainTextPath := filepath.Join(dir, "train-text.jsonl")
+	evalTextPath := filepath.Join(dir, "eval-text.jsonl")
+	trainTokenPath := filepath.Join(dir, "train-token.jsonl")
+	evalTokenPath := filepath.Join(dir, "eval-token.jsonl")
+	if err := os.WriteFile(trainTextPath, []byte("{\"query\":\"ab\",\"positive\":\"ab\"}\n"), 0o644); err != nil {
+		t.Fatalf("write train text: %v", err)
+	}
+	evalText := "" +
+		"{\"query\":\"ab\",\"document\":\"ab\",\"label\":1}\n" +
+		"{\"left\":\"ab\",\"right\":\"cd\",\"label\":0}\n"
+	if err := os.WriteFile(evalTextPath, []byte(evalText), 0o644); err != nil {
+		t.Fatalf("write eval text: %v", err)
+	}
+
+	if err := run([]string{"tokenize-embed", "--mode", "contrastive", path, trainTextPath, trainTokenPath}); err != nil {
+		t.Fatalf("run tokenize contrastive: %v", err)
+	}
+	if err := run([]string{"tokenize-embed", "--mode", "pair", path, evalTextPath, evalTokenPath}); err != nil {
+		t.Fatalf("run tokenize pair: %v", err)
+	}
+	if _, err := mantaruntime.ReadEmbeddingContrastiveExamplesFile(trainTokenPath); err != nil {
+		t.Fatalf("read tokenized train: %v", err)
+	}
+	pairs, err := mantaruntime.ReadEmbeddingPairExamplesFile(evalTokenPath)
+	if err != nil {
+		t.Fatalf("read tokenized eval: %v", err)
+	}
+	if len(pairs) != 2 || pairs[0].Target != 1 || pairs[1].Target != 0 {
+		t.Fatalf("tokenized eval targets = %+v", pairs)
+	}
+	output := captureRunOutput(t, []string{"train-embed", "--eval-only", "--no-tokenizer", path, evalTokenPath})
+	if !strings.Contains(output, "evaluated package") || !strings.Contains(output, "eval=2 pairwise examples") {
+		t.Fatalf("eval-only token output missing expected summary:\n%s", output)
 	}
 }
 
@@ -529,10 +579,10 @@ func TestRunMineTextPairsWritesTrainAndEvalFiles(t *testing.T) {
 	if err := run([]string{"mine-text-pairs", "--min-chars", "5", "--eval-pairs", "2", corpusPath, trainPath, evalPath}); err != nil {
 		t.Fatalf("run mine-text-pairs: %v", err)
 	}
-	if _, err := barruntime.ReadEmbeddingTextContrastiveExamplesFile(trainPath); err != nil {
+	if _, err := mantaruntime.ReadEmbeddingTextContrastiveExamplesFile(trainPath); err != nil {
 		t.Fatalf("read mined train pairs: %v", err)
 	}
-	evalSet, err := barruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+	evalSet, err := mantaruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
 	if err != nil {
 		t.Fatalf("read mined eval pairs: %v", err)
 	}
@@ -574,7 +624,7 @@ func TestRunMineTextPairsThenTrainEmbedFlow(t *testing.T) {
 	if err := run([]string{"train-embed", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath}); err != nil {
 		t.Fatalf("run train-embed from mined text: %v", err)
 	}
-	if _, err := barruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
 }
@@ -596,23 +646,23 @@ func TestRunTrainCorpusFlow(t *testing.T) {
 	if err := run([]string{"train-corpus", "--vocab-size", "20", "--min-freq", "1", "--epochs", "2", "--batch-size", "2", "--min-chars", "5", "--eval-pairs", "2", path, corpusPath}); err != nil {
 		t.Fatalf("run train-corpus: %v", err)
 	}
-	if _, err := os.Stat(barruntime.DefaultTokenizerPath(path)); err != nil {
+	if _, err := os.Stat(mantaruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("expected tokenizer file: %v", err)
 	}
-	if _, err := os.Stat(barruntime.DefaultMinedTrainPairsPath(path)); err != nil {
+	if _, err := os.Stat(mantaruntime.DefaultMinedTrainPairsPath(path)); err != nil {
 		t.Fatalf("expected mined train pairs: %v", err)
 	}
-	if _, err := os.Stat(barruntime.DefaultMinedEvalPairsPath(path)); err != nil {
+	if _, err := os.Stat(mantaruntime.DefaultMinedEvalPairsPath(path)); err != nil {
 		t.Fatalf("expected mined eval pairs: %v", err)
 	}
-	if _, err := barruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
 }
 
 func TestRunTrainCorpusRepeatedEncoderExampleFlow(t *testing.T) {
 	dir := t.TempDir()
-	srcPath := copyExampleFile(t, dir, "encoder_trainable_q8x2.bar")
+	srcPath := copyExampleFile(t, dir, "encoder_trainable_q8x2.manta")
 	artifactPath := filepath.Join(dir, "encoder_trainable_q8x2.mll")
 	copyExampleFile(t, dir, "encoder_trainable_q8x2.embedding.mll")
 
@@ -639,14 +689,14 @@ func TestRunTrainCorpusRepeatedEncoderExampleFlow(t *testing.T) {
 	if err := run([]string{"inspect", artifactPath}); err != nil {
 		t.Fatalf("run inspect: %v", err)
 	}
-	manifest, err := barruntime.ReadEmbeddingManifestFile(barruntime.DefaultEmbeddingManifestPath(artifactPath))
+	manifest, err := mantaruntime.ReadEmbeddingManifestFile(mantaruntime.DefaultEmbeddingManifestPath(artifactPath))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
 	if manifest.EncoderRepeats != 2 {
 		t.Fatalf("encoder repeats = %d, want 2", manifest.EncoderRepeats)
 	}
-	profile, err := barruntime.ReadEmbeddingTrainProfileFile(barruntime.DefaultEmbeddingTrainProfilePath(artifactPath))
+	profile, err := mantaruntime.ReadEmbeddingTrainProfileFile(mantaruntime.DefaultEmbeddingTrainProfilePath(artifactPath))
 	if err != nil {
 		t.Fatalf("read training profile: %v", err)
 	}
@@ -657,22 +707,22 @@ func TestRunTrainCorpusRepeatedEncoderExampleFlow(t *testing.T) {
 		t.Fatal("expected matmul bind activity in repeated encoder train profile")
 	}
 	for _, candidate := range []string{
-		barruntime.DefaultTokenizerPath(artifactPath),
-		barruntime.DefaultMinedTrainPairsPath(artifactPath),
-		barruntime.DefaultMinedEvalPairsPath(artifactPath),
+		mantaruntime.DefaultTokenizerPath(artifactPath),
+		mantaruntime.DefaultMinedTrainPairsPath(artifactPath),
+		mantaruntime.DefaultMinedEvalPairsPath(artifactPath),
 	} {
 		if _, err := os.Stat(candidate); err != nil {
 			t.Fatalf("expected generated training artifact %q: %v", candidate, err)
 		}
 	}
-	if _, err := barruntime.LoadEmbeddingTrainerPackage(artifactPath); err != nil {
+	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(artifactPath); err != nil {
 		t.Fatalf("reload trained repeated-encoder package: %v", err)
 	}
 }
 
 func TestRunCompileDefaultMLLThenTrainFlow(t *testing.T) {
 	dir := t.TempDir()
-	srcPath := filepath.Join(dir, "tiny_train_embed.bar")
+	srcPath := filepath.Join(dir, "tiny_train_embed.manta")
 	source := []byte(`
 param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
 param projection: q8[D, E] @weight("weights/projection") @trainable
@@ -699,7 +749,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 	if _, err := os.Stat(artifactPath); err != nil {
 		t.Fatalf("expected compiled .mll artifact %q: %v", artifactPath, err)
 	}
-	manifest := barruntime.EmbeddingManifest{
+	manifest := mantaruntime.EmbeddingManifest{
 		Name:                "tiny-train-embed",
 		PooledEntry:         "embed_pooled",
 		BatchEntry:          "embed_pooled_batch",
@@ -708,13 +758,13 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 		OutputDType:         "q8",
 		TokenEmbeddingParam: "token_embedding",
 		ProjectionParam:     "projection",
-		Tokenizer: barruntime.TokenizerManifest{
+		Tokenizer: mantaruntime.TokenizerManifest{
 			VocabSize:   8,
 			MaxSequence: 8,
 			PadID:       0,
 		},
 	}
-	if err := manifest.WriteFile(barruntime.DefaultEmbeddingManifestPath(artifactPath)); err != nil {
+	if err := manifest.WriteFile(mantaruntime.DefaultEmbeddingManifestPath(artifactPath)); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", artifactPath}); err != nil {
@@ -722,22 +772,22 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 	}
 	trainPath := filepath.Join(dir, "train.jsonl")
 	evalPath := filepath.Join(dir, "eval.jsonl")
-	examples := []barruntime.EmbeddingContrastiveExample{
+	examples := []mantaruntime.EmbeddingContrastiveExample{
 		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
 		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
 		{QueryTokens: []int32{3, 4}, PositiveTokens: []int32{3, 4}},
 		{QueryTokens: []int32{4, 5}, PositiveTokens: []int32{4, 5}},
 	}
-	if err := barruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
 		t.Fatalf("write train dataset: %v", err)
 	}
-	if err := barruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
+	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
 		t.Fatalf("write eval dataset: %v", err)
 	}
 	if err := run([]string{"train-embed", "--epochs", "2", "--batch-size", "2", artifactPath, trainPath, evalPath}); err != nil {
 		t.Fatalf("run train-embed: %v", err)
 	}
-	if _, err := barruntime.LoadEmbeddingTrainerPackage(artifactPath); err != nil {
+	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(artifactPath); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
 }
@@ -764,11 +814,11 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	path := filepath.Join(t.TempDir(), "tiny_train_embed.barr")
-	if err := barr.WriteFile(path, bundle.Artifact); err != nil {
+	path := filepath.Join(t.TempDir(), "tiny_train_embed.mll")
+	if err := mantaartifact.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
-	manifest := barruntime.EmbeddingManifest{
+	manifest := mantaruntime.EmbeddingManifest{
 		Name:                "tiny-train-embed",
 		PooledEntry:         "embed_pooled",
 		BatchEntry:          "embed_pooled_batch",
@@ -777,13 +827,13 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 		OutputDType:         "q8",
 		TokenEmbeddingParam: "token_embedding",
 		ProjectionParam:     "projection",
-		Tokenizer: barruntime.TokenizerManifest{
+		Tokenizer: mantaruntime.TokenizerManifest{
 			VocabSize:   8,
 			MaxSequence: 8,
 			PadID:       0,
 		},
 	}
-	if err := manifest.WriteFile(barruntime.DefaultEmbeddingManifestPath(path)); err != nil {
+	if err := manifest.WriteFile(mantaruntime.DefaultEmbeddingManifestPath(path)); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
 	return path

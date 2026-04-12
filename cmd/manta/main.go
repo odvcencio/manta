@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/compiler"
 	"github.com/odvcencio/manta/models"
-	barruntime "github.com/odvcencio/manta/runtime"
+	mantaruntime "github.com/odvcencio/manta/runtime"
 	"github.com/odvcencio/manta/runtime/backend"
 	"github.com/odvcencio/manta/runtime/backends/cuda"
 	"github.com/odvcencio/manta/runtime/backends/metal"
@@ -76,9 +76,6 @@ func mantaEnv(name string) string {
 	if value, ok := os.LookupEnv(name); ok {
 		return value
 	}
-	if strings.HasPrefix(name, "MANTA_") {
-		return os.Getenv("BARR_" + strings.TrimPrefix(name, "MANTA_"))
-	}
 	return ""
 }
 
@@ -90,7 +87,7 @@ func run(args []string) error {
 
 	switch args[0] {
 	case "version":
-		fmt.Println("barr dev")
+		fmt.Println("manta dev")
 		return nil
 	case "compile":
 		return runCompile(args[1:])
@@ -110,6 +107,8 @@ func run(args []string) error {
 		return runRenameEmbed(args[1:])
 	case "train-tokenizer":
 		return runTrainTokenizer(args[1:])
+	case "tokenize-embed":
+		return runTokenizeEmbed(args[1:])
 	case "mine-text-pairs":
 		return runMineTextPairs(args[1:])
 	case "train-embed":
@@ -123,7 +122,7 @@ func run(args []string) error {
 
 func runCompile(args []string) error {
 	if len(args) == 0 || args[0] == "" {
-		return fmt.Errorf("usage: barr compile <source.bar> [output.mll]")
+		return fmt.Errorf("usage: manta compile <source.manta> [output.mll]")
 	}
 	srcPath := args[0]
 	outPath := defaultArtifactPath(srcPath)
@@ -140,7 +139,7 @@ func runCompile(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := barr.WriteFile(outPath, bundle.Artifact); err != nil {
+	if err := mantaartifact.WriteFile(outPath, bundle.Artifact); err != nil {
 		return err
 	}
 
@@ -185,7 +184,7 @@ func runDemo(args []string) error {
 		return err
 	}
 
-	rt := barruntime.New(cuda.New(), metal.New())
+	rt := mantaruntime.New(cuda.New(), metal.New())
 	prog, err := rt.Load(context.Background(), bundle.Artifact, stubLoadOptions(bundle.Artifact)...)
 	if err != nil {
 		return err
@@ -209,7 +208,7 @@ func runDemo(args []string) error {
 		len(bundle.Artifact.EntryPoints), len(bundle.Artifact.Steps), len(bundle.Artifact.Kernels))
 	fmt.Printf("kernel ops: %d\n", totalKernelOps(bundle.Artifact.Kernels))
 	fmt.Printf("params: %d\n", len(bundle.Artifact.Params))
-	fmt.Printf("artifact version: %s\n", bundle.Artifact.Version)
+	fmt.Printf("artifact version: %s\n", displayArtifactVersion(bundle.Artifact.Version))
 	fmt.Printf("ran entrypoint: %s\n", entryName)
 	fmt.Printf("outputs: %s\n", strings.Join(sortedValueKeys(result.Outputs), ", "))
 	fmt.Printf("output summary: %s\n", strings.Join(outputSummaries(result.Outputs), "; "))
@@ -219,10 +218,10 @@ func runDemo(args []string) error {
 
 func runArtifact(args []string) error {
 	if len(args) == 0 || args[0] == "" {
-		return fmt.Errorf("usage: barr run <artifact.mll> [entry]")
+		return fmt.Errorf("usage: manta run <artifact.mll> [entry]")
 	}
 	path := args[0]
-	mod, err := barr.ReadFile(path)
+	mod, err := mantaartifact.ReadFile(path)
 	if err != nil {
 		return err
 	}
@@ -234,7 +233,7 @@ func runArtifact(args []string) error {
 	if err != nil {
 		return err
 	}
-	rt := barruntime.New(cuda.New(), metal.New())
+	rt := mantaruntime.New(cuda.New(), metal.New())
 	prog, err := rt.Load(context.Background(), mod, stubLoadOptions(mod)...)
 	if err != nil {
 		return err
@@ -257,54 +256,54 @@ func runArtifact(args []string) error {
 
 func runInspect(args []string) error {
 	if len(args) == 0 || args[0] == "" {
-		return fmt.Errorf("usage: barr inspect <artifact.mll>")
+		return fmt.Errorf("usage: manta inspect <artifact.mll>")
 	}
 	path := args[0]
-	mod, err := barr.ReadFile(path)
+	mod, err := mantaartifact.ReadFile(path)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("module: %s\n", mod.Name)
-	fmt.Printf("artifact version: %s\n", mod.Version)
+	fmt.Printf("artifact version: %s\n", displayArtifactVersion(mod.Version))
 	fmt.Printf("entrypoints: %d, steps: %d, kernels: %d\n", len(mod.EntryPoints), len(mod.Steps), len(mod.Kernels))
 	fmt.Printf("backends: %s\n", joinBackendKinds(mod.Requirements.SupportedBackends))
 	if len(mod.Requirements.Capabilities) > 0 {
 		fmt.Printf("capabilities: %s\n", strings.Join(mod.Requirements.Capabilities, ", "))
 	}
 	embeddedPackage := false
-	embeddingManifestPath := barruntime.ResolveEmbeddingManifestPath(path)
+	embeddingManifestPath := mantaruntime.ResolveEmbeddingManifestPath(path)
 	if _, err := os.Stat(embeddingManifestPath); err == nil {
-		manifest, err := barruntime.ReadEmbeddingManifestFile(embeddingManifestPath)
+		manifest, err := mantaruntime.ReadEmbeddingManifestFile(embeddingManifestPath)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("embedding manifest: %s\n", embeddingManifestPath)
 		printEmbeddingManifestSummary(manifest)
-	} else if sealed, err := barruntime.ReadSealedEmbeddingPackage(path); err == nil {
+	} else if sealed, err := mantaruntime.ReadSealedEmbeddingPackage(path); err == nil {
 		fmt.Println("embedding manifest: embedded")
 		printEmbeddingManifestSummary(sealed.Manifest)
 		fmt.Println("package: embedded sealed MLL")
 		fmt.Println("package verify: OK")
 		embeddedPackage = true
 	}
-	packagePath := barruntime.ResolvePackageManifestPath(path)
+	packagePath := mantaruntime.ResolvePackageManifestPath(path)
 	if !embeddedPackage {
 		if _, err := os.Stat(packagePath); err == nil {
-			pkg, err := barruntime.ReadPackageManifestFile(packagePath)
+			pkg, err := mantaruntime.ReadPackageManifestFile(packagePath)
 			if err != nil {
 				return err
 			}
 			verifyPaths := map[string]string{
 				"artifact":           path,
-				"embedding_manifest": barruntime.DefaultEmbeddingManifestPath(path),
-				"tokenizer":          barruntime.DefaultTokenizerPath(path),
-				"weights":            barruntime.DefaultWeightFilePath(path),
-				"memory_plan":        barruntime.DefaultMemoryPlanPath(path),
-				"train_manifest":     barruntime.DefaultEmbeddingTrainManifestPath(path),
-				"checkpoint":         barruntime.DefaultEmbeddingCheckpointPath(path),
-				"train_profile":      barruntime.DefaultEmbeddingTrainProfilePath(path),
+				"embedding_manifest": mantaruntime.DefaultEmbeddingManifestPath(path),
+				"tokenizer":          mantaruntime.DefaultTokenizerPath(path),
+				"weights":            mantaruntime.DefaultWeightFilePath(path),
+				"memory_plan":        mantaruntime.DefaultMemoryPlanPath(path),
+				"train_manifest":     mantaruntime.DefaultEmbeddingTrainManifestPath(path),
+				"checkpoint":         mantaruntime.DefaultEmbeddingCheckpointPath(path),
+				"train_profile":      mantaruntime.DefaultEmbeddingTrainProfilePath(path),
 			}
-			if pkg.Kind == barruntime.PackageEmbedding {
+			if pkg.Kind == mantaruntime.PackageEmbedding {
 				delete(verifyPaths, "train_manifest")
 				delete(verifyPaths, "checkpoint")
 				delete(verifyPaths, "train_profile")
@@ -318,9 +317,9 @@ func runInspect(args []string) error {
 			}
 		}
 	}
-	profilePath := barruntime.DefaultEmbeddingTrainProfilePath(path)
+	profilePath := mantaruntime.DefaultEmbeddingTrainProfilePath(path)
 	if _, err := os.Stat(profilePath); err == nil {
-		profile, err := barruntime.ReadEmbeddingTrainProfileFile(profilePath)
+		profile, err := mantaruntime.ReadEmbeddingTrainProfileFile(profilePath)
 		if err != nil {
 			return err
 		}
@@ -335,7 +334,7 @@ func runInspect(args []string) error {
 	return nil
 }
 
-func printEmbeddingManifestSummary(manifest barruntime.EmbeddingManifest) {
+func printEmbeddingManifestSummary(manifest mantaruntime.EmbeddingManifest) {
 	fmt.Printf("embedding model: %s pooled=%s batch=%s output=%s/%s\n",
 		displayManifestName(manifest.Name),
 		manifest.PooledEntry,
@@ -351,14 +350,14 @@ func printEmbeddingManifestSummary(manifest barruntime.EmbeddingManifest) {
 
 func runExportMLL(args []string) error {
 	if len(args) == 0 || args[0] == "" {
-		return fmt.Errorf("usage: barr export-mll <artifact.mll> [output.mll]")
+		return fmt.Errorf("usage: manta export-mll <artifact.mll> [output.mll]")
 	}
 	artifactPath := args[0]
 	outputPath := ""
 	if len(args) > 1 {
 		outputPath = args[1]
 	}
-	writtenPath, err := barruntime.ExportPackageToMLL(artifactPath, outputPath)
+	writtenPath, err := mantaruntime.ExportPackageToMLL(artifactPath, outputPath)
 	if err != nil {
 		return err
 	}
@@ -397,7 +396,7 @@ func runInitModel(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.Arg(0) == "" {
-		return fmt.Errorf("usage: barr init-model [flags] <artifact.mll>")
+		return fmt.Errorf("usage: manta init-model [flags] <artifact.mll>")
 	}
 	if learningRate < 0 {
 		return fmt.Errorf("lr must be non-negative")
@@ -426,11 +425,11 @@ func runInitModel(args []string) error {
 	if err != nil {
 		return err
 	}
-	manifest, err := barruntime.ReadEmbeddingManifestFile(paths.EmbeddingManifestPath)
+	manifest, err := mantaruntime.ReadEmbeddingManifestFile(paths.EmbeddingManifestPath)
 	if err != nil {
 		return err
 	}
-	checkpoint, err := barruntime.ReadEmbeddingTrainCheckpointFile(paths.CheckpointPath)
+	checkpoint, err := mantaruntime.ReadEmbeddingTrainCheckpointFile(paths.CheckpointPath)
 	if err != nil {
 		return err
 	}
@@ -483,10 +482,10 @@ func runInitTrain(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.Arg(0) == "" {
-		return fmt.Errorf("usage: barr init-train [flags] <artifact.mll>")
+		return fmt.Errorf("usage: manta init-train [flags] <artifact.mll>")
 	}
 	path := fs.Arg(0)
-	cfg := barruntime.EmbeddingTrainConfig{
+	cfg := mantaruntime.EmbeddingTrainConfig{
 		LearningRate:    float32(learningRate),
 		WeightDecay:     float32(weightDecay),
 		WeightBits:      weightBits,
@@ -497,22 +496,22 @@ func runInitTrain(args []string) error {
 		ContrastiveLoss: contrastiveLoss,
 		Temperature:     float32(temperature),
 	}
-	opts := barruntime.EmbeddingTrainInitOptions{
+	opts := mantaruntime.EmbeddingTrainInitOptions{
 		Seed:       seed,
 		ShapeSizes: dims.values(),
 	}
 	var (
-		paths barruntime.EmbeddingTrainPackagePaths
+		paths mantaruntime.EmbeddingTrainPackagePaths
 		err   error
 	)
 	if manifestPath == "" {
-		manifestPath = barruntime.ResolveEmbeddingManifestPath(path)
+		manifestPath = mantaruntime.ResolveEmbeddingManifestPath(path)
 	}
-	manifest, readErr := barruntime.ReadEmbeddingManifestFile(manifestPath)
+	manifest, readErr := mantaruntime.ReadEmbeddingManifestFile(manifestPath)
 	if readErr != nil {
 		return readErr
 	}
-	paths, err = barruntime.InitializeEmbeddingTrainerPackageWithManifest(path, manifest, cfg, opts)
+	paths, err = mantaruntime.InitializeEmbeddingTrainerPackageWithManifest(path, manifest, cfg, opts)
 	if err != nil {
 		return err
 	}
@@ -534,11 +533,11 @@ func runRenameEmbed(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: barr rename-embed --name <model-name> <input.mll> <output.mll>")
+		return fmt.Errorf("usage: manta rename-embed --name <model-name> <input.mll> <output.mll>")
 	}
 	inputPath := fs.Arg(0)
 	outputPath := fs.Arg(1)
-	trainer, err := barruntime.LoadEmbeddingTrainerPackage(inputPath)
+	trainer, err := mantaruntime.LoadEmbeddingTrainerPackage(inputPath)
 	if err != nil {
 		return err
 	}
@@ -565,7 +564,7 @@ func runRenameEmbed(args []string) error {
 }
 
 func copyTokenizerIfPresent(inputPath, outputPath string) error {
-	sourcePath := barruntime.DefaultTokenizerPath(inputPath)
+	sourcePath := mantaruntime.DefaultTokenizerPath(inputPath)
 	if _, err := os.Stat(sourcePath); err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -576,7 +575,7 @@ func copyTokenizerIfPresent(inputPath, outputPath string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(barruntime.DefaultTokenizerPath(outputPath), data, 0o644)
+	return os.WriteFile(mantaruntime.DefaultTokenizerPath(outputPath), data, 0o644)
 }
 
 func runTrainEmbed(args []string) error {
@@ -595,6 +594,7 @@ func runTrainEmbed(args []string) error {
 	var lengthBucketBatches bool
 	var progressEvery int
 	var tokenizerPath string
+	var noTokenizer bool
 	var planOnly bool
 	var evalOnly bool
 	var learningRate float64
@@ -613,6 +613,7 @@ func runTrainEmbed(args []string) error {
 	fs.BoolVar(&lengthBucketBatches, "length-bucket-batches", true, "cluster contrastive batches by token length to improve batched GPU training")
 	fs.IntVar(&progressEvery, "progress-every", 0, "print training progress every N optimizer steps (0 disables)")
 	fs.StringVar(&tokenizerPath, "tokenizer", "", "path to tokenizer JSON for text-pair datasets")
+	fs.BoolVar(&noTokenizer, "no-tokenizer", false, "disable sibling tokenizer discovery and treat JSONL as tokenized")
 	fs.BoolVar(&planOnly, "plan-only", false, "print planned workload and exit without training")
 	fs.BoolVar(&evalOnly, "eval-only", false, "evaluate the package without running optimizer steps")
 	fs.Float64Var(&learningRate, "lr", 0, "override package learning rate for this run")
@@ -622,7 +623,7 @@ func runTrainEmbed(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: barr train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]\n       barr train-embed --eval-only [flags] <artifact.mll> <eval.jsonl>")
+		return fmt.Errorf("usage: manta train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]\n       manta train-embed --eval-only [flags] <artifact.mll> <eval.jsonl>")
 	}
 	if learningRate < 0 {
 		return fmt.Errorf("lr must be non-negative")
@@ -646,13 +647,16 @@ func runTrainEmbed(args []string) error {
 		evalPath = trainPath
 		trainPath = ""
 	}
-	if tokenizerPath == "" {
-		defaultTokenizerPath := barruntime.DefaultTokenizerPath(path)
+	if noTokenizer && tokenizerPath != "" {
+		return fmt.Errorf("set either --tokenizer or --no-tokenizer, not both")
+	}
+	if tokenizerPath == "" && !noTokenizer {
+		defaultTokenizerPath := mantaruntime.DefaultTokenizerPath(path)
 		if _, err := os.Stat(defaultTokenizerPath); err == nil {
 			tokenizerPath = defaultTokenizerPath
 		}
 	}
-	runConfig := barruntime.EmbeddingTrainRunConfig{
+	runConfig := mantaruntime.EmbeddingTrainRunConfig{
 		Epochs:                epochs,
 		BatchSize:             batchSize,
 		Shuffle:               shuffle,
@@ -684,14 +688,14 @@ func runTrainEmbed(args []string) error {
 		return nil
 	}
 	var (
-		summary barruntime.EmbeddingTrainRunSummary
-		paths   barruntime.EmbeddingTrainPackagePaths
+		summary mantaruntime.EmbeddingTrainRunSummary
+		paths   mantaruntime.EmbeddingTrainPackagePaths
 		err     error
 	)
 	if tokenizerPath != "" {
-		summary, paths, err = barruntime.TrainEmbeddingPackageFromTextContrastiveFiles(path, tokenizerPath, trainPath, evalPath, runConfig)
+		summary, paths, err = mantaruntime.TrainEmbeddingPackageFromTextContrastiveFiles(path, tokenizerPath, trainPath, evalPath, runConfig)
 	} else {
-		summary, paths, err = barruntime.TrainEmbeddingPackageFromContrastiveFiles(path, trainPath, evalPath, runConfig)
+		summary, paths, err = mantaruntime.TrainEmbeddingPackageFromContrastiveFiles(path, trainPath, evalPath, runConfig)
 	}
 	if err != nil {
 		return err
@@ -731,16 +735,16 @@ func runTrainEmbed(args []string) error {
 	return nil
 }
 
-func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg barruntime.EmbeddingTrainRunConfig) (barruntime.EmbeddingTrainWorkload, error) {
+func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg mantaruntime.EmbeddingTrainRunConfig) (mantaruntime.EmbeddingTrainWorkload, error) {
 	if cfg.EvalOnly && evalPath == "" {
 		evalPath = trainPath
 		trainPath = ""
 	}
 	if tokenizerPath != "" {
 		if cfg.EvalOnly {
-			evalPairs, err := barruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+			evalPairs, err := mantaruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
 			if err != nil {
-				return barruntime.EmbeddingTrainWorkload{}, err
+				return mantaruntime.EmbeddingTrainWorkload{}, err
 			}
 			allPositive := true
 			positiveCount := 0
@@ -752,20 +756,20 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg b
 				}
 			}
 			if allPositive {
-				return barruntime.EstimateContrastiveTrainWorkload(0, positiveCount, cfg), nil
+				return mantaruntime.EstimateContrastiveTrainWorkload(0, positiveCount, cfg), nil
 			}
-			return barruntime.EstimatePairwiseTrainWorkload(0, len(evalPairs), cfg), nil
+			return mantaruntime.EstimatePairwiseTrainWorkload(0, len(evalPairs), cfg), nil
 		}
-		trainSet, err := barruntime.ReadEmbeddingTextContrastiveExamplesFile(trainPath)
+		trainSet, err := mantaruntime.ReadEmbeddingTextContrastiveExamplesFile(trainPath)
 		if err != nil {
-			return barruntime.EmbeddingTrainWorkload{}, err
+			return mantaruntime.EmbeddingTrainWorkload{}, err
 		}
 		if evalPath == "" {
-			return barruntime.EstimateContrastiveTrainWorkload(len(trainSet), 0, cfg), nil
+			return mantaruntime.EstimateContrastiveTrainWorkload(len(trainSet), 0, cfg), nil
 		}
-		evalPairs, err := barruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+		evalPairs, err := mantaruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
 		if err != nil {
-			return barruntime.EmbeddingTrainWorkload{}, err
+			return mantaruntime.EmbeddingTrainWorkload{}, err
 		}
 		allPositive := true
 		positiveCount := 0
@@ -777,9 +781,9 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg b
 			}
 		}
 		if allPositive {
-			return barruntime.EstimateContrastiveTrainWorkload(len(trainSet), positiveCount, cfg), nil
+			return mantaruntime.EstimateContrastiveTrainWorkload(len(trainSet), positiveCount, cfg), nil
 		}
-		workload := barruntime.EstimateContrastiveTrainWorkload(len(trainSet), 0, cfg)
+		workload := mantaruntime.EstimateContrastiveTrainWorkload(len(trainSet), 0, cfg)
 		workload.EvalMode = "pairwise"
 		workload.EvalExamples = len(evalPairs)
 		workload.EvalPairsPerPass = int64(len(evalPairs))
@@ -790,28 +794,43 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg b
 	}
 
 	if cfg.EvalOnly {
-		evalSet, err := barruntime.ReadEmbeddingContrastiveExamplesFile(evalPath)
+		evalSet, err := mantaruntime.ReadEmbeddingContrastiveExamplesFile(evalPath)
 		if err != nil {
-			return barruntime.EmbeddingTrainWorkload{}, err
+			evalPairs, pairErr := mantaruntime.ReadEmbeddingPairExamplesFile(evalPath)
+			if pairErr != nil {
+				return mantaruntime.EmbeddingTrainWorkload{}, err
+			}
+			return mantaruntime.EstimatePairwiseTrainWorkload(0, len(evalPairs), cfg), nil
 		}
-		return barruntime.EstimateContrastiveTrainWorkload(0, len(evalSet), cfg), nil
+		return mantaruntime.EstimateContrastiveTrainWorkload(0, len(evalSet), cfg), nil
 	}
-	trainSet, err := barruntime.ReadEmbeddingContrastiveExamplesFile(trainPath)
+	trainSet, err := mantaruntime.ReadEmbeddingContrastiveExamplesFile(trainPath)
 	if err != nil {
-		return barruntime.EmbeddingTrainWorkload{}, err
+		return mantaruntime.EmbeddingTrainWorkload{}, err
 	}
 	evalCount := 0
 	if evalPath != "" {
-		evalSet, err := barruntime.ReadEmbeddingContrastiveExamplesFile(evalPath)
+		evalSet, err := mantaruntime.ReadEmbeddingContrastiveExamplesFile(evalPath)
 		if err != nil {
-			return barruntime.EmbeddingTrainWorkload{}, err
+			evalPairs, pairErr := mantaruntime.ReadEmbeddingPairExamplesFile(evalPath)
+			if pairErr != nil {
+				return mantaruntime.EmbeddingTrainWorkload{}, err
+			}
+			workload := mantaruntime.EstimateContrastiveTrainWorkload(len(trainSet), 0, cfg)
+			workload.EvalMode = "pairwise"
+			workload.EvalExamples = len(evalPairs)
+			workload.EvalPairsPerPass = int64(len(evalPairs))
+			workload.PlannedEvalPasses = 1
+			workload.PlannedEvalPairs = int64(len(evalPairs))
+			workload.PlannedTotalPairs = workload.PlannedTrainPairs + workload.PlannedEvalPairs
+			return workload, nil
 		}
 		evalCount = len(evalSet)
 	}
-	return barruntime.EstimateContrastiveTrainWorkload(len(trainSet), evalCount, cfg), nil
+	return mantaruntime.EstimateContrastiveTrainWorkload(len(trainSet), evalCount, cfg), nil
 }
 
-func formatTrainWorkload(workload barruntime.EmbeddingTrainWorkload) string {
+func formatTrainWorkload(workload mantaruntime.EmbeddingTrainWorkload) string {
 	parts := []string{
 		fmt.Sprintf("train=%d %s examples", workload.TrainExamples, workload.TrainMode),
 		fmt.Sprintf("batch=%d", workload.BatchSize),
@@ -831,7 +850,7 @@ func formatTrainWorkload(workload barruntime.EmbeddingTrainWorkload) string {
 	return strings.Join(parts, " ")
 }
 
-func formatTrainThroughput(summary barruntime.EmbeddingTrainRunSummary) string {
+func formatTrainThroughput(summary mantaruntime.EmbeddingTrainRunSummary) string {
 	parts := []string{fmt.Sprintf("elapsed=%s", summary.Elapsed.Round(time.Millisecond))}
 	if rate := itemsPerSecond(summary.Workload.ActualTotalExamples, summary.Elapsed); rate > 0 {
 		parts = append(parts, fmt.Sprintf("examples/s=%.2f", rate))
@@ -857,7 +876,7 @@ func formatTrainThroughput(summary barruntime.EmbeddingTrainRunSummary) string {
 	return strings.Join(parts, " ")
 }
 
-func printTrainProgress(progress barruntime.EmbeddingTrainProgress) {
+func printTrainProgress(progress mantaruntime.EmbeddingTrainProgress) {
 	epochPairs := fmt.Sprintf("%d", progress.EpochTrainPairs)
 	if progress.PlannedEpochPairs > 0 {
 		epochPairs = fmt.Sprintf("%d/%d", progress.EpochTrainPairs, progress.PlannedEpochPairs)
@@ -945,7 +964,7 @@ func runTrainCorpus(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: barr train-corpus [flags] <artifact.mll> <corpus.txt>")
+		return fmt.Errorf("usage: manta train-corpus [flags] <artifact.mll> <corpus.txt>")
 	}
 	if learningRate < 0 {
 		return fmt.Errorf("lr must be non-negative")
@@ -961,7 +980,7 @@ func runTrainCorpus(args []string) error {
 	}
 	path := fs.Arg(0)
 	corpusPath := fs.Arg(1)
-	runConfig := barruntime.EmbeddingTrainRunConfig{
+	runConfig := mantaruntime.EmbeddingTrainRunConfig{
 		Epochs:                epochs,
 		BatchSize:             batchSize,
 		Shuffle:               shuffle,
@@ -981,13 +1000,13 @@ func runTrainCorpus(args []string) error {
 	if progressEvery > 0 {
 		runConfig.Progress = printTrainProgress
 	}
-	summary, paths, err := barruntime.TrainEmbeddingPackageFromCorpusFile(path, corpusPath, barruntime.EmbeddingCorpusTrainConfig{
+	summary, paths, err := mantaruntime.TrainEmbeddingPackageFromCorpusFile(path, corpusPath, mantaruntime.EmbeddingCorpusTrainConfig{
 		TokenizerPath:      tokenizerPath,
 		TokenizerVocabSize: vocabSize,
 		TokenizerMinFreq:   minFreq,
 		TrainPairsPath:     trainPairsPath,
 		EvalPairsPath:      evalPairsPath,
-		Mining: barruntime.EmbeddingTextMiningConfig{
+		Mining: mantaruntime.EmbeddingTextMiningConfig{
 			MinChars:  minChars,
 			MaxPairs:  maxPairs,
 			EvalPairs: evalPairs,
@@ -1046,18 +1065,18 @@ func runTrainTokenizer(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: barr train-tokenizer [flags] <artifact.mll> <corpus.txt>")
+		return fmt.Errorf("usage: manta train-tokenizer [flags] <artifact.mll> <corpus.txt>")
 	}
 	artifactPath := fs.Arg(0)
 	corpusPath := fs.Arg(1)
 	if outputPath == "" {
-		outputPath = barruntime.DefaultTokenizerPath(artifactPath)
+		outputPath = mantaruntime.DefaultTokenizerPath(artifactPath)
 	}
 	if manifestPath == "" {
-		manifestPath = barruntime.DefaultEmbeddingManifestPath(artifactPath)
+		manifestPath = mantaruntime.DefaultEmbeddingManifestPath(artifactPath)
 	}
 	if vocabSize == 0 {
-		manifest, err := barruntime.ReadEmbeddingManifestFile(manifestPath)
+		manifest, err := mantaruntime.ReadEmbeddingManifestFile(manifestPath)
 		if err != nil {
 			return fmt.Errorf("read embedding manifest for vocab size: %w", err)
 		}
@@ -1066,7 +1085,7 @@ func runTrainTokenizer(args []string) error {
 	if vocabSize <= 0 {
 		return fmt.Errorf("tokenizer vocab size must be set via --vocab-size or embedding manifest")
 	}
-	tokenizer, err := barruntime.TrainTokenizerFromCorpus(barruntime.TokenizerTrainConfig{
+	tokenizer, err := mantaruntime.TrainTokenizerFromCorpus(mantaruntime.TokenizerTrainConfig{
 		CorpusPath: corpusPath,
 		VocabSize:  vocabSize,
 		MinFreq:    minFreq,
@@ -1077,11 +1096,78 @@ func runTrainTokenizer(args []string) error {
 	if err := tokenizer.WriteFile(outputPath); err != nil {
 		return err
 	}
-	if err := barruntime.SyncEmbeddingTokenizerVocab(artifactPath, len(tokenizer.Tokens)); err != nil {
+	if err := mantaruntime.SyncEmbeddingTokenizerVocab(artifactPath, len(tokenizer.Tokens)); err != nil {
 		return fmt.Errorf("sync tokenizer vocab through Manta package: %w", err)
 	}
 	fmt.Printf("trained tokenizer %q\n", outputPath)
 	fmt.Printf("vocab: %d tokens, merges: %d\n", len(tokenizer.Tokens), len(tokenizer.Merges))
+	return nil
+}
+
+func runTokenizeEmbed(args []string) error {
+	fs := flag.NewFlagSet("tokenize-embed", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var tokenizerPath string
+	var mode string
+	fs.StringVar(&tokenizerPath, "tokenizer", "", "path to tokenizer .mll (default: sibling tokenizer)")
+	fs.StringVar(&mode, "mode", "contrastive", "output mode: contrastive or pair")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 3 || fs.Arg(0) == "" || fs.Arg(1) == "" || fs.Arg(2) == "" {
+		return fmt.Errorf("usage: manta tokenize-embed [--mode contrastive|pair] [--tokenizer tokenizer.mll] <artifact.mll> <input-text.jsonl> <output-token.jsonl>")
+	}
+	artifactPath := fs.Arg(0)
+	inputPath := fs.Arg(1)
+	outputPath := fs.Arg(2)
+	if tokenizerPath == "" {
+		tokenizerPath = mantaruntime.DefaultTokenizerPath(artifactPath)
+	}
+	tokenizerFile, err := mantaruntime.ReadTokenizerFile(tokenizerPath)
+	if err != nil {
+		return fmt.Errorf("read tokenizer: %w", err)
+	}
+	manifest, err := mantaruntime.ReadEmbeddingManifestFile(mantaruntime.ResolveEmbeddingManifestPath(artifactPath))
+	if err != nil {
+		return fmt.Errorf("read embedding manifest: %w", err)
+	}
+	tokenizer, err := mantaruntime.NewBPETokenizer(tokenizerFile, manifest.Tokenizer)
+	if err != nil {
+		return fmt.Errorf("build tokenizer: %w", err)
+	}
+	switch strings.ToLower(mode) {
+	case "contrastive":
+		examples, err := mantaruntime.ReadEmbeddingTextContrastiveExamplesFile(inputPath)
+		if err != nil {
+			return fmt.Errorf("read text contrastive dataset: %w", err)
+		}
+		tokenized, err := mantaruntime.TokenizeEmbeddingTextContrastiveExamples(examples, tokenizer)
+		if err != nil {
+			return fmt.Errorf("tokenize contrastive dataset: %w", err)
+		}
+		if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(outputPath, tokenized); err != nil {
+			return err
+		}
+		fmt.Printf("tokenized contrastive examples: %d\n", len(tokenized))
+	case "pair":
+		examples, err := mantaruntime.ReadEmbeddingTextPairExamplesFile(inputPath)
+		if err != nil {
+			return fmt.Errorf("read text pair dataset: %w", err)
+		}
+		tokenized, err := mantaruntime.TokenizeEmbeddingTextPairExamples(examples, tokenizer)
+		if err != nil {
+			return fmt.Errorf("tokenize pair dataset: %w", err)
+		}
+		if err := mantaruntime.WriteEmbeddingPairExamplesFile(outputPath, tokenized); err != nil {
+			return err
+		}
+		fmt.Printf("tokenized pair examples: %d\n", len(tokenized))
+	default:
+		return fmt.Errorf("unsupported tokenize mode %q: want contrastive or pair", mode)
+	}
+	fmt.Printf("tokenizer: %s\n", tokenizerPath)
+	fmt.Printf("input: %s\n", inputPath)
+	fmt.Printf("output: %s\n", outputPath)
 	return nil
 }
 
@@ -1100,7 +1186,7 @@ func runMineTextPairs(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: barr mine-text-pairs [flags] <corpus.txt> <train.jsonl> [eval.jsonl]")
+		return fmt.Errorf("usage: manta mine-text-pairs [flags] <corpus.txt> <train.jsonl> [eval.jsonl]")
 	}
 	corpusPath := fs.Arg(0)
 	trainPath := fs.Arg(1)
@@ -1108,7 +1194,7 @@ func runMineTextPairs(args []string) error {
 	if fs.NArg() > 2 {
 		evalPath = fs.Arg(2)
 	}
-	trainSet, evalSet, err := barruntime.MineEmbeddingTextDatasetsFromCorpusFile(corpusPath, barruntime.EmbeddingTextMiningConfig{
+	trainSet, evalSet, err := mantaruntime.MineEmbeddingTextDatasetsFromCorpusFile(corpusPath, mantaruntime.EmbeddingTextMiningConfig{
 		MinChars:  minChars,
 		MaxPairs:  maxPairs,
 		EvalPairs: evalPairs,
@@ -1117,11 +1203,11 @@ func runMineTextPairs(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := barruntime.WriteEmbeddingTextContrastiveExamplesFile(trainPath, trainSet); err != nil {
+	if err := mantaruntime.WriteEmbeddingTextContrastiveExamplesFile(trainPath, trainSet); err != nil {
 		return err
 	}
 	if evalPath != "" && len(evalSet) > 0 {
-		if err := barruntime.WriteEmbeddingTextPairExamplesFile(evalPath, evalSet); err != nil {
+		if err := mantaruntime.WriteEmbeddingTextPairExamplesFile(evalPath, evalSet); err != nil {
 			return err
 		}
 	}
@@ -1138,33 +1224,35 @@ func runMineTextPairs(args []string) error {
 
 func printUsage() {
 	fmt.Println("usage:")
-	fmt.Println("  barr version")
-	fmt.Println("  barr compile <source.bar> [output.mll]")
-	fmt.Println("  barr inspect <artifact.mll>")
-	fmt.Println("  barr export-mll <artifact.mll> [output.mll]")
-	fmt.Println("  barr init-model [flags] <artifact.mll>")
-	fmt.Println("  barr init-train [flags] <artifact.mll>")
-	fmt.Println("  barr rename-embed --name <model-name> <input.mll> <output.mll>")
-	fmt.Println("  barr train-tokenizer [flags] <artifact.mll> <corpus.txt>")
-	fmt.Println("  barr train-corpus [flags] <artifact.mll> <corpus.txt>")
-	fmt.Println("  barr train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]")
-	fmt.Println("  barr run <artifact.mll> [entry]")
-	fmt.Println("  barr demo [module-name]")
+	fmt.Println("  manta version")
+	fmt.Println("  manta compile <source.manta> [output.mll]")
+	fmt.Println("  manta inspect <artifact.mll>")
+	fmt.Println("  manta export-mll <artifact.mll> [output.mll]")
+	fmt.Println("  manta init-model [flags] <artifact.mll>")
+	fmt.Println("  manta init-train [flags] <artifact.mll>")
+	fmt.Println("  manta rename-embed --name <model-name> <input.mll> <output.mll>")
+	fmt.Println("  manta train-tokenizer [flags] <artifact.mll> <corpus.txt>")
+	fmt.Println("  manta tokenize-embed [flags] <artifact.mll> <input-text.jsonl> <output-token.jsonl>")
+	fmt.Println("  manta train-corpus [flags] <artifact.mll> <corpus.txt>")
+	fmt.Println("  manta train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]")
+	fmt.Println("  manta run <artifact.mll> [entry]")
+	fmt.Println("  manta demo [module-name]")
 	fmt.Println()
-	fmt.Println("compile lowers a .bar source file into an .mll Manta artifact.")
+	fmt.Println("compile lowers a Manta source file into an .mll artifact.")
 	fmt.Println("inspect summarizes an artifact and verifies its sibling package manifest when present.")
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Manta metadata in XBAR.")
 	fmt.Println("init-model creates the Manta-owned default quantized embedding training package.")
 	fmt.Println("init-train creates a native training package next to an artifact.")
 	fmt.Println("rename-embed rewrites a training package under a new embedding model identity.")
 	fmt.Println("train-tokenizer builds a sibling .tokenizer.mll from a raw text corpus, using embedding-manifest vocab_size by default.")
+	fmt.Println("tokenize-embed converts text JSONL into reusable token JSONL for training or eval.")
 	fmt.Println("train-corpus trains tokenizer + mined text pairs + embedder in one Manta job from a raw text corpus.")
-	fmt.Println("train-embed reloads a training package, fits or --eval-only evaluates token JSONL or text JSONL (with --tokenizer or a sibling .tokenizer.mll), and writes it back.")
+	fmt.Println("train-embed reloads a training package, fits or --eval-only evaluates token JSONL or text JSONL (with --tokenizer or a sibling .tokenizer.mll; use --no-tokenizer for token JSONL beside a tokenizer), and writes it back.")
 	fmt.Println("run loads an artifact, binds stub weights and inputs, and executes one entrypoint.")
 	fmt.Println("demo creates a tiny inference-style module and loads it through the runtime.")
 }
 
-func totalKernelOps(kernels []barr.Kernel) int {
+func totalKernelOps(kernels []mantaartifact.Kernel) int {
 	total := 0
 	for _, kernel := range kernels {
 		total += len(kernel.Body)
@@ -1180,36 +1268,36 @@ func defaultArtifactPath(srcPath string) string {
 	return strings.TrimSuffix(srcPath, ext) + ".mll"
 }
 
-func stubLoadOptions(mod *barr.Module) []barruntime.LoadOption {
+func stubLoadOptions(mod *mantaartifact.Module) []mantaruntime.LoadOption {
 	sizes := defaultSymbolSizes(mod)
-	opts := make([]barruntime.LoadOption, 0, len(mod.Params))
+	opts := make([]mantaruntime.LoadOption, 0, len(mod.Params))
 	for _, param := range mod.Params {
-		opts = append(opts, barruntime.WithWeight(param.Name, stubTensorForParam(param.Name, param.Type, sizes)))
+		opts = append(opts, mantaruntime.WithWeight(param.Name, stubTensorForParam(param.Name, param.Type, sizes)))
 	}
 	return opts
 }
 
-func defaultEntryName(mod *barr.Module) string {
+func defaultEntryName(mod *mantaartifact.Module) string {
 	if mod != nil && len(mod.EntryPoints) > 0 {
 		return mod.EntryPoints[0].Name
 	}
 	return ""
 }
 
-func entryPointByName(mod *barr.Module, name string) (barr.EntryPoint, error) {
+func entryPointByName(mod *mantaartifact.Module, name string) (mantaartifact.EntryPoint, error) {
 	for _, entry := range mod.EntryPoints {
 		if entry.Name == name {
 			return entry, nil
 		}
 	}
-	return barr.EntryPoint{}, fmt.Errorf("unknown entrypoint %q", name)
+	return mantaartifact.EntryPoint{}, fmt.Errorf("unknown entrypoint %q", name)
 }
 
-func stubInputs(entry barr.EntryPoint) map[string]any {
+func stubInputs(entry mantaartifact.EntryPoint) map[string]any {
 	sizes := defaultShapeSizes(entry)
 	out := make(map[string]any, len(entry.Inputs))
 	for _, input := range entry.Inputs {
-		if input.Type.Kind == barr.ValueKVCache {
+		if input.Type.Kind == mantaartifact.ValueKVCache {
 			out[input.Name] = backend.NewKVCache(backend.NewTensorF16([]int{sizes["T"], sizes["D"]}, make([]float32, sizes["T"]*sizes["D"])))
 			continue
 		}
@@ -1218,11 +1306,15 @@ func stubInputs(entry barr.EntryPoint) map[string]any {
 	return out
 }
 
-func displayTrainBackend(kind barr.BackendKind) string {
+func displayTrainBackend(kind mantaartifact.BackendKind) string {
 	if kind == "" {
 		return "host"
 	}
 	return string(kind)
+}
+
+func displayArtifactVersion(version string) string {
+	return strings.Replace(version, "barr/", "manta/", 1)
 }
 
 func displayManifestName(value string) string {
@@ -1232,7 +1324,7 @@ func displayManifestName(value string) string {
 	return value
 }
 
-func joinBackendKinds(kinds []barr.BackendKind) string {
+func joinBackendKinds(kinds []mantaartifact.BackendKind) string {
 	if len(kinds) == 0 {
 		return ""
 	}
@@ -1313,7 +1405,7 @@ func (f *dimFlag) values() map[string]int {
 	return out
 }
 
-func defaultSymbolSizes(mod *barr.Module) map[string]int {
+func defaultSymbolSizes(mod *mantaartifact.Module) map[string]int {
 	sizes := map[string]int{
 		"V":  3,
 		"D":  2,
@@ -1352,7 +1444,7 @@ func defaultSymbolSizes(mod *barr.Module) map[string]int {
 	return sizes
 }
 
-func defaultShapeSizes(entry barr.EntryPoint) map[string]int {
+func defaultShapeSizes(entry mantaartifact.EntryPoint) map[string]int {
 	sizes := map[string]int{
 		"V":  3,
 		"D":  2,
@@ -1376,7 +1468,7 @@ func defaultShapeSizes(entry barr.EntryPoint) map[string]int {
 	return sizes
 }
 
-func stubTensorForParam(name string, typ barr.ValueType, sizes map[string]int) *backend.Tensor {
+func stubTensorForParam(name string, typ mantaartifact.ValueType, sizes map[string]int) *backend.Tensor {
 	shape := concreteShape(typ, sizes)
 	switch name {
 	case "token_embedding":
@@ -1400,7 +1492,7 @@ func stubTensorForParam(name string, typ barr.ValueType, sizes map[string]int) *
 	}
 }
 
-func stubTensorForInput(name string, typ barr.ValueType, sizes map[string]int) *backend.Tensor {
+func stubTensorForInput(name string, typ mantaartifact.ValueType, sizes map[string]int) *backend.Tensor {
 	shape := concreteShape(typ, sizes)
 	if typ.Tensor != nil && typ.Tensor.DType == "i32" {
 		values := make([]int32, product(shape))
@@ -1479,7 +1571,7 @@ func stubTensorForInput(name string, typ barr.ValueType, sizes map[string]int) *
 	return fillTensor(typ, shape, 0)
 }
 
-func fillTensor(typ barr.ValueType, shape []int, offset float32) *backend.Tensor {
+func fillTensor(typ mantaartifact.ValueType, shape []int, offset float32) *backend.Tensor {
 	n := product(shape)
 	switch typ.Tensor.DType {
 	case "i32":
@@ -1521,7 +1613,7 @@ func fillTensor(typ barr.ValueType, shape []int, offset float32) *backend.Tensor
 	}
 }
 
-func concreteShape(typ barr.ValueType, sizes map[string]int) []int {
+func concreteShape(typ mantaartifact.ValueType, sizes map[string]int) []int {
 	if typ.Tensor == nil {
 		return []int{1}
 	}

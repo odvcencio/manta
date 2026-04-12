@@ -324,7 +324,6 @@ func TestEmbeddingTrainerFitContrastiveEvaluatesWithinEpoch(t *testing.T) {
 
 func TestBucketContrastiveOrderByLengthSortsWithinDefaultWindows(t *testing.T) {
 	t.Setenv("MANTA_TRAIN_LENGTH_BUCKET_WINDOW", "")
-	t.Setenv("BARR_TRAIN_LENGTH_BUCKET_WINDOW", "")
 	trainSet := []EmbeddingContrastiveExample{
 		{QueryTokens: make([]int32, 8), PositiveTokens: make([]int32, 1)},
 		{QueryTokens: make([]int32, 2), PositiveTokens: make([]int32, 1)},
@@ -351,7 +350,6 @@ func TestBucketContrastiveOrderByLengthSortsWithinDefaultWindows(t *testing.T) {
 
 func TestBucketContrastiveOrderByLengthUsesPairLengthTieBreaks(t *testing.T) {
 	t.Setenv("MANTA_TRAIN_LENGTH_BUCKET_WINDOW", "")
-	t.Setenv("BARR_TRAIN_LENGTH_BUCKET_WINDOW", "")
 	trainSet := []EmbeddingContrastiveExample{
 		{QueryTokens: make([]int32, 8), PositiveTokens: make([]int32, 10)},
 		{QueryTokens: make([]int32, 2), PositiveTokens: make([]int32, 10)},
@@ -372,7 +370,6 @@ func TestBucketContrastiveOrderByLengthUsesPairLengthTieBreaks(t *testing.T) {
 
 func TestBucketContrastiveOrderByLengthHonorsWindowOverride(t *testing.T) {
 	t.Setenv("MANTA_TRAIN_LENGTH_BUCKET_WINDOW", "4")
-	t.Setenv("BARR_TRAIN_LENGTH_BUCKET_WINDOW", "")
 	trainSet := []EmbeddingContrastiveExample{
 		{QueryTokens: make([]int32, 8), PositiveTokens: make([]int32, 1)},
 		{QueryTokens: make([]int32, 1), PositiveTokens: make([]int32, 1)},

@@ -54,7 +54,7 @@ type candidateConfig struct {
 	EvalPairs           string
 	ProgressEvery       string
 	LengthBucketBatches string
-	BarrBin             string
+	MantaBin            string
 	Artifact            string
 	SealedArtifact      string
 }
@@ -294,7 +294,6 @@ func writeSelectedEnvironment(cfg candidateConfig) error {
 	lines := []string{}
 	for _, env := range os.Environ() {
 		if strings.HasPrefix(env, "MANTA_") ||
-			strings.HasPrefix(env, "BARR_") ||
 			strings.HasPrefix(env, "CUDA") ||
 			strings.HasPrefix(env, "CUBLAS") ||
 			strings.HasPrefix(env, "CGO_") ||
@@ -576,7 +575,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		EvalPairs:           getenv("MANTA_EVAL_PAIRS", "512"),
 		ProgressEvery:       getenv("MANTA_PROGRESS_EVERY", "0"),
 		LengthBucketBatches: getenv("MANTA_LENGTH_BUCKET_BATCHES", "1"),
-		BarrBin:             filepath.Join(runDir, "bin", "barr"),
+		MantaBin:            filepath.Join(runDir, "bin", "manta"),
 		Artifact:            filepath.Join(runDir, modelName+".mll"),
 		SealedArtifact:      filepath.Join(runDir, modelName+".sealed.mll"),
 	}
@@ -685,13 +684,13 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	guard err == nil else return cfg, err
 
 	if !envEnabled("MANTA_SKIP_TESTS") {
-		err = runCmd(cfg, "Go package gate", "go-test.log", "go", []string{"test", "./cmd/barr", "./runtime", "./models", "-count=1"})
+		err = runCmd(cfg, "Go package gate", "go-test.log", "go", []string{"test", "./cmd/manta", "./runtime", "./models", "-count=1"})
 		guard err == nil else return cfg, err
 	}
-	err = runCmd(cfg, "Build barr CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.BarrBin, "./cmd/barr"})
+	err = runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/manta"})
 	guard err == nil else return cfg, err
 
-	err = runCmd(cfg, "Initialize "+cfg.ModelName, "init-model.log", cfg.BarrBin, []string{
+	err = runCmd(cfg, "Initialize "+cfg.ModelName, "init-model.log", cfg.MantaBin, []string{
 		"init-model",
 		"--name", cfg.ModelName,
 		"--vocab-size", cfg.VocabSize,
@@ -711,7 +710,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	tokenizerForEval := cfg.TokenizerPath
 	if cfg.TrainMode == "prepared_jsonl" && tokenizerForEval == "" && cfg.TokenizerCorpus != "" {
 		tokenizerForEval = filepath.Join(cfg.RunDir, cfg.ModelName+".tokenizer.mll")
-		err = runCmd(cfg, "Train tokenizer for prepared JSONL", "train-tokenizer.log", cfg.BarrBin, []string{
+		err = runCmd(cfg, "Train tokenizer for prepared JSONL", "train-tokenizer.log", cfg.MantaBin, []string{
 			"train-tokenizer",
 			"--output", tokenizerForEval,
 			"--vocab-size", cfg.VocabSize,
@@ -722,6 +721,55 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		guard err == nil else return cfg, err
 		err = appendSHA256(cfg.DatasetSHAFile, tokenizerForEval)
 		guard err == nil else return cfg, err
+	}
+	trainJSONLForRun := cfg.TrainJSONL
+	evalJSONLForRun := cfg.EvalJSONL
+	hardEvalJSONLForRun := cfg.HardEvalJSONL
+	trainTokenizer := cfg.TokenizerPath
+	evalTokenizer := tokenizerForEval
+	tokenJSONLForRun := false
+	if cfg.TrainMode == "prepared_jsonl" && tokenizerForEval != "" {
+		trainJSONLForRun = filepath.Join(cfg.RunDir, cfg.ModelName+".train.tokens.jsonl")
+		evalJSONLForRun = filepath.Join(cfg.RunDir, cfg.ModelName+".eval.tokens.jsonl")
+		err = runCmd(cfg, "Tokenize prepared train JSONL", "tokenize-train.log", cfg.MantaBin, []string{
+			"tokenize-embed",
+			"--mode", "contrastive",
+			"--tokenizer", tokenizerForEval,
+			cfg.Artifact,
+			cfg.TrainJSONL,
+			trainJSONLForRun,
+		})
+		guard err == nil else return cfg, err
+		err = runCmd(cfg, "Tokenize prepared eval JSONL", "tokenize-eval.log", cfg.MantaBin, []string{
+			"tokenize-embed",
+			"--mode", "pair",
+			"--tokenizer", tokenizerForEval,
+			cfg.Artifact,
+			cfg.EvalJSONL,
+			evalJSONLForRun,
+		})
+		guard err == nil else return cfg, err
+		err = appendSHA256(cfg.DatasetSHAFile, trainJSONLForRun)
+		guard err == nil else return cfg, err
+		err = appendSHA256(cfg.DatasetSHAFile, evalJSONLForRun)
+		guard err == nil else return cfg, err
+		if cfg.HardEvalJSONL != "" {
+			hardEvalJSONLForRun = filepath.Join(cfg.RunDir, cfg.ModelName+".hard-eval.tokens.jsonl")
+			err = runCmd(cfg, "Tokenize hard eval JSONL", "tokenize-hard-eval.log", cfg.MantaBin, []string{
+				"tokenize-embed",
+				"--mode", "pair",
+				"--tokenizer", tokenizerForEval,
+				cfg.Artifact,
+				cfg.HardEvalJSONL,
+				hardEvalJSONLForRun,
+			})
+			guard err == nil else return cfg, err
+			err = appendSHA256(cfg.DatasetSHAFile, hardEvalJSONLForRun)
+			guard err == nil else return cfg, err
+		}
+		trainTokenizer = ""
+		evalTokenizer = ""
+		tokenJSONLForRun = true
 	}
 	if cfg.TrainMode == "corpus" {
 		args := append([]string{"train-corpus"}, common...)
@@ -737,11 +785,15 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 			cfg.Artifact,
 			cfg.Corpus,
 		)
-		err = runCmd(cfg, "Train "+cfg.ModelName+" from corpus", "train.log", cfg.BarrBin, args)
+		err = runCmd(cfg, "Train "+cfg.ModelName+" from corpus", "train.log", cfg.MantaBin, args)
 		guard err == nil else return cfg, err
 		cfg.TrainJSONL = filepath.Join(cfg.RunDir, cfg.ModelName+".train.jsonl")
 		cfg.EvalJSONL = filepath.Join(cfg.RunDir, cfg.ModelName+".eval.jsonl")
 		tokenizerForEval = filepath.Join(cfg.RunDir, cfg.ModelName+".tokenizer.mll")
+		trainJSONLForRun = cfg.TrainJSONL
+		evalJSONLForRun = cfg.EvalJSONL
+		hardEvalJSONLForRun = cfg.HardEvalJSONL
+		evalTokenizer = tokenizerForEval
 		err = appendSHA256(cfg.DatasetSHAFile, cfg.TrainJSONL)
 		guard err == nil else return cfg, err
 		err = appendSHA256(cfg.DatasetSHAFile, cfg.EvalJSONL)
@@ -750,18 +802,22 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		guard err == nil else return cfg, err
 	} else {
 		args := append([]string{"train-embed"}, common...)
-		if cfg.TokenizerPath != "" {
-			args = append(args, "--tokenizer", cfg.TokenizerPath)
+		if trainTokenizer != "" {
+			args = append(args, "--tokenizer", trainTokenizer)
+		} else if tokenJSONLForRun {
+			args = append(args, "--no-tokenizer")
 		}
-		args = append(args, cfg.Artifact, cfg.TrainJSONL, cfg.EvalJSONL)
+		args = append(args, cfg.Artifact, trainJSONLForRun, evalJSONLForRun)
 		planArgs := append([]string{"train-embed", "--plan-only"}, common...)
-		if cfg.TokenizerPath != "" {
-			planArgs = append(planArgs, "--tokenizer", cfg.TokenizerPath)
+		if trainTokenizer != "" {
+			planArgs = append(planArgs, "--tokenizer", trainTokenizer)
+		} else if tokenJSONLForRun {
+			planArgs = append(planArgs, "--no-tokenizer")
 		}
-		planArgs = append(planArgs, cfg.Artifact, cfg.TrainJSONL, cfg.EvalJSONL)
-		err = runCmd(cfg, "Plan prepared JSONL training workload", "train-plan.log", cfg.BarrBin, planArgs)
+		planArgs = append(planArgs, cfg.Artifact, trainJSONLForRun, evalJSONLForRun)
+		err = runCmd(cfg, "Plan prepared JSONL training workload", "train-plan.log", cfg.MantaBin, planArgs)
 		guard err == nil else return cfg, err
-		err = runCmd(cfg, "Train "+cfg.ModelName+" from prepared JSONL", "train.log", cfg.BarrBin, args)
+		err = runCmd(cfg, "Train "+cfg.ModelName+" from prepared JSONL", "train.log", cfg.MantaBin, args)
 		guard err == nil else return cfg, err
 	}
 	err = requireTrainingEfficiencyGates(filepath.Join(cfg.LogDir, "train.log"))
@@ -770,25 +826,29 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	evalCandidate, err := copyPackageForEval(cfg, "validation")
 	guard err == nil else return cfg, err
 	evalArgs := []string{"train-embed", "--eval-only"}
-	if tokenizerForEval != "" {
-		evalArgs = append(evalArgs, "--tokenizer", tokenizerForEval)
+	if evalTokenizer != "" {
+		evalArgs = append(evalArgs, "--tokenizer", evalTokenizer)
+	} else if tokenJSONLForRun {
+		evalArgs = append(evalArgs, "--no-tokenizer")
 	}
-	evalArgs = append(evalArgs, evalCandidate, cfg.EvalJSONL)
-	err = runCmd(cfg, "Final validation eval-only", "final-eval.log", cfg.BarrBin, evalArgs)
+	evalArgs = append(evalArgs, evalCandidate, evalJSONLForRun)
+	err = runCmd(cfg, "Final validation eval-only", "final-eval.log", cfg.MantaBin, evalArgs)
 	guard err == nil else return cfg, err
 	err = requireEvalOnlyZeroUpdates(filepath.Join(cfg.LogDir, "final-eval.log"))
 	guard err == nil else return cfg, err
 
 	gateLog := filepath.Join(cfg.LogDir, "final-eval.log")
-	if cfg.HardEvalJSONL != "" {
+	if hardEvalJSONLForRun != "" {
 		hardCandidate, err := copyPackageForEval(cfg, "hard")
 		guard err == nil else return cfg, err
 		hardArgs := []string{"train-embed", "--eval-only"}
-		if tokenizerForEval != "" {
-			hardArgs = append(hardArgs, "--tokenizer", tokenizerForEval)
+		if evalTokenizer != "" {
+			hardArgs = append(hardArgs, "--tokenizer", evalTokenizer)
+		} else if tokenJSONLForRun {
+			hardArgs = append(hardArgs, "--no-tokenizer")
 		}
-		hardArgs = append(hardArgs, hardCandidate, cfg.HardEvalJSONL)
-		err = runCmd(cfg, "Hard holdout eval-only", "hard-eval.log", cfg.BarrBin, hardArgs)
+		hardArgs = append(hardArgs, hardCandidate, hardEvalJSONLForRun)
+		err = runCmd(cfg, "Hard holdout eval-only", "hard-eval.log", cfg.MantaBin, hardArgs)
 		guard err == nil else return cfg, err
 		gateLog = filepath.Join(cfg.LogDir, "hard-eval.log")
 		err = requireEvalOnlyZeroUpdates(gateLog)
@@ -816,15 +876,15 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	err = requireMetricMax(gateLog, "mean_rank", os.Getenv("MANTA_MAX_MEAN_RANK"))
 	guard err == nil else return cfg, err
 
-	err = runCmd(cfg, "Inspect training package", "inspect-package.log", cfg.BarrBin, []string{"inspect", cfg.Artifact})
+	err = runCmd(cfg, "Inspect training package", "inspect-package.log", cfg.MantaBin, []string{"inspect", cfg.Artifact})
 	guard err == nil else return cfg, err
 	inspectData, err := os.ReadFile(filepath.Join(cfg.LogDir, "inspect-package.log"))
 	guard err == nil else return cfg, err
 	guard strings.Contains(string(inspectData), "package verify: OK") else return cfg, fmt.Errorf("training package verification did not pass")
 
-	err = runCmd(cfg, "Export sealed MLL", "export-mll.log", cfg.BarrBin, []string{"export-mll", cfg.Artifact, cfg.SealedArtifact})
+	err = runCmd(cfg, "Export sealed MLL", "export-mll.log", cfg.MantaBin, []string{"export-mll", cfg.Artifact, cfg.SealedArtifact})
 	guard err == nil else return cfg, err
-	err = runCmd(cfg, "Inspect sealed MLL", "inspect-sealed.log", cfg.BarrBin, []string{"inspect", cfg.SealedArtifact})
+	err = runCmd(cfg, "Inspect sealed MLL", "inspect-sealed.log", cfg.MantaBin, []string{"inspect", cfg.SealedArtifact})
 	guard err == nil else return cfg, err
 	sealedData, err := os.ReadFile(filepath.Join(cfg.LogDir, "inspect-sealed.log"))
 	guard err == nil else return cfg, err
