@@ -622,7 +622,7 @@ func runTrainEmbed(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: barr train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]")
+		return fmt.Errorf("usage: barr train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]\n       barr train-embed --eval-only [flags] <artifact.mll> <eval.jsonl>")
 	}
 	if learningRate < 0 {
 		return fmt.Errorf("lr must be non-negative")
@@ -641,6 +641,10 @@ func runTrainEmbed(args []string) error {
 	evalPath := ""
 	if fs.NArg() > 2 {
 		evalPath = fs.Arg(2)
+	}
+	if evalOnly && fs.NArg() == 2 {
+		evalPath = trainPath
+		trainPath = ""
 	}
 	if tokenizerPath == "" {
 		defaultTokenizerPath := barruntime.DefaultTokenizerPath(path)
@@ -728,7 +732,30 @@ func runTrainEmbed(args []string) error {
 }
 
 func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg barruntime.EmbeddingTrainRunConfig) (barruntime.EmbeddingTrainWorkload, error) {
+	if cfg.EvalOnly && evalPath == "" {
+		evalPath = trainPath
+		trainPath = ""
+	}
 	if tokenizerPath != "" {
+		if cfg.EvalOnly {
+			evalPairs, err := barruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+			if err != nil {
+				return barruntime.EmbeddingTrainWorkload{}, err
+			}
+			allPositive := true
+			positiveCount := 0
+			for _, example := range evalPairs {
+				if example.Target > 0 {
+					positiveCount++
+				} else {
+					allPositive = false
+				}
+			}
+			if allPositive {
+				return barruntime.EstimateContrastiveTrainWorkload(0, positiveCount, cfg), nil
+			}
+			return barruntime.EstimatePairwiseTrainWorkload(0, len(evalPairs), cfg), nil
+		}
 		trainSet, err := barruntime.ReadEmbeddingTextContrastiveExamplesFile(trainPath)
 		if err != nil {
 			return barruntime.EmbeddingTrainWorkload{}, err
@@ -762,6 +789,13 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg b
 		return workload, nil
 	}
 
+	if cfg.EvalOnly {
+		evalSet, err := barruntime.ReadEmbeddingContrastiveExamplesFile(evalPath)
+		if err != nil {
+			return barruntime.EmbeddingTrainWorkload{}, err
+		}
+		return barruntime.EstimateContrastiveTrainWorkload(0, len(evalSet), cfg), nil
+	}
 	trainSet, err := barruntime.ReadEmbeddingContrastiveExamplesFile(trainPath)
 	if err != nil {
 		return barruntime.EmbeddingTrainWorkload{}, err
@@ -1125,7 +1159,7 @@ func printUsage() {
 	fmt.Println("rename-embed rewrites a training package under a new embedding model identity.")
 	fmt.Println("train-tokenizer builds a sibling .tokenizer.mll from a raw text corpus, using embedding-manifest vocab_size by default.")
 	fmt.Println("train-corpus trains tokenizer + mined text pairs + embedder in one Manta job from a raw text corpus.")
-	fmt.Println("train-embed reloads a training package, fits it on token JSONL or text JSONL (with --tokenizer or a sibling .tokenizer.mll), and writes it back.")
+	fmt.Println("train-embed reloads a training package, fits or --eval-only evaluates token JSONL or text JSONL (with --tokenizer or a sibling .tokenizer.mll), and writes it back.")
 	fmt.Println("run loads an artifact, binds stub weights and inputs, and executes one entrypoint.")
 	fmt.Println("demo creates a tiny inference-style module and loads it through the runtime.")
 }

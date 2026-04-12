@@ -28,9 +28,16 @@ func TrainEmbeddingPackageFromContrastiveFiles(barrPath, trainPath, evalPath str
 	if err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 	}
-	trainSet, err := ReadEmbeddingContrastiveExamplesFile(trainPath)
-	if err != nil {
-		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read train dataset: %w", err)
+	if cfg.EvalOnly && evalPath == "" {
+		evalPath = trainPath
+		trainPath = ""
+	}
+	var trainSet []EmbeddingContrastiveExample
+	if !cfg.EvalOnly {
+		trainSet, err = ReadEmbeddingContrastiveExamplesFile(trainPath)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read train dataset: %w", err)
+		}
 	}
 	var evalSet []EmbeddingContrastiveExample
 	if evalPath != "" {
@@ -57,6 +64,10 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(barrPath, tokenizerPath, trai
 	if err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 	}
+	if cfg.EvalOnly && evalPath == "" {
+		evalPath = trainPath
+		trainPath = ""
+	}
 	tokenizerFile, err := ReadTokenizerFile(tokenizerPath)
 	if err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read tokenizer: %w", err)
@@ -65,13 +76,16 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(barrPath, tokenizerPath, trai
 	if err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("build tokenizer: %w", err)
 	}
-	trainText, err := ReadEmbeddingTextContrastiveExamplesFile(trainPath)
-	if err != nil {
-		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read train text dataset: %w", err)
-	}
-	trainSet, err := TokenizeEmbeddingTextContrastiveExamples(trainText, tokenizer)
-	if err != nil {
-		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize train dataset: %w", err)
+	var trainSet []EmbeddingContrastiveExample
+	if !cfg.EvalOnly {
+		trainText, err := ReadEmbeddingTextContrastiveExamplesFile(trainPath)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read train text dataset: %w", err)
+		}
+		trainSet, err = TokenizeEmbeddingTextContrastiveExamples(trainText, tokenizer)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize train dataset: %w", err)
+		}
 	}
 	var (
 		evalSet   []EmbeddingContrastiveExample
@@ -100,38 +114,51 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(barrPath, tokenizerPath, trai
 			}
 		}
 	}
-	summary, err := trainer.FitContrastive(trainSet, evalSet, cfg)
-	if err != nil {
-		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
-	}
+	var summary EmbeddingTrainRunSummary
 	if len(evalPairs) > 0 && len(evalSet) == 0 {
-		evalStart := time.Now()
-		finalEval, err := trainer.EvaluatePairs(evalPairs)
+		if cfg.EvalOnly {
+			summary, err = trainer.Fit(nil, evalPairs, cfg)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+			}
+		} else {
+			summary, err = trainer.FitContrastive(trainSet, evalSet, cfg)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+			}
+			evalStart := time.Now()
+			finalEval, err := trainer.EvaluatePairs(evalPairs)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+			}
+			elapsed := time.Since(evalStart)
+			summary.LastEval = cloneEvalMetrics(finalEval)
+			summary.FinalEval = cloneEvalMetrics(finalEval)
+			summary.EvalDuration += elapsed
+			summary.Elapsed += elapsed
+			summary.Workload.EvalMode = workloadEvalMode(len(evalPairs), "pairwise")
+			summary.Workload.EvalExamples = len(evalPairs)
+			summary.Workload.EvalPairsPerPass = int64(len(evalPairs))
+			summary.Workload.PlannedEvalPasses = 1
+			summary.Workload.ActualEvalPasses++
+			summary.Workload.PlannedEvalPairs = int64(len(evalPairs))
+			summary.Workload.ActualEvalPairs += int64(len(evalPairs))
+			summary.Workload.PlannedTotalPairs = summary.Workload.PlannedTrainPairs + summary.Workload.PlannedEvalPairs
+			summary.Workload.ActualTotalPairs = summary.Workload.ActualTrainPairs + summary.Workload.ActualEvalPairs
+			if summary.BestEval == nil || betterEvalMetrics(finalEval, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta) {
+				summary.BestEval = cloneEvalMetrics(finalEval)
+				if summary.BestEpoch == 0 {
+					summary.BestEpoch = summary.EpochsCompleted
+				}
+				if summary.BestStep == 0 {
+					summary.BestStep = summary.StepsCompleted
+				}
+			}
+		}
+	} else {
+		summary, err = trainer.FitContrastive(trainSet, evalSet, cfg)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
-		}
-		elapsed := time.Since(evalStart)
-		summary.LastEval = cloneEvalMetrics(finalEval)
-		summary.FinalEval = cloneEvalMetrics(finalEval)
-		summary.EvalDuration += elapsed
-		summary.Elapsed += elapsed
-		summary.Workload.EvalMode = workloadEvalMode(len(evalPairs), "pairwise")
-		summary.Workload.EvalExamples = len(evalPairs)
-		summary.Workload.EvalPairsPerPass = int64(len(evalPairs))
-		summary.Workload.PlannedEvalPasses = 1
-		summary.Workload.ActualEvalPasses++
-		summary.Workload.PlannedEvalPairs = int64(len(evalPairs))
-		summary.Workload.ActualEvalPairs += int64(len(evalPairs))
-		summary.Workload.PlannedTotalPairs = summary.Workload.PlannedTrainPairs + summary.Workload.PlannedEvalPairs
-		summary.Workload.ActualTotalPairs = summary.Workload.ActualTrainPairs + summary.Workload.ActualEvalPairs
-		if summary.BestEval == nil || betterEvalMetrics(finalEval, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta) {
-			summary.BestEval = cloneEvalMetrics(finalEval)
-			if summary.BestEpoch == 0 {
-				summary.BestEpoch = summary.EpochsCompleted
-			}
-			if summary.BestStep == 0 {
-				summary.BestStep = summary.StepsCompleted
-			}
 		}
 	}
 	paths, err := trainer.WriteTrainingPackage(barrPath)

@@ -111,15 +111,21 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 	if t == nil {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("embedding trainer is not initialized")
 	}
-	if len(trainSet) == 0 {
-		return EmbeddingTrainRunSummary{}, fmt.Errorf("training dataset is empty")
-	}
 	cfg = normalizedTrainRunConfig(cfg)
-	if cfg.Epochs <= 0 {
-		return EmbeddingTrainRunSummary{}, fmt.Errorf("epochs must be positive")
-	}
-	if cfg.BatchSize <= 0 {
-		return EmbeddingTrainRunSummary{}, fmt.Errorf("batch_size must be positive")
+	if cfg.EvalOnly {
+		if len(evalSet) == 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval dataset is empty")
+		}
+	} else {
+		if len(trainSet) == 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("training dataset is empty")
+		}
+		if cfg.Epochs <= 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("epochs must be positive")
+		}
+		if cfg.BatchSize <= 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("batch_size must be positive")
+		}
 	}
 	if cfg.EvalEveryEpoch <= 0 {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("eval_every_epoch must be positive")
@@ -140,11 +146,6 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 		return EmbeddingTrainRunSummary{}, err
 	}
 
-	indices := make([]int, len(trainSet))
-	for i := range indices {
-		indices[i] = i
-	}
-	rng := rand.New(rand.NewSource(cfg.Seed))
 	runStart := time.Now()
 	startStep := t.step
 	summary := EmbeddingTrainRunSummary{
@@ -152,6 +153,34 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 		StartProfile: t.TrainProfile(),
 		Workload:     EstimatePairwiseTrainWorkload(len(trainSet), len(evalSet), cfg),
 	}
+	if cfg.EvalOnly {
+		evalStart := time.Now()
+		finalEval, err := t.EvaluatePairs(evalSet)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval: %w", err)
+		}
+		summary.EvalDuration = time.Since(evalStart)
+		summary.StepsCompleted = t.step
+		summary.FinalEval = cloneEvalMetrics(finalEval)
+		summary.LastEval = cloneEvalMetrics(finalEval)
+		summary.BestEval = cloneEvalMetrics(finalEval)
+		summary.BestStep = t.step
+		summary.Workload.ActualEvalPasses = 1
+		summary.Workload.ActualEvalPairs = int64(len(evalSet))
+		summary.Workload.ActualEvalExamples = int64(len(evalSet))
+		summary.EndProfile = t.TrainProfile()
+		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
+		summary.Workload.ActualTotalPairs = summary.Workload.ActualEvalPairs
+		summary.Workload.ActualTotalExamples = summary.Workload.ActualEvalExamples
+		summary.Elapsed = time.Since(runStart)
+		return summary, nil
+	}
+
+	indices := make([]int, len(trainSet))
+	for i := range indices {
+		indices[i] = i
+	}
+	rng := rand.New(rand.NewSource(cfg.Seed))
 
 	var (
 		bestCheckpoint EmbeddingTrainCheckpoint

@@ -305,6 +305,74 @@ func TestRunTrainEmbedPlanOnlyShowsWorkload(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedEvalOnlyUsesSingleContrastiveDataset(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	evalPath := filepath.Join(t.TempDir(), "eval.jsonl")
+	examples := []barruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
+	}
+	if err := barruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
+		t.Fatalf("write eval dataset: %v", err)
+	}
+
+	output := captureRunOutput(t, []string{"train-embed", "--eval-only", path, evalPath})
+	for _, want := range []string{
+		"evaluated package",
+		"epochs: 0",
+		"run_steps: 0",
+		"final eval:",
+		"train=0 contrastive examples",
+		"eval=2 contrastive examples",
+		"pairs(planned=4 actual=4)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("eval-only output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunTrainEmbedEvalOnlyUsesSingleTextPairDataset(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	tokenizer := barruntime.TokenizerFile{
+		Version: barruntime.TokenizerFileVersion,
+		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
+	}
+	if err := tokenizer.WriteFile(barruntime.DefaultTokenizerPath(path)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	evalPath := filepath.Join(t.TempDir(), "eval-text.jsonl")
+	evalData := "" +
+		"{\"query\":\"ab\",\"document\":\"ab\",\"label\":1}\n" +
+		"{\"left\":\"ab\",\"right\":\"cd\",\"label\":0}\n"
+	if err := os.WriteFile(evalPath, []byte(evalData), 0o644); err != nil {
+		t.Fatalf("write eval text dataset: %v", err)
+	}
+
+	output := captureRunOutput(t, []string{"train-embed", "--eval-only", path, evalPath})
+	for _, want := range []string{
+		"evaluated package",
+		"tokenizer:",
+		"epochs: 0",
+		"run_steps: 0",
+		"final eval:",
+		"pairs=2",
+		"train=0 pairwise examples",
+		"eval=2 pairwise examples",
+		"pairs(planned=2 actual=2)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("eval-only text output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
 func TestRunTrainEmbedFitsTextContrastivePackage(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {

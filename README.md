@@ -304,6 +304,7 @@ barr compile <source.bar> [output.mll]             Compile .bar source to a Mant
 barr init-model [flags] <artifact.mll>             Create the default quantized embedding training package
 barr train-corpus [flags] <artifact.mll> <corpus>  Train tokenizer, mine pairs, and fit the embedder
 barr train-embed [flags] <artifact.mll> <train>    Fit an initialized package on token or text JSONL
+barr train-embed --eval-only <artifact.mll> <eval> Evaluate a package without optimizer steps
 barr export-mll <artifact.mll> [output.mll]        Seal an artifact package into a weight-carrying MLL file
 barr inspect <artifact.mll>                        Inspect and verify an artifact package
 barr run <artifact.mll> [entry]                    Load and execute an artifact entry point

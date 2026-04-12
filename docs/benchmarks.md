@@ -25,6 +25,14 @@ MANTA_BENCH_ROOT=$PWD MANTA_BENCH_MODEL_ASSETS=/path/to/assets/manta-embed-v1 fe
 
 The model smoke copies the package into a temporary directory before training. It does not mutate the source asset directory.
 
+Evaluate an existing candidate package against a token JSONL or text-pair JSONL eval file without running optimizer steps:
+
+```bash
+go run ./cmd/barr train-embed --eval-only /path/to/manta-embed-v1.mll /path/to/eval-mini.jsonl
+```
+
+When the package has a sibling `.tokenizer.mll`, text eval JSONL is tokenized automatically. Pass `--tokenizer /path/to/tokenizer.mll` to use an explicit tokenizer.
+
 If you want a binary runner instead of `run` mode:
 
 ```bash
