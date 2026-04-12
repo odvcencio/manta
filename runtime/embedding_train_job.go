@@ -76,13 +76,14 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(barrPath, tokenizerPath, trai
 	if err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("build tokenizer: %w", err)
 	}
+	tokenCache := embeddingTextTokenCache{}
 	var trainSet []EmbeddingContrastiveExample
 	if !cfg.EvalOnly {
 		trainText, err := ReadEmbeddingTextContrastiveExamplesFile(trainPath)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read train text dataset: %w", err)
 		}
-		trainSet, err = TokenizeEmbeddingTextContrastiveExamples(trainText, tokenizer)
+		trainSet, err = tokenizeEmbeddingTextContrastiveExamples(trainText, tokenizer, tokenCache, false)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize train dataset: %w", err)
 		}
@@ -96,7 +97,7 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(barrPath, tokenizerPath, trai
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read eval text dataset: %w", err)
 		}
-		evalPairs, err = TokenizeEmbeddingTextPairExamples(evalText, tokenizer)
+		evalPairs, err = tokenizeEmbeddingTextPairExamples(evalText, tokenizer, tokenCache, false)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize eval dataset: %w", err)
 		}
@@ -108,7 +109,7 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(barrPath, tokenizerPath, trai
 			}
 		}
 		if allPositive {
-			evalSet, err = TokenizeEmbeddingTextContrastiveExamples(toTextContrastiveExamples(evalText), tokenizer)
+			evalSet, err = tokenizeEmbeddingTextContrastiveExamples(toTextContrastiveExamples(evalText), tokenizer, tokenCache, false)
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize eval contrastive dataset: %w", err)
 			}

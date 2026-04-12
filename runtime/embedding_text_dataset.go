@@ -107,28 +107,66 @@ func WriteEmbeddingTextContrastiveExamplesFile(path string, examples []Embedding
 	return nil
 }
 
+type embeddingTokenizedText struct {
+	tokens []int32
+	mask   []int32
+}
+
+type embeddingTextTokenCache map[string]embeddingTokenizedText
+
+func (c embeddingTextTokenCache) encode(text string, tokenizer *BPETokenizer) (embeddingTokenizedText, error) {
+	if cached, ok := c[text]; ok {
+		return cached, nil
+	}
+	tokens, mask, err := tokenizer.Encode(text)
+	if err != nil {
+		return embeddingTokenizedText{}, err
+	}
+	tokenized := embeddingTokenizedText{tokens: tokens, mask: mask}
+	c[text] = tokenized
+	return tokenized, nil
+}
+
+func cloneTokenizedText(in embeddingTokenizedText) embeddingTokenizedText {
+	return embeddingTokenizedText{
+		tokens: append([]int32(nil), in.tokens...),
+		mask:   append([]int32(nil), in.mask...),
+	}
+}
+
 func TokenizeEmbeddingTextPairExamples(examples []EmbeddingTextPairExample, tokenizer *BPETokenizer) ([]EmbeddingPairExample, error) {
+	return tokenizeEmbeddingTextPairExamples(examples, tokenizer, embeddingTextTokenCache{}, true)
+}
+
+func tokenizeEmbeddingTextPairExamples(examples []EmbeddingTextPairExample, tokenizer *BPETokenizer, cache embeddingTextTokenCache, cloneOutput bool) ([]EmbeddingPairExample, error) {
 	if len(examples) == 0 {
 		return nil, fmt.Errorf("text pair dataset is empty")
 	}
 	if tokenizer == nil {
 		return nil, fmt.Errorf("nil tokenizer")
 	}
+	if cache == nil {
+		cache = embeddingTextTokenCache{}
+	}
 	out := make([]EmbeddingPairExample, 0, len(examples))
 	for i, example := range examples {
-		queryTokens, queryMask, err := tokenizer.Encode(example.Query)
+		query, err := cache.encode(example.Query, tokenizer)
 		if err != nil {
 			return nil, fmt.Errorf("example %d query: %w", i, err)
 		}
-		rightTokens, rightMask, err := tokenizer.Encode(example.Right)
+		right, err := cache.encode(example.Right, tokenizer)
 		if err != nil {
 			return nil, fmt.Errorf("example %d right: %w", i, err)
 		}
+		if cloneOutput {
+			query = cloneTokenizedText(query)
+			right = cloneTokenizedText(right)
+		}
 		out = append(out, EmbeddingPairExample{
-			LeftTokens:  queryTokens,
-			RightTokens: rightTokens,
-			LeftMask:    queryMask,
-			RightMask:   rightMask,
+			LeftTokens:  query.tokens,
+			RightTokens: right.tokens,
+			LeftMask:    query.mask,
+			RightMask:   right.mask,
 			Target:      example.Target,
 		})
 	}
@@ -136,27 +174,38 @@ func TokenizeEmbeddingTextPairExamples(examples []EmbeddingTextPairExample, toke
 }
 
 func TokenizeEmbeddingTextContrastiveExamples(examples []EmbeddingTextContrastiveExample, tokenizer *BPETokenizer) ([]EmbeddingContrastiveExample, error) {
+	return tokenizeEmbeddingTextContrastiveExamples(examples, tokenizer, embeddingTextTokenCache{}, true)
+}
+
+func tokenizeEmbeddingTextContrastiveExamples(examples []EmbeddingTextContrastiveExample, tokenizer *BPETokenizer, cache embeddingTextTokenCache, cloneOutput bool) ([]EmbeddingContrastiveExample, error) {
 	if len(examples) == 0 {
 		return nil, fmt.Errorf("text contrastive dataset is empty")
 	}
 	if tokenizer == nil {
 		return nil, fmt.Errorf("nil tokenizer")
 	}
+	if cache == nil {
+		cache = embeddingTextTokenCache{}
+	}
 	out := make([]EmbeddingContrastiveExample, 0, len(examples))
 	for i, example := range examples {
-		queryTokens, queryMask, err := tokenizer.Encode(example.Query)
+		query, err := cache.encode(example.Query, tokenizer)
 		if err != nil {
 			return nil, fmt.Errorf("example %d query: %w", i, err)
 		}
-		positiveTokens, positiveMask, err := tokenizer.Encode(example.Positive)
+		positive, err := cache.encode(example.Positive, tokenizer)
 		if err != nil {
 			return nil, fmt.Errorf("example %d positive: %w", i, err)
 		}
+		if cloneOutput {
+			query = cloneTokenizedText(query)
+			positive = cloneTokenizedText(positive)
+		}
 		out = append(out, EmbeddingContrastiveExample{
-			QueryTokens:    queryTokens,
-			PositiveTokens: positiveTokens,
-			QueryMask:      queryMask,
-			PositiveMask:   positiveMask,
+			QueryTokens:    query.tokens,
+			PositiveTokens: positive.tokens,
+			QueryMask:      query.mask,
+			PositiveMask:   positive.mask,
 		})
 	}
 	return out, nil
