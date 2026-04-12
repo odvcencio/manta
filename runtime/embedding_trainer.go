@@ -3903,17 +3903,8 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 		attnResidualMatrices = make([][]float32, len(states))
 	}
 	for i, state := range states {
-		gradAttnOutput := make([]float32, seqLen*d)
-		gradResidualInput := make([]float32, seqLen*d)
-		for row := 0; row < seqLen; row++ {
-			base := row * d
-			copy(gradAttnOutput[base:base+d], gradHiddenMatrices[i][base:base+d])
-			if t.attentionResidualEnabled() {
-				copy(gradResidualInput[base:base+d], gradAttnOutput[base:base+d])
-			}
-		}
+		gradAttnOutput := gradHiddenMatrices[i]
 		gradAttnOutputs[i] = gradAttnOutput
-		gradResidualInputs[i] = gradResidualInput
 		attnMixedMatrices[i] = state.attnMixed
 		if batchActivations {
 			attnHiddenMatrices[i] = state.hidden
@@ -3925,22 +3916,12 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 		if batchActivations {
 			if out, ok := t.tryBatchedLayerNormBackwardRows(gradAttnOutputs, attnHiddenMatrices, attnResidualMatrices, seqLen, d); ok {
 				gradAttnOutputs = out
-				if t.attentionResidualEnabled() {
-					for i := range gradResidualInputs {
-						gradResidualInputs[i] = out[i]
-					}
-				}
 				batchedLayerNorm = true
 			}
 		}
 		if !batchedLayerNorm {
 			for i, state := range states {
 				gradAttnOutput := gradAttnOutputs[i]
-				if t.attentionResidualEnabled() {
-					for j := range gradResidualInputs[i] {
-						gradResidualInputs[i][j] = 0
-					}
-				}
 				for row := 0; row < seqLen; row++ {
 					base := row * d
 					backwardLayerNormRow(
@@ -3949,11 +3930,13 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 						state.hidden[base:base+d],
 						state.attnResidual[base:base+d],
 					)
-					if t.attentionResidualEnabled() {
-						copy(gradResidualInputs[i][base:base+d], gradAttnOutput[base:base+d])
-					}
 				}
 			}
+		}
+	}
+	if t.attentionResidualEnabled() {
+		for i := range gradResidualInputs {
+			gradResidualInputs[i] = gradAttnOutputs[i]
 		}
 	}
 
@@ -4154,8 +4137,7 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 	if accumulatedGradInputs, ok := t.tryAccumulatedAttentionInputGradMatMul(gradQMatrices, gradKMatrices, gradVMatrices, seqLen, d, attentionQuery, attentionKey, attentionValue); ok {
 		gradInputs := make([][]float32, len(states))
 		for i := range states {
-			gradInput := make([]float32, seqLen*d)
-			copy(gradInput, accumulatedGradInputs[i])
+			gradInput := accumulatedGradInputs[i]
 			addFloat32Slice(gradInput, gradResidualInputs[i])
 			gradInputs[i] = gradInput
 		}

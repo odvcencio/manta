@@ -476,17 +476,19 @@ func applyRankedMerge(tokens []string, left, right, merged string) []string {
 	if len(tokens) < 2 {
 		return tokens
 	}
-	out := make([]string, 0, len(tokens))
-	for i := 0; i < len(tokens); {
-		if i < len(tokens)-1 && tokens[i] == left && tokens[i+1] == right {
-			out = append(out, merged)
-			i += 2
+	write := 0
+	for read := 0; read < len(tokens); {
+		if read < len(tokens)-1 && tokens[read] == left && tokens[read+1] == right {
+			tokens[write] = merged
+			write++
+			read += 2
 			continue
 		}
-		out = append(out, tokens[i])
-		i++
+		tokens[write] = tokens[read]
+		write++
+		read++
 	}
-	return out
+	return tokens[:write]
 }
 
 func applyMerge(tokens []string, left, right string) []string {
