@@ -1,5 +1,6 @@
 bin/
 dist/
+datasets/
 runs/
 .DS_Store
 .local/

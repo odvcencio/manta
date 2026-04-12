@@ -1,0 +1,784 @@
+package main
+
+import (
+	"archive/zip"
+	"bufio"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type datasetSpec struct {
+	Name string
+	URL  string
+	MD5  string
+}
+
+type corpusRecord struct {
+	ID    string `json:"_id"`
+	Title string `json:"title"`
+	Text  string `json:"text"`
+}
+
+type queryRecord struct {
+	ID   string `json:"_id"`
+	Text string `json:"text"`
+}
+
+type qrelRecord struct {
+	QueryID string
+	DocID   string
+	Score   float64
+}
+
+type trainRecord struct {
+	Query    string `json:"query"`
+	Positive string `json:"positive"`
+	Source   string `json:"source,omitempty"`
+}
+
+type evalRecord struct {
+	Query    string `json:"query,omitempty"`
+	Document string `json:"document,omitempty"`
+	Left     string `json:"left,omitempty"`
+	Right    string `json:"right,omitempty"`
+	Label    int    `json:"label"`
+	Source   string `json:"source,omitempty"`
+}
+
+type outputCounts struct {
+	TrainPairs int
+	EvalPairs  int
+	HardPairs  int
+	CorpusDocs int
+}
+
+type acquireConfig struct {
+	Root           string
+	OutputRoot     string
+	RawDir         string
+	ProcessedDir   string
+	ManifestPath   string
+	SHAPath        string
+	Datasets       []datasetSpec
+	MaxTrain       int
+	MaxEval        int
+	MaxHard        int
+	Negatives      int
+	ThresholdsPath string
+	TrainPath      string
+	EvalPath       string
+	HardEvalPath   string
+	TokenizerPath  string
+}
+
+func usage() {
+	fmt.Println(`Acquire public retrieval data for manta-embed-v1.
+
+Run:
+  MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/acquire_manta_embed_v1_datasets.fw
+
+Defaults:
+  MANTA_DATASET_ROOT=$PWD/datasets/manta-embed-v1
+  MANTA_BEIR_DATASETS=scifact,nfcorpus,fiqa
+
+Outputs:
+  processed/train.jsonl
+  processed/eval.jsonl
+  processed/hard-eval.jsonl
+  processed/tokenizer-corpus.txt
+  processed/thresholds.env
+  manifest.json
+  SHA256SUMS`)
+}
+
+func getenv(name string, fallback string) string {
+	let value = os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envEnabled(name string) bool {
+	let value = strings.ToLower(os.Getenv(name))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func step(label string) {
+	fmt.Println(f"\n== {label} ==")
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+func findRoot() (string, error) {
+	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	if hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	let pwd = os.Getenv("PWD")
+	if hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+}
+
+func rejectTmpPath(label string, path string) error {
+	if envEnabled("MANTA_ALLOW_TMP") {
+		return nil
+	}
+	if strings.HasPrefix(path, "/tmp/") || strings.HasPrefix(path, "/var/tmp/") {
+		return fmt.Errorf("%s is under a temporary directory: %s (set MANTA_ALLOW_TMP=1 only for local smoke checks)", label, path)
+	}
+	return nil
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	let raw = os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	guard err == nil else return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	return value, nil
+}
+
+func datasetForName(name string) (datasetSpec, error) {
+	switch strings.TrimSpace(strings.ToLower(name)) {
+	case "scifact":
+		return datasetSpec{Name: "scifact", URL: "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip", MD5: "5f7d1de60b170fc8027bb7898e2efca1"}, nil
+	case "nfcorpus":
+		return datasetSpec{Name: "nfcorpus", URL: "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/nfcorpus.zip", MD5: "a89dba18a62ef92f7d323ec890a0d38d"}, nil
+	case "fiqa":
+		return datasetSpec{Name: "fiqa", URL: "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/fiqa.zip", MD5: "17918ed23cd04fb15047f73e6c3bd9d9"}, nil
+	case "":
+		return datasetSpec{}, fmt.Errorf("empty dataset name")
+	default:
+		return datasetSpec{}, fmt.Errorf("unsupported BEIR dataset %q; default supported set is scifact,nfcorpus,fiqa", name)
+	}
+}
+
+func parseDatasets() ([]datasetSpec, error) {
+	let raw = getenv("MANTA_BEIR_DATASETS", "scifact,nfcorpus,fiqa")
+	specs := []datasetSpec{}
+	for _, name := range strings.Split(raw, ",") {
+		spec, err := datasetForName(name)
+		guard err == nil else return nil, err
+		specs = append(specs, spec)
+	}
+	guard len(specs) > 0 else return nil, fmt.Errorf("no datasets selected")
+	return specs, nil
+}
+
+func prepareConfig(root string) (acquireConfig, error) {
+	outRoot, err := filepath.Abs(getenv("MANTA_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
+	guard err == nil else return acquireConfig{}, err
+	err = rejectTmpPath("dataset root", outRoot)
+	guard err == nil else return acquireConfig{}, err
+	maxTrain, err := parseIntEnv("MANTA_DATASET_MAX_TRAIN", 50000)
+	guard err == nil else return acquireConfig{}, err
+	maxEval, err := parseIntEnv("MANTA_DATASET_MAX_EVAL", 2000)
+	guard err == nil else return acquireConfig{}, err
+	maxHard, err := parseIntEnv("MANTA_DATASET_MAX_HARD", 2000)
+	guard err == nil else return acquireConfig{}, err
+	negatives, err := parseIntEnv("MANTA_DATASET_NEGATIVES_PER_POSITIVE", 1)
+	guard err == nil else return acquireConfig{}, err
+	guard negatives > 0 else return acquireConfig{}, fmt.Errorf("MANTA_DATASET_NEGATIVES_PER_POSITIVE must be positive")
+	specs, err := parseDatasets()
+	guard err == nil else return acquireConfig{}, err
+	cfg := acquireConfig{
+		Root:           root,
+		OutputRoot:     outRoot,
+		RawDir:         filepath.Join(outRoot, "raw"),
+		ProcessedDir:   filepath.Join(outRoot, "processed"),
+		ManifestPath:   filepath.Join(outRoot, "manifest.json"),
+		SHAPath:        filepath.Join(outRoot, "SHA256SUMS"),
+		Datasets:       specs,
+		MaxTrain:       maxTrain,
+		MaxEval:        maxEval,
+		MaxHard:        maxHard,
+		Negatives:      negatives,
+		ThresholdsPath: filepath.Join(outRoot, "processed", "thresholds.env"),
+		TrainPath:      filepath.Join(outRoot, "processed", "train.jsonl"),
+		EvalPath:       filepath.Join(outRoot, "processed", "eval.jsonl"),
+		HardEvalPath:   filepath.Join(outRoot, "processed", "hard-eval.jsonl"),
+		TokenizerPath:  filepath.Join(outRoot, "processed", "tokenizer-corpus.txt"),
+	}
+	err = os.MkdirAll(cfg.RawDir, 0o755)
+	guard err == nil else return acquireConfig{}, err
+	err = os.MkdirAll(cfg.ProcessedDir, 0o755)
+	guard err == nil else return acquireConfig{}, err
+	return cfg, nil
+}
+
+func md5File(path string) (string, error) {
+	f, err := os.Open(path)
+	guard err == nil else return "", err
+	defer f.Close()
+	h := md5.New()
+	_, err = io.Copy(h, f)
+	guard err == nil else return "", err
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	guard err == nil else return "", err
+	defer f.Close()
+	h := sha256.New()
+	_, err = io.Copy(h, f)
+	guard err == nil else return "", err
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func downloadFile(spec datasetSpec, path string) error {
+	if _, err := os.Stat(path); err == nil {
+		if spec.MD5 != "" {
+			sum, err := md5File(path)
+			guard err == nil else return err
+			if sum == spec.MD5 {
+				fmt.Println(f"using cached {path}")
+				return nil
+			}
+			fmt.Println(f"cached md5 mismatch for {path}; redownloading")
+		} else {
+			return nil
+		}
+	}
+	fmt.Println(f"downloading {spec.URL}")
+	resp, err := http.Get(spec.URL)
+	guard err == nil else return err
+	defer resp.Body.Close()
+	guard resp.StatusCode >= 200 && resp.StatusCode < 300 else return fmt.Errorf("download %s: HTTP %d", spec.URL, resp.StatusCode)
+	tmp := path + ".tmp"
+	out, err := os.Create(tmp)
+	guard err == nil else return err
+	_, err = io.Copy(out, resp.Body)
+	closeErr := out.Close()
+	guard err == nil else return err
+	guard closeErr == nil else return closeErr
+	if spec.MD5 != "" {
+		sum, err := md5File(tmp)
+		guard err == nil else return err
+		guard sum == spec.MD5 else return fmt.Errorf("%s md5 = %s, want %s", path, sum, spec.MD5)
+	}
+	return os.Rename(tmp, path)
+}
+
+func unzip(zipPath string, dst string) error {
+	marker := filepath.Join(dst, ".manta-extracted")
+	if _, err := os.Stat(marker); err == nil {
+		return nil
+	}
+	err := os.RemoveAll(dst)
+	guard err == nil else return err
+	err = os.MkdirAll(dst, 0o755)
+	guard err == nil else return err
+	r, err := zip.OpenReader(zipPath)
+	guard err == nil else return err
+	defer r.Close()
+	for _, file := range r.File {
+		path := filepath.Join(dst, file.Name)
+		cleanDst, err := filepath.Abs(dst)
+		guard err == nil else return err
+		cleanPath, err := filepath.Abs(path)
+		guard err == nil else return err
+		guard strings.HasPrefix(cleanPath, cleanDst+string(os.PathSeparator)) || cleanPath == cleanDst else return fmt.Errorf("zip path escapes destination: %s", file.Name)
+		if file.FileInfo().IsDir() {
+			err = os.MkdirAll(path, file.Mode())
+			guard err == nil else return err
+			continue
+		}
+		err = os.MkdirAll(filepath.Dir(path), 0o755)
+		guard err == nil else return err
+		src, err := file.Open()
+		guard err == nil else return err
+		out, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, file.Mode())
+		guard err == nil else {
+			src.Close()
+			return err
+		}
+		_, err = io.Copy(out, src)
+		srcErr := src.Close()
+		outErr := out.Close()
+		guard err == nil else return err
+		guard srcErr == nil else return srcErr
+		guard outErr == nil else return outErr
+	}
+	return os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644)
+}
+
+func datasetDir(extractRoot string, name string) string {
+	candidate := filepath.Join(extractRoot, name)
+	if _, err := os.Stat(filepath.Join(candidate, "corpus.jsonl")); err == nil {
+		return candidate
+	}
+	return extractRoot
+}
+
+func readCorpus(path string) (map[string]string, []string, error) {
+	f, err := os.Open(path)
+	guard err == nil else return nil, nil, err
+	defer f.Close()
+	out := map[string]string{}
+	ids := []string{}
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 1024*1024)
+	scanner.Buffer(buf, 16*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var rec corpusRecord
+		err = json.Unmarshal([]byte(line), &rec)
+		guard err == nil else return nil, nil, err
+		text := strings.TrimSpace(strings.TrimSpace(rec.Title) + "\n" + strings.TrimSpace(rec.Text))
+		if rec.ID != "" && text != "" {
+			out[rec.ID] = text
+			ids = append(ids, rec.ID)
+		}
+	}
+	guard scanner.Err() == nil else return nil, nil, scanner.Err()
+	sort.Strings(ids)
+	return out, ids, nil
+}
+
+func readQueries(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	guard err == nil else return nil, err
+	defer f.Close()
+	out := map[string]string{}
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 1024*1024)
+	scanner.Buffer(buf, 16*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var rec queryRecord
+		err = json.Unmarshal([]byte(line), &rec)
+		guard err == nil else return nil, err
+		if rec.ID != "" && strings.TrimSpace(rec.Text) != "" {
+			out[rec.ID] = strings.TrimSpace(rec.Text)
+		}
+	}
+	return out, scanner.Err()
+}
+
+func readQrels(path string) ([]qrelRecord, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+	out := []qrelRecord{}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "query-id") {
+			continue
+		}
+		cols := strings.Split(line, "\t")
+		if len(cols) < 3 {
+			continue
+		}
+		score, err := strconv.ParseFloat(cols[2], 64)
+		if err != nil {
+			continue
+		}
+		if score > 0 {
+			out = append(out, qrelRecord{QueryID: cols[0], DocID: cols[1], Score: score})
+		}
+	}
+	return out, scanner.Err()
+}
+
+func textTrainRecords(dataset string, qrels []qrelRecord, queries map[string]string, corpus map[string]string, limit int) []trainRecord {
+	out := []trainRecord{}
+	seen := map[string]bool{}
+	for _, qrel := range qrels {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		query := strings.TrimSpace(queries[qrel.QueryID])
+		doc := strings.TrimSpace(corpus[qrel.DocID])
+		if query == "" || doc == "" {
+			continue
+		}
+		key := qrel.QueryID + "\x00" + qrel.DocID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, trainRecord{Query: query, Positive: doc, Source: dataset})
+	}
+	return out
+}
+
+func negativeDocID(dataset string, queryID string, positiveID string, ids []string, offset int) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(dataset + "\x00" + queryID + "\x00" + positiveID))
+	start := int(h.Sum64() % uint64(len(ids)))
+	for i := 0; i < len(ids); i++ {
+		id := ids[(start+i+offset)%len(ids)]
+		if id != positiveID {
+			return id
+		}
+	}
+	return ""
+}
+
+func textEvalRecords(dataset string, qrels []qrelRecord, queries map[string]string, corpus map[string]string, ids []string, negatives int, limit int) []evalRecord {
+	out := []evalRecord{}
+	seen := map[string]bool{}
+	for _, qrel := range qrels {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		query := strings.TrimSpace(queries[qrel.QueryID])
+		doc := strings.TrimSpace(corpus[qrel.DocID])
+		if query == "" || doc == "" {
+			continue
+		}
+		key := qrel.QueryID + "\x00" + qrel.DocID + "\x001"
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, evalRecord{Query: query, Document: doc, Label: 1, Source: dataset})
+		}
+		for i := 0; i < negatives; i++ {
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+			negID := negativeDocID(dataset, qrel.QueryID, qrel.DocID, ids, i)
+			if negID == "" {
+				continue
+			}
+			negDoc := strings.TrimSpace(corpus[negID])
+			if negDoc == "" {
+				continue
+			}
+			negKey := qrel.QueryID + "\x00" + negID + "\x000"
+			if seen[negKey] {
+				continue
+			}
+			seen[negKey] = true
+			out = append(out, evalRecord{Left: query, Right: negDoc, Label: 0, Source: dataset})
+		}
+	}
+	return out
+}
+
+func writeJSONL(path string, values any) error {
+	f, err := os.Create(path)
+	guard err == nil else return err
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	switch records := values.(type) {
+	case []trainRecord:
+		for _, record := range records {
+			err = enc.Encode(record)
+			guard err == nil else return err
+		}
+	case []evalRecord:
+		for _, record := range records {
+			err = enc.Encode(record)
+			guard err == nil else return err
+		}
+	default:
+		return fmt.Errorf("unsupported JSONL value type")
+	}
+	return nil
+}
+
+func writeTokenizerCorpus(path string, records []trainRecord, evals []evalRecord, hard []evalRecord) error {
+	f, err := os.Create(path)
+	guard err == nil else return err
+	defer f.Close()
+	seen := map[string]bool{}
+	writeText := func(text string) error {
+		text = strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
+		if text == "" || seen[text] {
+			return nil
+		}
+		seen[text] = true
+		_, err := f.WriteString(text + "\n")
+		return err
+	}
+	for _, record := range records {
+		err = writeText(record.Query)
+		guard err == nil else return err
+		err = writeText(record.Positive)
+		guard err == nil else return err
+	}
+	for _, record := range evals {
+		err = writeText(firstNonEmpty(record.Query, record.Left))
+		guard err == nil else return err
+		err = writeText(firstNonEmpty(record.Document, record.Right))
+		guard err == nil else return err
+	}
+	for _, record := range hard {
+		err = writeText(firstNonEmpty(record.Query, record.Left))
+		guard err == nil else return err
+		err = writeText(firstNonEmpty(record.Document, record.Right))
+		guard err == nil else return err
+	}
+	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func positiveSplits(dir string, dataset string) ([]qrelRecord, []qrelRecord, []qrelRecord, error) {
+	train, err := readQrels(filepath.Join(dir, "qrels", "train.tsv"))
+	guard err == nil else return nil, nil, nil, err
+	dev, err := readQrels(filepath.Join(dir, "qrels", "dev.tsv"))
+	guard err == nil else return nil, nil, nil, err
+	test, err := readQrels(filepath.Join(dir, "qrels", "test.tsv"))
+	guard err == nil else return nil, nil, nil, err
+	if len(dev) == 0 && len(test) > 1 {
+		mid := len(test) / 2
+		dev = append([]qrelRecord(nil), test[:mid]...)
+		test = append([]qrelRecord(nil), test[mid:]...)
+	}
+	if len(train) == 0 && len(dev) > 1 {
+		mid := len(dev) / 2
+		train = append([]qrelRecord(nil), dev[:mid]...)
+		dev = append([]qrelRecord(nil), dev[mid:]...)
+	}
+	guard len(train) > 0 else return nil, nil, nil, fmt.Errorf("%s has no usable train qrels", dataset)
+	guard len(dev) > 0 else return nil, nil, nil, fmt.Errorf("%s has no usable eval qrels", dataset)
+	guard len(test) > 0 else return nil, nil, nil, fmt.Errorf("%s has no usable hard qrels", dataset)
+	return train, dev, test, nil
+}
+
+func acquireDataset(cfg acquireConfig, spec datasetSpec) ([]trainRecord, []evalRecord, []evalRecord, int, error) {
+	zipPath := filepath.Join(cfg.RawDir, spec.Name+".zip")
+	err := downloadFile(spec, zipPath)
+	guard err == nil else return nil, nil, nil, 0, err
+	extractRoot := filepath.Join(cfg.RawDir, spec.Name)
+	err = unzip(zipPath, extractRoot)
+	guard err == nil else return nil, nil, nil, 0, err
+	dir := datasetDir(extractRoot, spec.Name)
+	corpus, ids, err := readCorpus(filepath.Join(dir, "corpus.jsonl"))
+	guard err == nil else return nil, nil, nil, 0, err
+	queries, err := readQueries(filepath.Join(dir, "queries.jsonl"))
+	guard err == nil else return nil, nil, nil, 0, err
+	trainQrels, evalQrels, hardQrels, err := positiveSplits(dir, spec.Name)
+	guard err == nil else return nil, nil, nil, 0, err
+	trainLimit := cfg.MaxTrain
+	evalLimit := cfg.MaxEval
+	hardLimit := cfg.MaxHard
+	if len(cfg.Datasets) > 0 {
+		trainLimit = cfg.MaxTrain / len(cfg.Datasets)
+		evalLimit = cfg.MaxEval / len(cfg.Datasets)
+		hardLimit = cfg.MaxHard / len(cfg.Datasets)
+	}
+	train := textTrainRecords(spec.Name, trainQrels, queries, corpus, trainLimit)
+	eval := textEvalRecords(spec.Name, evalQrels, queries, corpus, ids, cfg.Negatives, evalLimit)
+	hard := textEvalRecords(spec.Name, hardQrels, queries, corpus, ids, cfg.Negatives, hardLimit)
+	guard len(train) > 0 else return nil, nil, nil, 0, fmt.Errorf("%s produced no train records", spec.Name)
+	guard len(eval) > 0 else return nil, nil, nil, 0, fmt.Errorf("%s produced no eval records", spec.Name)
+	guard len(hard) > 0 else return nil, nil, nil, 0, fmt.Errorf("%s produced no hard eval records", spec.Name)
+	fmt.Println(f"{spec.Name}: train={len(train)} eval={len(eval)} hard={len(hard)} corpus_docs={len(ids)}")
+	return train, eval, hard, len(ids), nil
+}
+
+func writeThresholds(path string) error {
+	body := strings.Join([]string{
+		"# Initial release gates for pairwise hard-eval logs.",
+		"# These are intentionally above random-pair chance and should be tightened after the first stable candidate.",
+		"MANTA_SELECT_METRIC=score_margin",
+		"MANTA_MIN_PAIR_ACCURACY=0.70",
+		"MANTA_MIN_SCORE_MARGIN=0.05",
+		"MANTA_MAX_LOSS=0.35",
+		"",
+	}, "\n")
+	return os.WriteFile(path, []byte(body), 0o644)
+}
+
+func writeManifest(cfg acquireConfig, counts outputCounts) error {
+	datasetNames := []string{}
+	for _, spec := range cfg.Datasets {
+		datasetNames = append(datasetNames, spec.Name)
+	}
+	datasetJSON, err := json.Marshal(datasetNames)
+	guard err == nil else return err
+	body := fmt.Sprintf(`{
+  "schema": "manta.embedding_dataset.v1",
+  "created_utc": %q,
+  "source": "BEIR public dataset zips",
+  "source_url": "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/",
+  "datasets": %s,
+  "outputs": {
+    "train_jsonl": %q,
+    "eval_jsonl": %q,
+    "hard_eval_jsonl": %q,
+    "tokenizer_corpus": %q,
+    "thresholds_env": %q,
+    "sha256": %q
+  },
+  "counts": {
+    "train_pairs": %d,
+    "eval_pairs": %d,
+    "hard_pairs": %d,
+    "corpus_docs": %d
+  },
+  "negative_sampling": {
+    "negatives_per_positive": %d,
+    "strategy": "deterministic fnv64 query/doc offset"
+  }
+}
+`,
+		time.Now().UTC().Format(time.RFC3339),
+		string(datasetJSON),
+		cfg.TrainPath,
+		cfg.EvalPath,
+		cfg.HardEvalPath,
+		cfg.TokenizerPath,
+		cfg.ThresholdsPath,
+		cfg.SHAPath,
+		counts.TrainPairs,
+		counts.EvalPairs,
+		counts.HardPairs,
+		counts.CorpusDocs,
+		cfg.Negatives,
+	)
+	return os.WriteFile(cfg.ManifestPath, []byte(body), 0o644)
+}
+
+func writeSHA256Sums(cfg acquireConfig) error {
+	paths := []string{cfg.TrainPath, cfg.EvalPath, cfg.HardEvalPath, cfg.TokenizerPath, cfg.ThresholdsPath, cfg.ManifestPath}
+	f, err := os.Create(cfg.SHAPath)
+	guard err == nil else return err
+	defer f.Close()
+	for _, path := range paths {
+		sum, err := sha256File(path)
+		guard err == nil else return err
+		_, err = f.WriteString(fmt.Sprintf("%s  %s\n", sum, path))
+		guard err == nil else return err
+	}
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	guard err == nil else {
+		fmt.Println(f"failed to resolve repo root: {err}")
+		os.Exit(1)
+	}
+	cfg, err := prepareConfig(root)
+	guard err == nil else {
+		fmt.Println(f"dataset config failed: {err}")
+		os.Exit(1)
+	}
+	step("Acquire BEIR datasets")
+	allTrain := []trainRecord{}
+	allEval := []evalRecord{}
+	allHard := []evalRecord{}
+	counts := outputCounts{}
+	for _, spec := range cfg.Datasets {
+		train, eval, hard, docs, err := acquireDataset(cfg, spec)
+		guard err == nil else {
+			fmt.Println(f"acquire {spec.Name} failed: {err}")
+			os.Exit(1)
+		}
+		allTrain = append(allTrain, train...)
+		allEval = append(allEval, eval...)
+		allHard = append(allHard, hard...)
+		counts.CorpusDocs += docs
+	}
+	counts.TrainPairs = len(allTrain)
+	counts.EvalPairs = len(allEval)
+	counts.HardPairs = len(allHard)
+	guard counts.TrainPairs > 0 && counts.EvalPairs > 0 && counts.HardPairs > 0 else {
+		fmt.Println("acquired datasets are empty")
+		os.Exit(1)
+	}
+	step("Write processed Manta datasets")
+	err = writeJSONL(cfg.TrainPath, allTrain)
+	guard err == nil else {
+		fmt.Println(f"write train dataset failed: {err}")
+		os.Exit(1)
+	}
+	err = writeJSONL(cfg.EvalPath, allEval)
+	guard err == nil else {
+		fmt.Println(f"write eval dataset failed: {err}")
+		os.Exit(1)
+	}
+	err = writeJSONL(cfg.HardEvalPath, allHard)
+	guard err == nil else {
+		fmt.Println(f"write hard eval dataset failed: {err}")
+		os.Exit(1)
+	}
+	err = writeTokenizerCorpus(cfg.TokenizerPath, allTrain, allEval, allHard)
+	guard err == nil else {
+		fmt.Println(f"write tokenizer corpus failed: {err}")
+		os.Exit(1)
+	}
+	err = writeThresholds(cfg.ThresholdsPath)
+	guard err == nil else {
+		fmt.Println(f"write thresholds failed: {err}")
+		os.Exit(1)
+	}
+	err = writeManifest(cfg, counts)
+	guard err == nil else {
+		fmt.Println(f"write manifest failed: {err}")
+		os.Exit(1)
+	}
+	err = writeSHA256Sums(cfg)
+	guard err == nil else {
+		fmt.Println(f"write sha256 failed: {err}")
+		os.Exit(1)
+	}
+	step("Dataset bundle ready")
+	fmt.Println(f"dataset_root={cfg.OutputRoot}")
+	fmt.Println(f"train_jsonl={cfg.TrainPath}")
+	fmt.Println(f"eval_jsonl={cfg.EvalPath}")
+	fmt.Println(f"hard_eval_jsonl={cfg.HardEvalPath}")
+	fmt.Println(f"tokenizer_corpus={cfg.TokenizerPath}")
+	fmt.Println(f"thresholds_env={cfg.ThresholdsPath}")
+}

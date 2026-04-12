@@ -29,6 +29,8 @@ type candidateConfig struct {
 	EvalJSONL           string
 	HardEvalJSONL       string
 	TokenizerPath       string
+	TokenizerCorpus     string
+	ThresholdsEnv       string
 	TrainMode           string
 	VocabSize           string
 	MaxSeq              string
@@ -66,6 +68,7 @@ Required input mode, choose one:
 
 Production holdout:
   MANTA_HARD_EVAL_JSONL=/path/to/hard-eval.jsonl
+  MANTA_THRESHOLDS_ENV=/path/to/thresholds.env
 
 The workflow refuses /tmp inputs and dirty repositories by default. Override only for
 local smoke checks:
@@ -82,9 +85,7 @@ Common knobs:
   MANTA_BATCH_SIZE=1024
   MANTA_LR=0.005
   MANTA_TEMPERATURE=0.05
-  MANTA_SELECT_METRIC=mrr
-  MANTA_MIN_MRR=0.45
-  MANTA_MIN_TOP1=0.20
+  MANTA_SELECT_METRIC=score_margin
   MANTA_MIN_PAIR_ACCURACY=0.70`)
 }
 
@@ -171,6 +172,30 @@ func requireCleanRepo(root string) error {
 	out, err := commandOutput(root, "git", []string{"status", "--porcelain"})
 	guard err == nil else return err
 	guard out == "" else return fmt.Errorf("repository has uncommitted changes; commit them or set MANTA_ALLOW_DIRTY=1 for a local smoke")
+	return nil
+}
+
+func loadThresholdEnv(path string) error {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	guard err == nil else return err
+	for i, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		guard ok else return fmt.Errorf("%s:%d: expected KEY=VALUE", path, i+1)
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		guard strings.HasPrefix(key, "MANTA_") else return fmt.Errorf("%s:%d: threshold key must start with MANTA_: %s", path, i+1, key)
+		if os.Getenv(key) == "" {
+			err = os.Setenv(key, value)
+			guard err == nil else return err
+		}
+	}
 	return nil
 }
 
@@ -341,7 +366,9 @@ func writeManifest(cfg candidateConfig, status string) error {
     "train_jsonl": %s,
     "eval_jsonl": %s,
     "hard_eval_jsonl": %s,
-    "tokenizer": %s
+    "tokenizer": %s,
+    "tokenizer_corpus": %s,
+    "thresholds_env": %s
   },
   "outputs": {
     "artifact": %s,
@@ -381,6 +408,8 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonString(cfg.EvalJSONL),
 		jsonString(cfg.HardEvalJSONL),
 		jsonString(cfg.TokenizerPath),
+		jsonString(cfg.TokenizerCorpus),
+		jsonString(cfg.ThresholdsEnv),
 		jsonString(cfg.Artifact),
 		jsonString(cfg.SealedArtifact),
 		jsonString(sealedSHA),
@@ -487,6 +516,16 @@ func prepareConfig(root string) (candidateConfig, error) {
 	err = os.MkdirAll(filepath.Join(runDir, "profiles"), 0o755)
 	guard err == nil else return candidateConfig{}, err
 
+	thresholdsEnv := os.Getenv("MANTA_THRESHOLDS_ENV")
+	if thresholdsEnv != "" {
+		thresholdsEnv, err = requireFile(thresholdsEnv, "MANTA_THRESHOLDS_ENV")
+		guard err == nil else return candidateConfig{}, err
+		err = rejectTmpPath("thresholds env", thresholdsEnv)
+		guard err == nil else return candidateConfig{}, err
+		err = loadThresholdEnv(thresholdsEnv)
+		guard err == nil else return candidateConfig{}, err
+	}
+
 	cfg := candidateConfig{
 		Root:                root,
 		ModelName:           modelName,
@@ -512,7 +551,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		EvalEverySteps:      getenv("MANTA_EVAL_EVERY_STEPS", "4"),
 		Patience:            getenv("MANTA_PATIENCE", "3"),
 		MinDelta:            getenv("MANTA_MIN_DELTA", "0"),
-		SelectMetric:        getenv("MANTA_SELECT_METRIC", "mrr"),
+		SelectMetric:        getenv("MANTA_SELECT_METRIC", "score_margin"),
 		MinFreq:             getenv("MANTA_MIN_FREQ", "1"),
 		MinChars:            getenv("MANTA_MIN_CHARS", "20"),
 		MaxPairs:            getenv("MANTA_MAX_PAIRS", "0"),
@@ -537,6 +576,8 @@ func prepareConfig(root string) (candidateConfig, error) {
 	cfg.EvalJSONL = os.Getenv("MANTA_EVAL_JSONL")
 	cfg.HardEvalJSONL = os.Getenv("MANTA_HARD_EVAL_JSONL")
 	cfg.TokenizerPath = os.Getenv("MANTA_TOKENIZER")
+	cfg.TokenizerCorpus = os.Getenv("MANTA_TOKENIZER_CORPUS")
+	cfg.ThresholdsEnv = thresholdsEnv
 
 	if cfg.Corpus != "" {
 		guard cfg.TrainJSONL == "" && cfg.EvalJSONL == "" else return candidateConfig{}, fmt.Errorf("choose MANTA_CORPUS or MANTA_TRAIN_JSONL/MANTA_EVAL_JSONL, not both")
@@ -580,6 +621,19 @@ func prepareConfig(root string) (candidateConfig, error) {
 		err = rejectTmpPath("tokenizer", cfg.TokenizerPath)
 		guard err == nil else return candidateConfig{}, err
 		err = appendSHA256(cfg.DatasetSHAFile, cfg.TokenizerPath)
+		guard err == nil else return candidateConfig{}, err
+	}
+	if cfg.TokenizerCorpus != "" {
+		guard cfg.TokenizerPath == "" else return candidateConfig{}, fmt.Errorf("set either MANTA_TOKENIZER or MANTA_TOKENIZER_CORPUS, not both")
+		cfg.TokenizerCorpus, err = requireFile(cfg.TokenizerCorpus, "MANTA_TOKENIZER_CORPUS")
+		guard err == nil else return candidateConfig{}, err
+		err = rejectTmpPath("tokenizer corpus", cfg.TokenizerCorpus)
+		guard err == nil else return candidateConfig{}, err
+		err = appendSHA256(cfg.DatasetSHAFile, cfg.TokenizerCorpus)
+		guard err == nil else return candidateConfig{}, err
+	}
+	if cfg.ThresholdsEnv != "" {
+		err = appendSHA256(cfg.DatasetSHAFile, cfg.ThresholdsEnv)
 		guard err == nil else return candidateConfig{}, err
 	}
 
@@ -637,6 +691,20 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 
 	let common = trainCommonArgs(cfg)
 	tokenizerForEval := cfg.TokenizerPath
+	if cfg.TrainMode == "prepared_jsonl" && tokenizerForEval == "" && cfg.TokenizerCorpus != "" {
+		tokenizerForEval = filepath.Join(cfg.RunDir, cfg.ModelName+".tokenizer.mll")
+		err = runCmd(cfg, "Train tokenizer for prepared JSONL", "train-tokenizer.log", cfg.BarrBin, []string{
+			"train-tokenizer",
+			"--output", tokenizerForEval,
+			"--vocab-size", cfg.VocabSize,
+			"--min-freq", cfg.MinFreq,
+			cfg.Artifact,
+			cfg.TokenizerCorpus,
+		})
+		guard err == nil else return cfg, err
+		err = appendSHA256(cfg.DatasetSHAFile, tokenizerForEval)
+		guard err == nil else return cfg, err
+	}
 	if cfg.TrainMode == "corpus" {
 		args := append([]string{"train-corpus"}, common...)
 		args = append(args,

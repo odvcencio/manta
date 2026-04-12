@@ -312,7 +312,7 @@ barr demo [tiny_embed|tiny_decode|tiny_score]      Run a built-in preset module
 barr version                                      Print version
 ```
 
-For production-grade `manta-embed-v1` candidate training, use `scripts/train_manta_embed_v1_candidate.fw`; it records dataset hashes, repo provenance, eval-only gates, sealed export, and artifact hashes. See `docs/production-embedding.md`.
+For production-grade `manta-embed-v1` candidate training, use `scripts/acquire_manta_embed_v1_datasets.fw` followed by `scripts/train_manta_embed_v1_candidate.fw`; they record dataset hashes, repo provenance, eval-only gates, sealed export, and artifact hashes. See `docs/production-embedding.md`.
 
 ## Design Constraints
 

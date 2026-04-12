@@ -11,6 +11,28 @@ Use `scripts/train_manta_embed_v1_candidate.fw` to create a release-grade `manta
 - exports and verifies a sealed MLL
 - supports metric gates through environment variables
 
+## Acquire Datasets
+
+The default acquisition workflow downloads public BEIR retrieval datasets (`scifact`, `nfcorpus`, and `fiqa`), converts qrels to Manta text-pair JSONL, writes a tokenizer corpus, and emits initial threshold gates:
+
+```bash
+MANTA_REPO_ROOT=$PWD \
+MANTA_DATASET_ROOT=/data/manta/datasets/manta-embed-v1 \
+ferrous-wheel run scripts/acquire_manta_embed_v1_datasets.fw
+```
+
+The processed outputs are:
+
+```text
+/data/manta/datasets/manta-embed-v1/processed/train.jsonl
+/data/manta/datasets/manta-embed-v1/processed/eval.jsonl
+/data/manta/datasets/manta-embed-v1/processed/hard-eval.jsonl
+/data/manta/datasets/manta-embed-v1/processed/tokenizer-corpus.txt
+/data/manta/datasets/manta-embed-v1/processed/thresholds.env
+```
+
+Review dataset licenses before commercial use. The default avoids MS MARCO because it is commonly distributed with non-commercial research terms.
+
 ## Prepared JSONL Path
 
 Prepared JSONL is the preferred path for production because train/eval splits are fixed before training starts.
@@ -19,20 +41,36 @@ Prepared JSONL is the preferred path for production because train/eval splits ar
 MANTA_RUN_ROOT=/data/manta/runs \
 MANTA_REPO_ROOT=$PWD \
 MANTA_RUN_ID=manta-embed-v1-20260412-a \
-MANTA_TRAIN_JSONL=/data/manta/datasets/manta-embed-v1/train.jsonl \
-MANTA_EVAL_JSONL=/data/manta/datasets/manta-embed-v1/eval.jsonl \
-MANTA_HARD_EVAL_JSONL=/data/manta/datasets/manta-embed-v1/hard-eval.jsonl \
+MANTA_TRAIN_JSONL=/data/manta/datasets/manta-embed-v1/processed/train.jsonl \
+MANTA_EVAL_JSONL=/data/manta/datasets/manta-embed-v1/processed/eval.jsonl \
+MANTA_HARD_EVAL_JSONL=/data/manta/datasets/manta-embed-v1/processed/hard-eval.jsonl \
+MANTA_TOKENIZER_CORPUS=/data/manta/datasets/manta-embed-v1/processed/tokenizer-corpus.txt \
+MANTA_THRESHOLDS_ENV=/data/manta/datasets/manta-embed-v1/processed/thresholds.env \
 MANTA_EPOCHS=3 \
 MANTA_BATCH_SIZE=1024 \
 MANTA_LR=0.005 \
 MANTA_TEMPERATURE=0.05 \
-MANTA_SELECT_METRIC=mrr \
-MANTA_MIN_MRR=0.45 \
+MANTA_SELECT_METRIC=score_margin \
+MANTA_MIN_SCORE_MARGIN=0.05 \
 MANTA_MIN_PAIR_ACCURACY=0.70 \
+MANTA_MAX_LOSS=0.35 \
 ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
 ```
 
-Set `MANTA_TOKENIZER=/path/to/tokenizer.mll` when `train.jsonl`, `eval.jsonl`, or `hard-eval.jsonl` are text-pair JSONL instead of token JSONL.
+`MANTA_THRESHOLDS_ENV` loads the acquisition workflow's current gate file and records its SHA256 in the run manifest. Explicitly exported `MANTA_*` values still override values from that file. Set `MANTA_TOKENIZER=/path/to/tokenizer.mll` when you want to reuse an existing tokenizer instead of training one from `MANTA_TOKENIZER_CORPUS`.
+
+## Metric Thresholds
+
+The default acquired eval files are pairwise positive/negative judgments with one deterministic sampled negative per positive. The initial release gates are:
+
+```text
+MANTA_SELECT_METRIC=score_margin
+MANTA_MIN_PAIR_ACCURACY=0.70
+MANTA_MIN_SCORE_MARGIN=0.05
+MANTA_MAX_LOSS=0.35
+```
+
+These gates are intentionally concrete rather than advisory. Pair accuracy must clear a 0.70 hard threshold against a 0.50 random-sign baseline, positive scores must beat negative scores by at least 0.05 on average, and pairwise loss must stay at or below 0.35. Tighten them after the first stable full-size candidate establishes the project baseline.
 
 ## Corpus Path
 

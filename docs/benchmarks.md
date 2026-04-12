@@ -33,7 +33,7 @@ go run ./cmd/barr train-embed --eval-only /path/to/manta-embed-v1.mll /path/to/e
 
 When the package has a sibling `.tokenizer.mll`, text eval JSONL is tokenized automatically. Pass `--tokenizer /path/to/tokenizer.mll` to use an explicit tokenizer.
 
-For a production candidate run with provenance, metric gates, sealed export, and SHA256 manifests, use `scripts/train_manta_embed_v1_candidate.fw`. See `docs/production-embedding.md`.
+For a production candidate run with acquired BEIR-format datasets, provenance, metric gates, sealed export, and SHA256 manifests, use `scripts/acquire_manta_embed_v1_datasets.fw` followed by `scripts/train_manta_embed_v1_candidate.fw`. See `docs/production-embedding.md`.
 
 If you want a binary runner instead of `run` mode:
 
