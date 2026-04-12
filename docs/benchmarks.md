@@ -51,6 +51,20 @@ MANTA_MEM_PROFILE=/tmp/barr.mem.pprof go run ./cmd/barr train-embed ...
 
 Then inspect with `go tool pprof -top /tmp/barr.cpu.pprof`.
 
+For repeatable GPU A/B profiles, use the Ferrous Wheel harness:
+
+```bash
+MANTA_REPO_ROOT=$PWD \
+MANTA_GPU_PROFILE_ASSETS=/path/to/assets/manta-embed-v1 \
+MANTA_GPU_PROFILE_TRAIN=/path/to/train-mini.jsonl \
+MANTA_GPU_PROFILE_EVAL=/path/to/eval-mini.jsonl \
+MANTA_GPU_PROFILE_VARIANTS=default,disable-batched-forward \
+MANTA_GPU_PROFILE_ENV_DISABLE_BATCHED_FORWARD=MANTA_TRAIN_DISABLE_BATCHED_FORWARD=1 \
+ferrous-wheel run scripts/profile_manta_gpu_efficiency.fw
+```
+
+The profile harness copies `.mll` package assets per variant, runs `train-embed`, writes each variant's `run.log`, `time.txt`, `cpu.pprof`, and `pprof-top.txt`, then writes a root `summary.tsv` with throughput and accelerator counters.
+
 ## Current Default Model Smoke
 
 The current reference smoke uses:

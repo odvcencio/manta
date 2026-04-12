@@ -1,0 +1,407 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+	"unicode"
+)
+
+type profileConfig struct {
+	Root           string
+	RunID          string
+	RunDir         string
+	AssetsDir      string
+	ModelName      string
+	TrainJSONL     string
+	EvalJSONL      string
+	TokenizerPath  string
+	Epochs         string
+	BatchSize      string
+	LR             string
+	Temperature    string
+	EvalEvery      string
+	EvalEverySteps string
+	Variants       []variantConfig
+}
+
+type variantConfig struct {
+	Name string
+	Env  []string
+}
+
+func usage() {
+	fmt.Println(`Profile Manta embedding GPU efficiency with repeatable per-variant runs.
+
+Required:
+  MANTA_GPU_PROFILE_ASSETS=/path/to/package-assets
+  MANTA_GPU_PROFILE_TRAIN=/path/to/train.jsonl
+  MANTA_GPU_PROFILE_EVAL=/path/to/eval.jsonl
+
+Common:
+  MANTA_REPO_ROOT=$PWD
+  MANTA_GPU_PROFILE_RUN_ROOT=$PWD/runs
+  MANTA_GPU_PROFILE_RUN_ID=gpu-efficiency-20260412
+  MANTA_GPU_PROFILE_MODEL=manta-embed-v1
+  MANTA_GPU_PROFILE_BATCH=256
+  MANTA_GPU_PROFILE_EPOCHS=1
+  MANTA_GPU_PROFILE_EVAL_EVERY=4
+  MANTA_GPU_PROFILE_EVAL_EVERY_STEPS=4
+
+Variants:
+  MANTA_GPU_PROFILE_VARIANTS=default,disable-batched-forward
+  MANTA_GPU_PROFILE_ENV_DEFAULT=
+  MANTA_GPU_PROFILE_ENV_DISABLE_BATCHED_FORWARD=MANTA_TRAIN_DISABLE_BATCHED_FORWARD=1
+
+Outputs:
+  <run_dir>/<variant>/run.log
+  <run_dir>/<variant>/time.txt
+  <run_dir>/<variant>/cpu.pprof
+  <run_dir>/<variant>/pprof-top.txt
+  <run_dir>/summary.tsv`)
+}
+
+func getenv(name string, fallback string) string {
+	let value = os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func step(label string) {
+	fmt.Println(f"\n== {label} ==")
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+func findRoot() (string, error) {
+	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	if hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	let pwd = os.Getenv("PWD")
+	if hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+}
+
+func requireFile(path string, label string) (string, error) {
+	guard path != "" else return "", fmt.Errorf("%s is required", label)
+	abs, err := filepath.Abs(path)
+	guard err == nil else return "", err
+	info, err := os.Stat(abs)
+	guard err == nil else return "", fmt.Errorf("%s does not exist: %s", label, abs)
+	guard !info.IsDir() else return "", fmt.Errorf("%s is a directory: %s", label, abs)
+	return abs, nil
+}
+
+func requireDir(path string, label string) (string, error) {
+	guard path != "" else return "", fmt.Errorf("%s is required", label)
+	abs, err := filepath.Abs(path)
+	guard err == nil else return "", err
+	info, err := os.Stat(abs)
+	guard err == nil else return "", fmt.Errorf("%s does not exist: %s", label, abs)
+	guard info.IsDir() else return "", fmt.Errorf("%s is not a directory: %s", label, abs)
+	return abs, nil
+}
+
+func copyFile(src string, dst string) error {
+	data, err := os.ReadFile(src)
+	guard err == nil else return err
+	info, err := os.Stat(src)
+	guard err == nil else return err
+	return os.WriteFile(dst, data, info.Mode())
+}
+
+func copyMatching(pattern string, dst string) error {
+	files, err := filepath.Glob(pattern)
+	guard err == nil else return err
+	guard len(files) > 0 else return fmt.Errorf("no files matched %s", pattern)
+	for src in files {
+		err = copyFile(src, filepath.Join(dst, filepath.Base(src)))
+		guard err == nil else return err
+	}
+	return nil
+}
+
+func sanitizeEnvSuffix(value string) string {
+	out := []rune{}
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			out = append(out, unicode.ToUpper(r))
+		} else {
+			out = append(out, '_')
+		}
+	}
+	if len(out) == 0 {
+		return "DEFAULT"
+	}
+	return string(out)
+}
+
+func parseEnvList(raw string) []string {
+	out := []string{}
+	for _, part := range strings.Fields(strings.ReplaceAll(raw, ",", " ")) {
+		if strings.Contains(part, "=") {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func parseVariants() []variantConfig {
+	raw := getenv("MANTA_GPU_PROFILE_VARIANTS", "default")
+	variants := []variantConfig{}
+	commonEnv := parseEnvList(os.Getenv("MANTA_GPU_PROFILE_ENV"))
+	for _, part := range strings.Split(raw, ",") {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			continue
+		}
+		env := append([]string{}, commonEnv...)
+		env = append(env, parseEnvList(os.Getenv("MANTA_GPU_PROFILE_ENV_"+sanitizeEnvSuffix(name)))...)
+		variants = append(variants, variantConfig{Name: name, Env: env})
+	}
+	if len(variants) == 0 {
+		variants = append(variants, variantConfig{Name: "default", Env: commonEnv})
+	}
+	return variants
+}
+
+func prepareConfig(root string) (profileConfig, error) {
+	runID := getenv("MANTA_GPU_PROFILE_RUN_ID", "gpu-efficiency-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot := getenv("MANTA_GPU_PROFILE_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir, err := filepath.Abs(getenv("MANTA_GPU_PROFILE_RUN_DIR", filepath.Join(runRoot, runID)))
+	guard err == nil else return profileConfig{}, err
+	if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
+		return profileConfig{}, fmt.Errorf("run directory already exists and is not empty: %s", runDir)
+	}
+	err = os.MkdirAll(runDir, 0o755)
+	guard err == nil else return profileConfig{}, err
+
+	assets, err := requireDir(os.Getenv("MANTA_GPU_PROFILE_ASSETS"), "MANTA_GPU_PROFILE_ASSETS")
+	guard err == nil else return profileConfig{}, err
+	train, err := requireFile(os.Getenv("MANTA_GPU_PROFILE_TRAIN"), "MANTA_GPU_PROFILE_TRAIN")
+	guard err == nil else return profileConfig{}, err
+	eval, err := requireFile(os.Getenv("MANTA_GPU_PROFILE_EVAL"), "MANTA_GPU_PROFILE_EVAL")
+	guard err == nil else return profileConfig{}, err
+	tokenizer := os.Getenv("MANTA_GPU_PROFILE_TOKENIZER")
+	if tokenizer != "" {
+		tokenizer, err = requireFile(tokenizer, "MANTA_GPU_PROFILE_TOKENIZER")
+		guard err == nil else return profileConfig{}, err
+	}
+
+	return profileConfig{
+		Root:           root,
+		RunID:          runID,
+		RunDir:         runDir,
+		AssetsDir:      assets,
+		ModelName:      getenv("MANTA_GPU_PROFILE_MODEL", "manta-embed-v1"),
+		TrainJSONL:     train,
+		EvalJSONL:      eval,
+		TokenizerPath:  tokenizer,
+		Epochs:         getenv("MANTA_GPU_PROFILE_EPOCHS", "1"),
+		BatchSize:      getenv("MANTA_GPU_PROFILE_BATCH", "256"),
+		LR:             getenv("MANTA_GPU_PROFILE_LR", "0.005"),
+		Temperature:    getenv("MANTA_GPU_PROFILE_TEMPERATURE", "0.05"),
+		EvalEvery:      getenv("MANTA_GPU_PROFILE_EVAL_EVERY", "4"),
+		EvalEverySteps: getenv("MANTA_GPU_PROFILE_EVAL_EVERY_STEPS", "4"),
+		Variants:       parseVariants(),
+	}, nil
+}
+
+func renderCommand(name string, args []string) string {
+	parts := []string{shellQuote(name)}
+	for arg in args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func runLogged(root string, logPath string, env []string, name string, args []string) error {
+	err := os.WriteFile(logPath+".cmd", []byte(renderCommand(name, args)+"\n"), 0o644)
+	guard err == nil else return err
+	logFile, err := os.Create(logPath)
+	guard err == nil else return err
+	defer logFile.Close()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+	return cmd.Run()
+}
+
+func runCapture(root string, outPath string, env []string, name string, args []string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), env...)
+	out, err := cmd.CombinedOutput()
+	writeErr := os.WriteFile(outPath, out, 0o644)
+	guard writeErr == nil else return writeErr
+	return err
+}
+
+func metricValue(logPath string, metric string) string {
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return ""
+	}
+	let fields = strings.Fields(string(data))
+	let prefix = metric + "="
+	value := ""
+	for field in fields {
+		if strings.HasPrefix(field, prefix) {
+			value = strings.TrimSuffix(strings.TrimPrefix(field, prefix), ",")
+		}
+	}
+	return value
+}
+
+func lineValue(path string, prefix string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
+}
+
+func trainArgs(cfg profileConfig, variantDir string) []string {
+	artifact := filepath.Join(variantDir, cfg.ModelName+".mll")
+	tokenizer := cfg.TokenizerPath
+	if tokenizer == "" {
+		tokenizer = filepath.Join(variantDir, cfg.ModelName+".tokenizer.mll")
+		if _, err := os.Stat(tokenizer); err != nil {
+			tokenizer = ""
+		}
+	}
+	args := []string{
+		"go", "run", "./cmd/barr", "train-embed",
+		"--epochs", cfg.Epochs,
+		"--batch-size", cfg.BatchSize,
+		"--lr", cfg.LR,
+		"--contrastive-loss", "infonce",
+		"--temperature", cfg.Temperature,
+		"--eval-every", cfg.EvalEvery,
+		"--eval-every-steps", cfg.EvalEverySteps,
+	}
+	if tokenizer != "" {
+		args = append(args, "--tokenizer", tokenizer)
+	}
+	return append(args, artifact, cfg.TrainJSONL, cfg.EvalJSONL)
+}
+
+func profileVariant(cfg profileConfig, variant variantConfig) (string, error) {
+	variantDir := filepath.Join(cfg.RunDir, variant.Name)
+	err := os.MkdirAll(variantDir, 0o755)
+	guard err == nil else return "", err
+	err = copyMatching(filepath.Join(cfg.AssetsDir, cfg.ModelName+".*"), variantDir)
+	guard err == nil else return "", err
+	env := append([]string{}, variant.Env...)
+	env = append(env, "MANTA_CPU_PROFILE="+filepath.Join(variantDir, "cpu.pprof"))
+	logPath := filepath.Join(variantDir, "run.log")
+	timePath := filepath.Join(variantDir, "time.txt")
+	args := []string{"-v", "-o", timePath}
+	args = append(args, trainArgs(cfg, variantDir)...)
+	step("Profile "+variant.Name)
+	if len(variant.Env) > 0 {
+		let envText = strings.Join(variant.Env, " ")
+		fmt.Println("env: " + envText)
+	}
+	err = runLogged(cfg.Root, logPath, env, "/usr/bin/time", args)
+	guard err == nil else return "", fmt.Errorf("profile %s failed: %w", variant.Name, err)
+	err = runCapture(cfg.Root, filepath.Join(variantDir, "pprof-top.txt"), nil, "go", []string{"tool", "pprof", "-top", filepath.Join(variantDir, "cpu.pprof")})
+	guard err == nil else return "", err
+	return summaryRow(variant.Name, logPath, timePath), nil
+}
+
+func summaryRow(name string, logPath string, timePath string) string {
+	return strings.Join([]string{
+		name,
+		metricValue(logPath, "elapsed"),
+		metricValue(logPath, "train_examples/s"),
+		metricValue(logPath, "train_pairs/s"),
+		metricValue(logPath, "optimizer_steps/s"),
+		metricValue(logPath, "matmul_runs"),
+		metricValue(logPath, "matmul_run_upload_mb"),
+		metricValue(logPath, "matmul_run_download_mb"),
+		metricValue(logPath, "optimizer_updates"),
+		metricValue(logPath, "activation_calls"),
+		metricValue(logPath, "contrastive_calls"),
+		lineValue(timePath, "Elapsed (wall clock) time (h:mm:ss or m:ss):"),
+		lineValue(timePath, "Maximum resident set size (kbytes):"),
+	}, "\t")
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	guard err == nil else {
+		fmt.Println(f"failed to resolve repo root: {err}")
+		os.Exit(1)
+	}
+	cfg, err := prepareConfig(root)
+	guard err == nil else {
+		fmt.Println(f"profile config failed: {err}")
+		os.Exit(1)
+	}
+	rows := []string{"variant\telapsed\ttrain_examples/s\ttrain_pairs/s\toptimizer_steps/s\tmatmul_runs\tmatmul_run_upload_mb\tmatmul_run_download_mb\toptimizer_updates\tactivation_calls\tcontrastive_calls\twall_time\tmax_rss_kb"}
+	for _, variant := range cfg.Variants {
+		row, err := profileVariant(cfg, variant)
+		guard err == nil else {
+			fmt.Println(f"profile run failed: {err}")
+			os.Exit(1)
+		}
+		rows = append(rows, row)
+	}
+	summaryPath := filepath.Join(cfg.RunDir, "summary.tsv")
+	err = os.WriteFile(summaryPath, []byte(strings.Join(rows, "\n")+"\n"), 0o644)
+	guard err == nil else {
+		fmt.Println(f"write summary failed: {err}")
+		os.Exit(1)
+	}
+	step("GPU efficiency summary")
+	fmt.Println(f"run_dir={cfg.RunDir}")
+	fmt.Println(f"summary={summaryPath}")
+	fmt.Println(strings.Join(rows, "\n"))
+}
