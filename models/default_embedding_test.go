@@ -9,7 +9,7 @@ import (
 )
 
 func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "manta-embed-v0.mll")
+	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
 	paths, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
 		VocabSize:    16,
 		MaxSequence:  8,

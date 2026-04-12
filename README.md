@@ -336,10 +336,10 @@ Manta keeps reproducible perf checks as Ferrous Wheel workflows.
 ```bash
 MANTA_BENCH_ROOT=$PWD ferrous-wheel run scripts/bench.fw
 MANTA_BENCH_ROOT=$PWD MANTA_BENCH_CUDA=1 ferrous-wheel run scripts/bench.fw
-MANTA_BENCH_ROOT=$PWD MANTA_BENCH_MODEL_ASSETS=/path/to/assets/manta-embed-v0 ferrous-wheel run scripts/bench.fw
+MANTA_BENCH_ROOT=$PWD MANTA_BENCH_MODEL_ASSETS=/path/to/assets/manta-embed-v1 ferrous-wheel run scripts/bench.fw
 ```
 
-Current `manta-embed-v0` CUDA smoke: `33328.94` train pairs/s on batch `256`, with grouped batched backward enabled by default. See `docs/benchmarks.md` for the full profile and the next perf targets.
+Current `manta-embed-v1` CUDA smoke: `845.15` train examples/s and `865437.87` train pairs/s on batch `1024`, with the promoted grouped CUDA training path enabled by default. See `docs/benchmarks.md` for the full profile and the next perf targets.
 
 ## License
 

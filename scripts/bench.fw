@@ -102,7 +102,7 @@ func goBench(root string, pkg string, bench string, count string, benchtime stri
 func modelSmoke(root string, assets string) error {
 	out, err := os.MkdirTemp("", "manta-model-bench-*")
 	guard err == nil else return err
-	let modelName = getenv("MANTA_BENCH_MODEL_NAME", "manta-embed-v0")
+	let modelName = getenv("MANTA_BENCH_MODEL_NAME", "manta-embed-v1")
 	err = copyMatching(filepath.Join(assets, modelName+".*"), out)
 	guard err == nil else return err
 

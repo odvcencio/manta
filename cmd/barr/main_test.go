@@ -89,7 +89,7 @@ func TestRunInitTrainAppliesTrainingConfigWithDefaultManifest(t *testing.T) {
 }
 
 func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "manta-embed-v0.mll")
+	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
 	if err := run([]string{
 		"init-model",
 		"--vocab-size", "16",
@@ -105,8 +105,8 @@ func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
-	if manifest.Name != "manta-embed-v0" {
-		t.Fatalf("model name = %q, want manta-embed-v0", manifest.Name)
+	if manifest.Name != "manta-embed-v1" {
+		t.Fatalf("model name = %q, want manta-embed-v1", manifest.Name)
 	}
 	if manifest.EncoderRepeats != 2 {
 		t.Fatalf("encoder repeats = %d, want 2", manifest.EncoderRepeats)
@@ -128,7 +128,7 @@ func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
 
 func TestRunInitModelTrainCorpusExportFlow(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "manta-embed-v0.mll")
+	path := filepath.Join(dir, "manta-embed-v1.mll")
 	if err := run([]string{
 		"init-model",
 		"--vocab-size", "16",
@@ -170,7 +170,7 @@ func TestRunInitModelTrainCorpusExportFlow(t *testing.T) {
 		"embedding manifest: embedded",
 		"package: embedded sealed MLL",
 		"package verify: OK",
-		"embedding model: manta-embed-v0",
+		"embedding model: manta-embed-v1",
 	} {
 		if !strings.Contains(sealedInspect, want) {
 			t.Fatalf("sealed inspect output missing %q\noutput:\n%s", want, sealedInspect)
@@ -235,9 +235,9 @@ func TestRunRenameEmbedRewritesPackageIdentity(t *testing.T) {
 	if err := tokenizer.WriteFile(barruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
-	renamedPath := filepath.Join(t.TempDir(), "manta-embed-v0.mll")
+	renamedPath := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
 
-	if err := run([]string{"rename-embed", "--name", "manta-embed-v0", path, renamedPath}); err != nil {
+	if err := run([]string{"rename-embed", "--name", "manta-embed-v1", path, renamedPath}); err != nil {
 		t.Fatalf("run rename-embed: %v", err)
 	}
 
@@ -245,22 +245,22 @@ func TestRunRenameEmbedRewritesPackageIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read renamed artifact: %v", err)
 	}
-	if mod.Name != "manta-embed-v0" {
-		t.Fatalf("module name = %q, want manta-embed-v0", mod.Name)
+	if mod.Name != "manta-embed-v1" {
+		t.Fatalf("module name = %q, want manta-embed-v1", mod.Name)
 	}
 	manifest, err := barruntime.ReadEmbeddingManifestFile(barruntime.DefaultEmbeddingManifestPath(renamedPath))
 	if err != nil {
 		t.Fatalf("read renamed manifest: %v", err)
 	}
-	if manifest.Name != "manta-embed-v0" {
-		t.Fatalf("manifest name = %q, want manta-embed-v0", manifest.Name)
+	if manifest.Name != "manta-embed-v1" {
+		t.Fatalf("manifest name = %q, want manta-embed-v1", manifest.Name)
 	}
 	checkpoint, err := barruntime.ReadEmbeddingTrainCheckpointFile(barruntime.DefaultEmbeddingCheckpointPath(renamedPath))
 	if err != nil {
 		t.Fatalf("read renamed checkpoint: %v", err)
 	}
-	if checkpoint.Manifest.Name != "manta-embed-v0" {
-		t.Fatalf("checkpoint manifest name = %q, want manta-embed-v0", checkpoint.Manifest.Name)
+	if checkpoint.Manifest.Name != "manta-embed-v1" {
+		t.Fatalf("checkpoint manifest name = %q, want manta-embed-v1", checkpoint.Manifest.Name)
 	}
 	if _, err := os.Stat(barruntime.DefaultTokenizerPath(renamedPath)); err != nil {
 		t.Fatalf("renamed tokenizer sidecar missing: %v", err)

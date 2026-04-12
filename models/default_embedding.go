@@ -11,7 +11,7 @@ import (
 	barruntime "github.com/odvcencio/manta/runtime"
 )
 
-const DefaultEmbeddingModelName = "manta-embed-v0"
+const DefaultEmbeddingModelName = "manta-embed-v1"
 
 // DefaultEmbeddingPackageConfig controls Manta's built-in default
 // embedding-model package initialization.

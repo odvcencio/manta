@@ -20,7 +20,7 @@ MANTA_BENCH_ROOT=$PWD MANTA_BENCH_CUDA=1 ferrous-wheel run scripts/bench.fw
 Run the default-model training smoke from a local asset package:
 
 ```bash
-MANTA_BENCH_ROOT=$PWD MANTA_BENCH_MODEL_ASSETS=/path/to/assets/manta-embed-v0 ferrous-wheel run scripts/bench.fw
+MANTA_BENCH_ROOT=$PWD MANTA_BENCH_MODEL_ASSETS=/path/to/assets/manta-embed-v1 ferrous-wheel run scripts/bench.fw
 ```
 
 The model smoke copies the package into a temporary directory before training. It does not mutate the source asset directory.
@@ -45,7 +45,7 @@ Then inspect with `go tool pprof -top /tmp/barr.cpu.pprof`.
 
 The current reference smoke uses:
 
-- model package: `manta-embed-v0`
+- model package: `manta-embed-v1`
 - encoder repeats: `2`
 - tokenizer vocab: `2454`
 - max sequence length: `256`
