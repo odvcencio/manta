@@ -51,6 +51,7 @@ MANTA_BATCH_SIZE=1024 \
 MANTA_LR=0.005 \
 MANTA_TEMPERATURE=0.05 \
 MANTA_SELECT_METRIC=score_margin \
+MANTA_EVAL_EVERY_STEPS=0 \
 MANTA_MIN_AUC=0.70 \
 MANTA_MIN_THRESHOLD_ACCURACY=0.65 \
 MANTA_MIN_SCORE_MARGIN=0.05 \
@@ -61,6 +62,8 @@ ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
 `MANTA_THRESHOLDS_ENV` loads the acquisition workflow's current gate file and records its SHA256 in the run manifest. Explicitly exported `MANTA_*` values still override values from that file. Set `MANTA_TOKENIZER=/path/to/tokenizer.mll` when you want to reuse an existing tokenizer instead of training one from `MANTA_TOKENIZER_CORPUS`.
 
 Contrastive training uses pair-length-aware bucketing by default so batches reach larger exact-length matmul groups. `MANTA_TRAIN_LENGTH_BUCKET_WINDOW` controls the shuffled sort window; larger values can improve grouping but must be profiled because they reduce local length randomness and can increase per-batch working-set pressure.
+
+The production workflow defaults `MANTA_EVAL_EVERY_STEPS=0`. Keep within-epoch eval disabled for full candidate runs unless you are debugging convergence; epoch eval, final validation eval, and hard holdout eval still run and are enough for release gating. On the acquired full split, step-level eval every 4 batches adds many full eval passes and dominates transfer without improving the optimizer update itself.
 
 Eval-only candidate gates batch pairwise forward encodes by exact token length. `MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE` defaults to `256`; set `MANTA_TRAIN_DISABLE_BATCHED_PAIR_EVAL=1` only for scalar A/B checks.
 

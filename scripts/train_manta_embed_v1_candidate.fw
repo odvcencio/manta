@@ -86,6 +86,7 @@ Common knobs:
   MANTA_LR=0.005
   MANTA_TEMPERATURE=0.05
   MANTA_SELECT_METRIC=score_margin
+  MANTA_EVAL_EVERY_STEPS=0
   MANTA_MIN_AUC=0.70
   MANTA_MIN_THRESHOLD_ACCURACY=0.65
   MANTA_MIN_TRAIN_PAIRS_PER_SEC=85000
@@ -565,7 +566,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		ContrastiveLoss:     getenv("MANTA_CONTRASTIVE_LOSS", "infonce"),
 		Temperature:         getenv("MANTA_TEMPERATURE", "0.05"),
 		EvalEvery:           getenv("MANTA_EVAL_EVERY", "1"),
-		EvalEverySteps:      getenv("MANTA_EVAL_EVERY_STEPS", "4"),
+		EvalEverySteps:      getenv("MANTA_EVAL_EVERY_STEPS", "0"),
 		Patience:            getenv("MANTA_PATIENCE", "3"),
 		MinDelta:            getenv("MANTA_MIN_DELTA", "0"),
 		SelectMetric:        getenv("MANTA_SELECT_METRIC", "score_margin"),
