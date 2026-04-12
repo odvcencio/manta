@@ -691,27 +691,15 @@ func (t *EmbeddingTrainer) EvaluatePairs(batch []EmbeddingPairExample) (Embeddin
 
 	metrics := EmbeddingEvalMetrics{PairCount: len(batch)}
 	scores := make([]embeddingEvalScore, 0, len(batch))
-	for i, example := range batch {
-		score, loss, err := t.scoreExamplePair(example, forward)
-		if err != nil {
-			return EmbeddingEvalMetrics{}, fmt.Errorf("batch %d: %w", i, err)
-		}
-		metrics.Loss += loss
-		metrics.AverageScore += score
-		positive := example.Target > 0
-		scores = append(scores, embeddingEvalScore{Score: score, Positive: positive})
-		if positive {
-			metrics.PositiveCount++
-			metrics.PositiveMeanScore += score
-			if score > 0 {
-				metrics.PairAccuracy++
+	if ok, err := t.evaluatePairsBatchedForward(batch, forward, &metrics, &scores); err != nil {
+		return EmbeddingEvalMetrics{}, err
+	} else if !ok {
+		for i, example := range batch {
+			score, loss, err := t.scoreExamplePair(example, forward)
+			if err != nil {
+				return EmbeddingEvalMetrics{}, fmt.Errorf("batch %d: %w", i, err)
 			}
-		} else {
-			metrics.NegativeCount++
-			metrics.NegativeMeanScore += score
-			if score < 0 {
-				metrics.PairAccuracy++
-			}
+			accumulateEvalPairScore(&metrics, &scores, example.Target, score, loss)
 		}
 	}
 	invPairs := float32(1) / float32(len(batch))
@@ -727,6 +715,66 @@ func (t *EmbeddingTrainer) EvaluatePairs(batch []EmbeddingPairExample) (Embeddin
 	metrics.ScoreMargin = metrics.PositiveMeanScore - metrics.NegativeMeanScore
 	finalizeEvalScoreMetrics(&metrics, scores)
 	return metrics, nil
+}
+
+func (t *EmbeddingTrainer) evaluatePairsBatchedForward(batch []EmbeddingPairExample, forward *embeddingForwardWeights, metrics *EmbeddingEvalMetrics, scores *[]embeddingEvalScore) (bool, error) {
+	if t == nil || t.forwardMatMul == nil || forward == nil || metrics == nil || scores == nil || len(batch) == 0 || !batchedPairwiseEvalEnabled() {
+		return false, nil
+	}
+	chunkSize := pairwiseEvalBatchSize(len(batch))
+	for start := 0; start < len(batch); start += chunkSize {
+		end := start + chunkSize
+		if end > len(batch) {
+			end = len(batch)
+		}
+		chunk := batch[start:end]
+		lefts, rights, ok, err := t.tryEncodePairBatchBatchedForward(chunk, forward, false)
+		if err != nil {
+			return true, err
+		}
+		if !ok {
+			return false, nil
+		}
+		var chunkErr error
+		for i, example := range chunk {
+			if i >= len(lefts) || i >= len(rights) || lefts[i] == nil || rights[i] == nil {
+				chunkErr = fmt.Errorf("batch %d: encoder produced nil pair", start+i)
+				break
+			}
+			score, _, _ := cosineGrad(lefts[i].pooled, rights[i].pooled)
+			scale := score - example.Target
+			accumulateEvalPairScore(metrics, scores, example.Target, score, 0.5*scale*scale)
+		}
+		t.releaseEncodedSequences(lefts)
+		t.releaseEncodedSequences(rights)
+		if chunkErr != nil {
+			return true, chunkErr
+		}
+	}
+	return true, nil
+}
+
+func accumulateEvalPairScore(metrics *EmbeddingEvalMetrics, scores *[]embeddingEvalScore, target, score, loss float32) {
+	if metrics == nil || scores == nil {
+		return
+	}
+	metrics.Loss += loss
+	metrics.AverageScore += score
+	positive := target > 0
+	*scores = append(*scores, embeddingEvalScore{Score: score, Positive: positive})
+	if positive {
+		metrics.PositiveCount++
+		metrics.PositiveMeanScore += score
+		if score > 0 {
+			metrics.PairAccuracy++
+		}
+	} else {
+		metrics.NegativeCount++
+		metrics.NegativeMeanScore += score
+		if score < 0 {
+			metrics.PairAccuracy++
+		}
+	}
 }
 
 func finalizeEvalScoreMetrics(metrics *EmbeddingEvalMetrics, scores []embeddingEvalScore) {
@@ -1324,6 +1372,70 @@ func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []Embed
 	if len(sequences) == 0 {
 		return nil, nil, false, nil
 	}
+	if err := t.encodeBatchSequencesByLength(sequences, groups, lengths, forward, captureBindings); err != nil {
+		t.releaseBatchEncodedSequences(sequences)
+		return nil, nil, true, err
+	}
+	return queries, positives, true, nil
+}
+
+func (t *EmbeddingTrainer) tryEncodePairBatchBatchedForward(batch []EmbeddingPairExample, forward *embeddingForwardWeights, captureBindings bool) ([]*embeddingEncodedSequence, []*embeddingEncodedSequence, bool, error) {
+	if t == nil || t.forwardMatMul == nil || forward == nil || len(batch) == 0 || !batchedPairwiseEvalEnabled() {
+		return nil, nil, false, nil
+	}
+	sequences := make([]*embeddingBatchSequence, 0, len(batch)*2)
+	lefts := make([]*embeddingEncodedSequence, len(batch))
+	rights := make([]*embeddingEncodedSequence, len(batch))
+	groups := map[int][]embeddingBatchSequenceSlot{}
+	lengths := make([]int, 0)
+	for i, example := range batch {
+		leftMask, err := t.prepareMask(example.LeftTokens, example.LeftMask)
+		if err != nil {
+			return nil, nil, true, fmt.Errorf("batch %d left: %w", i, err)
+		}
+		rightMask, err := t.prepareMask(example.RightTokens, example.RightMask)
+		if err != nil {
+			return nil, nil, true, fmt.Errorf("batch %d right: %w", i, err)
+		}
+		left, err := t.newEmbeddingBatchSequence(example.LeftTokens, leftMask, forward.token)
+		if err != nil {
+			t.releaseBatchEncodedSequences(sequences)
+			return nil, nil, true, fmt.Errorf("batch %d left: %w", i, err)
+		}
+		sequences = append(sequences, left)
+		right, err := t.newEmbeddingBatchSequence(example.RightTokens, rightMask, forward.token)
+		if err != nil {
+			t.releaseBatchEncodedSequences(sequences)
+			return nil, nil, true, fmt.Errorf("batch %d right: %w", i, err)
+		}
+		lefts[i] = left.encoded
+		rights[i] = right.encoded
+		sequences = append(sequences, right)
+		for _, sequence := range []*embeddingBatchSequence{left, right} {
+			seqLen := len(sequence.tokens)
+			if _, ok := groups[seqLen]; !ok {
+				lengths = append(lengths, seqLen)
+			}
+			groups[seqLen] = append(groups[seqLen], embeddingBatchSequenceSlot{sequence: sequence})
+		}
+	}
+	if len(sequences) == 0 {
+		return nil, nil, false, nil
+	}
+	if err := t.encodeBatchSequencesByLength(sequences, groups, lengths, forward, captureBindings); err != nil {
+		t.releaseBatchEncodedSequences(sequences)
+		return nil, nil, true, err
+	}
+	return lefts, rights, true, nil
+}
+
+func (t *EmbeddingTrainer) encodeBatchSequencesByLength(sequences []*embeddingBatchSequence, groups map[int][]embeddingBatchSequenceSlot, lengths []int, forward *embeddingForwardWeights, captureBindings bool) error {
+	if len(sequences) == 0 {
+		return nil
+	}
+	if forward == nil {
+		return fmt.Errorf("missing forward weights")
+	}
 	for layer := 0; layer < t.encoderRepeats(); layer++ {
 		for _, seqLen := range lengths {
 			slots := groups[seqLen]
@@ -1331,11 +1443,10 @@ func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []Embed
 			for i, slot := range slots {
 				state, err := newEmbeddingSequenceState(slot.sequence.tokens, slot.sequence.mask, slot.sequence.current, forward.hidden, forward.proj)
 				if err != nil {
-					t.releaseBatchEncodedSequences(sequences)
 					for _, state := range states {
 						t.releaseSequenceBindings(state)
 					}
-					return nil, nil, true, err
+					return err
 				}
 				if captureBindings {
 					d := stateWidth(forward.hidden, forward.proj)
@@ -1344,11 +1455,10 @@ func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []Embed
 				states[i] = state
 			}
 			if err := t.encodeBatchedLayerStates(states, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, captureBindings); err != nil {
-				t.releaseBatchEncodedSequences(sequences)
 				for _, state := range states {
 					t.releaseSequenceBindings(state)
 				}
-				return nil, nil, true, err
+				return err
 			}
 			for i, state := range states {
 				sequence := slots[i].sequence
@@ -1359,12 +1469,11 @@ func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []Embed
 	}
 	for _, sequence := range sequences {
 		if len(sequence.encoded.layers) == 0 {
-			t.releaseBatchEncodedSequences(sequences)
-			return nil, nil, true, fmt.Errorf("encoder produced zero layers")
+			return fmt.Errorf("encoder produced zero layers")
 		}
 		sequence.encoded.pooled = append([]float32(nil), sequence.encoded.layers[len(sequence.encoded.layers)-1].pooled...)
 	}
-	return queries, positives, true, nil
+	return nil
 }
 
 func batchedContrastiveForwardEnabled() bool {
@@ -1377,6 +1486,35 @@ func batchedContrastiveForwardEnabled() bool {
 	default:
 		return true
 	}
+}
+
+func batchedPairwiseEvalEnabled() bool {
+	if !batchedContrastiveForwardEnabled() || trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_BATCHED_PAIR_EVAL") {
+		return false
+	}
+	switch trainEnv("MANTA_TRAIN_BATCHED_PAIR_EVAL") {
+	case "0", "false", "FALSE", "no", "NO":
+		return false
+	default:
+		return true
+	}
+}
+
+func pairwiseEvalBatchSize(total int) int {
+	if total <= 0 {
+		return 0
+	}
+	size := 256
+	if raw := trainEnv("MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE"); raw != "" {
+		var parsed int
+		if _, err := fmt.Sscanf(raw, "%d", &parsed); err == nil && parsed > 0 {
+			size = parsed
+		}
+	}
+	if size > total {
+		size = total
+	}
+	return size
 }
 
 func sequenceMatMulBindingsEnabled() bool {

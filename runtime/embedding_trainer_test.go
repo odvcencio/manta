@@ -1984,6 +1984,55 @@ func TestEmbeddingTrainerEvaluatePairsSkipsSequenceBindingChurn(t *testing.T) {
 	}
 }
 
+func TestEmbeddingTrainerEvaluatePairsUsesBatchedForwardChunks(t *testing.T) {
+	t.Setenv("MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE", "2")
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{0, 2}, RightTokens: []int32{0, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 1},
+		{LeftTokens: []int32{1, 2}, RightTokens: []int32{1, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 1},
+		{LeftTokens: []int32{0, 2}, RightTokens: []int32{1, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: -1},
+	}
+	metrics, err := trainer.EvaluatePairs(batch)
+	if err != nil {
+		t.Fatalf("evaluate pairs: %v", err)
+	}
+	if metrics.PairCount != len(batch) {
+		t.Fatalf("pair count = %d, want %d", metrics.PairCount, len(batch))
+	}
+	if trainer.sequenceBindingID != 0 {
+		t.Fatalf("sequence binding count = %d, want default sequence matmul bindings disabled", trainer.sequenceBindingID)
+	}
+	if fake.bindCalls != 5 {
+		t.Fatalf("bind calls = %d, want only 5 forward-weight binds", fake.bindCalls)
+	}
+	if fake.multiBoundRuns == 0 {
+		t.Fatal("expected pairwise eval to coalesce q/k/v bound-right matmuls")
+	}
+	if fake.maxBoundRightRows < 8 {
+		t.Fatalf("max bound-right lhs rows = %d, want chunked pairwise eval rows", fake.maxBoundRightRows)
+	}
+}
+
+func TestPairwiseEvalBatchSizeDefaultAndEnv(t *testing.T) {
+	t.Setenv("MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE", "")
+	if got := pairwiseEvalBatchSize(1024); got != 256 {
+		t.Fatalf("default pairwise eval batch size = %d, want 256", got)
+	}
+	if got := pairwiseEvalBatchSize(128); got != 128 {
+		t.Fatalf("capped pairwise eval batch size = %d, want total size", got)
+	}
+	t.Setenv("MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE", "64")
+	if got := pairwiseEvalBatchSize(1024); got != 64 {
+		t.Fatalf("env pairwise eval batch size = %d, want 64", got)
+	}
+}
+
 func TestEmbeddingTrainerTrainContrastiveStepEncodesEachSequenceOncePerBatch(t *testing.T) {
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul != nil {

@@ -77,6 +77,8 @@ profile delta: matmul_bind_calls=30 matmul_runs=13644 matmul_run_upload_mb=3727.
 
 This is the promoted default benchmark path. It includes CUDA matmul scratch-buffer reuse, grouped batched backward, exact-length grouped contrastive forward for variable-length text, pair-length-aware bucketing across shuffled windows, strided-batched cuBLAS for grouped attention matmuls, rank-3 transpose support for grouped attention backward, batch-1024 contrastive training, sequence matmul bindings disabled by default, Q/K/V forward projection coalescing through a multi-bound-right CUDA path, Q/K/V attention-gradient accumulation through one concatenated shared-left GEMM, combined V/K attention backward gradients in one doubled-batch GEMM, Q/K/V input-gradient accumulation into one resident-right output download with one CUDA sync per accumulated group, and grouped activation-backward helpers kept behind the activation accelerator flag. The larger batch keeps the full in-batch negative set intact, improves contrastive signal, cuts optimizer/contrastive calls on this smoke, and reduces per-pair orchestration overhead. Length bucketing is on by default for CLI contrastive training; set `--length-bucket-batches=false` to disable it or `MANTA_TRAIN_LENGTH_BUCKET_WINDOW` to tune the shuffled sort window. Disabling per-sequence matmul bindings trades a small upload increase for a large reduction in backend binding churn. Q/K/V coalescing preserves per-weight residency and quantization while uploading each shared left-hand activation once across query/key/value projections. Concatenated shared-left attention-gradient coalescing computes `input^T*[dQ|dK|dV]` as one standard GEMM, then splits the result back into the Q/K/V weight gradients. V/K gradient coalescing computes `scores^T*dMixed` and `dPreSoftmax^T*Q` in a single strided-batched dispatch because both use the same transpose shape. Input-gradient coalescing computes `dQ*Wq^T + dK*Wk^T + dV*Wv^T` against resident Q/K/V weights, synchronizes once after the accumulated cuBLAS calls, and downloads the accumulated result once.
 
+Pairwise eval-only gates also use exact-length batched forward chunks by default. On the acquired hard eval set, the current default `MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE=256` measured `9.85s`, `6704` matmul runs, and `4261.18 MB` uploaded versus `16.16s`, `53504` matmul runs, and `5135.84 MB` uploaded with `MANTA_TRAIN_DISABLE_BATCHED_PAIR_EVAL=1`. Eval metrics matched within float tolerance.
+
 Read the throughput line with both lenses:
 
 - `train_examples/s` measures actual encoder training throughput.
@@ -156,6 +158,18 @@ MANTA_TRAIN_DISABLE_BATCHED_FORWARD=1
 ```
 
 Disables the promoted batched forward path and returns to per-sequence forward encoding. Batched forward is enabled by default because the larger default-model run underfeeds the GPU unless forward work is coalesced aggressively.
+
+```bash
+MANTA_TRAIN_DISABLE_BATCHED_PAIR_EVAL=1
+```
+
+Disables exact-length batched forward chunks for pairwise `train-embed --eval-only` runs. This is useful for A/B checks against the scalar pair encoder.
+
+```bash
+MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE=256
+```
+
+Controls how many pair examples each pairwise eval chunk may contain before grouping by exact token length. The default is `256`; larger chunks reduce dispatch count further but can increase materialization pressure and wall time.
 
 ```bash
 MANTA_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS=1

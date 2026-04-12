@@ -62,6 +62,8 @@ ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
 
 Contrastive training uses pair-length-aware bucketing by default so batches reach larger exact-length matmul groups. `MANTA_TRAIN_LENGTH_BUCKET_WINDOW` controls the shuffled sort window; larger values can improve grouping but must be profiled because they reduce local length randomness and can increase per-batch working-set pressure.
 
+Eval-only candidate gates batch pairwise forward encodes by exact token length. `MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE` defaults to `256`; set `MANTA_TRAIN_DISABLE_BATCHED_PAIR_EVAL=1` only for scalar A/B checks.
+
 ## Metric Thresholds
 
 The default acquired eval files are pairwise positive/negative judgments with one deterministic sampled negative per positive. The initial release gates are:
