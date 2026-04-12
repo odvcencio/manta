@@ -60,6 +60,8 @@ ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
 
 `MANTA_THRESHOLDS_ENV` loads the acquisition workflow's current gate file and records its SHA256 in the run manifest. Explicitly exported `MANTA_*` values still override values from that file. Set `MANTA_TOKENIZER=/path/to/tokenizer.mll` when you want to reuse an existing tokenizer instead of training one from `MANTA_TOKENIZER_CORPUS`.
 
+Contrastive training uses pair-length-aware bucketing by default so batches reach larger exact-length matmul groups. `MANTA_TRAIN_LENGTH_BUCKET_WINDOW` controls the shuffled sort window; larger values can improve grouping but must be profiled because they reduce local length randomness and can increase per-batch working-set pressure.
+
 ## Metric Thresholds
 
 The default acquired eval files are pairwise positive/negative judgments with one deterministic sampled negative per positive. The initial release gates are:
@@ -73,6 +75,20 @@ MANTA_MAX_LOSS=0.35
 ```
 
 These gates are intentionally concrete rather than advisory. AUC must clear 0.70 as a threshold-free separability check, calibrated threshold accuracy must clear 0.65 against a 0.50 random baseline, positive scores must beat negative scores by at least 0.05 on average, and pairwise loss must stay at or below 0.35. Tighten them after the first stable full-size candidate establishes the project baseline.
+
+## Training Efficiency Gates
+
+Production candidate runs can also enforce hardware-specific training efficiency gates from `logs/train.log`:
+
+```text
+MANTA_MIN_TRAIN_PAIRS_PER_SEC=85000
+MANTA_MIN_OPTIMIZER_STEPS_PER_SEC=0.08
+MANTA_MAX_MATMUL_RUNS=400000
+MANTA_MAX_MATMUL_RUN_UPLOAD_MB=950000
+MANTA_MAX_MATMUL_RUN_DOWNLOAD_MB=485000
+```
+
+Set these from a known-good run on the target trainer host. Keep quality gates hardware-independent, and keep efficiency gates host-specific so a CPU fallback or data-transfer regression does not silently produce a slow candidate.
 
 ## Corpus Path
 

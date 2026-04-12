@@ -322,7 +322,57 @@ func TestEmbeddingTrainerFitContrastiveEvaluatesWithinEpoch(t *testing.T) {
 	}
 }
 
-func TestBucketContrastiveOrderByLengthSortsWithinWindows(t *testing.T) {
+func TestBucketContrastiveOrderByLengthSortsWithinDefaultWindows(t *testing.T) {
+	t.Setenv("MANTA_TRAIN_LENGTH_BUCKET_WINDOW", "")
+	t.Setenv("BARR_TRAIN_LENGTH_BUCKET_WINDOW", "")
+	trainSet := []EmbeddingContrastiveExample{
+		{QueryTokens: make([]int32, 8), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 2), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 7), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 3), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 6), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 4), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 5), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 1), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 1), PositiveTokens: make([]int32, 1)},
+		{QueryTokens: make([]int32, 9), PositiveTokens: make([]int32, 1)},
+	}
+	order := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+
+	bucketContrastiveOrderByLength(trainSet, order, 2)
+
+	want := []int{7, 1, 3, 5, 6, 4, 2, 0, 8, 9}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("order[%d] = %d, want %d (full order %v)", i, order[i], want[i], order)
+		}
+	}
+}
+
+func TestBucketContrastiveOrderByLengthUsesPairLengthTieBreaks(t *testing.T) {
+	t.Setenv("MANTA_TRAIN_LENGTH_BUCKET_WINDOW", "")
+	t.Setenv("BARR_TRAIN_LENGTH_BUCKET_WINDOW", "")
+	trainSet := []EmbeddingContrastiveExample{
+		{QueryTokens: make([]int32, 8), PositiveTokens: make([]int32, 10)},
+		{QueryTokens: make([]int32, 2), PositiveTokens: make([]int32, 10)},
+		{QueryTokens: make([]int32, 5), PositiveTokens: make([]int32, 10)},
+		{QueryTokens: make([]int32, 10), PositiveTokens: make([]int32, 3)},
+	}
+	order := []int{0, 1, 2, 3}
+
+	bucketContrastiveOrderByLength(trainSet, order, 2)
+
+	want := []int{1, 3, 2, 0}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("order[%d] = %d, want %d (full order %v)", i, order[i], want[i], order)
+		}
+	}
+}
+
+func TestBucketContrastiveOrderByLengthHonorsWindowOverride(t *testing.T) {
+	t.Setenv("MANTA_TRAIN_LENGTH_BUCKET_WINDOW", "4")
+	t.Setenv("BARR_TRAIN_LENGTH_BUCKET_WINDOW", "")
 	trainSet := []EmbeddingContrastiveExample{
 		{QueryTokens: make([]int32, 8), PositiveTokens: make([]int32, 1)},
 		{QueryTokens: make([]int32, 1), PositiveTokens: make([]int32, 1)},
@@ -330,15 +380,12 @@ func TestBucketContrastiveOrderByLengthSortsWithinWindows(t *testing.T) {
 		{QueryTokens: make([]int32, 2), PositiveTokens: make([]int32, 1)},
 		{QueryTokens: make([]int32, 6), PositiveTokens: make([]int32, 1)},
 		{QueryTokens: make([]int32, 3), PositiveTokens: make([]int32, 1)},
-		{QueryTokens: make([]int32, 5), PositiveTokens: make([]int32, 1)},
-		{QueryTokens: make([]int32, 4), PositiveTokens: make([]int32, 1)},
-		{QueryTokens: make([]int32, 9), PositiveTokens: make([]int32, 1)},
 	}
-	order := []int{0, 1, 2, 3, 4, 5, 6, 7, 8}
+	order := []int{0, 1, 2, 3, 4, 5}
 
 	bucketContrastiveOrderByLength(trainSet, order, 2)
 
-	want := []int{1, 3, 5, 7, 6, 4, 2, 0, 8}
+	want := []int{1, 3, 2, 0, 5, 4}
 	for i := range want {
 		if order[i] != want[i] {
 			t.Fatalf("order[%d] = %d, want %d (full order %v)", i, order[i], want[i], order)

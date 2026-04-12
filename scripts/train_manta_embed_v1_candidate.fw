@@ -87,7 +87,9 @@ Common knobs:
   MANTA_TEMPERATURE=0.05
   MANTA_SELECT_METRIC=score_margin
   MANTA_MIN_AUC=0.70
-  MANTA_MIN_THRESHOLD_ACCURACY=0.65`)
+  MANTA_MIN_THRESHOLD_ACCURACY=0.65
+  MANTA_MIN_TRAIN_PAIRS_PER_SEC=85000
+  MANTA_MAX_MATMUL_RUN_UPLOAD_MB=950000`)
 }
 
 func getenv(name string, fallback string) string {
@@ -475,6 +477,20 @@ func requireEvalOnlyZeroUpdates(logPath string) error {
 	return nil
 }
 
+func requireTrainingEfficiencyGates(logPath string) error {
+	err := requireMetricMin(logPath, "train_pairs/s", os.Getenv("MANTA_MIN_TRAIN_PAIRS_PER_SEC"))
+	guard err == nil else return err
+	err = requireMetricMin(logPath, "optimizer_steps/s", os.Getenv("MANTA_MIN_OPTIMIZER_STEPS_PER_SEC"))
+	guard err == nil else return err
+	err = requireMetricMax(logPath, "matmul_runs", os.Getenv("MANTA_MAX_MATMUL_RUNS"))
+	guard err == nil else return err
+	err = requireMetricMax(logPath, "matmul_run_upload_mb", os.Getenv("MANTA_MAX_MATMUL_RUN_UPLOAD_MB"))
+	guard err == nil else return err
+	err = requireMetricMax(logPath, "matmul_run_download_mb", os.Getenv("MANTA_MAX_MATMUL_RUN_DOWNLOAD_MB"))
+	guard err == nil else return err
+	return nil
+}
+
 func copyFile(src string, dst string) error {
 	data, err := os.ReadFile(src)
 	guard err == nil else return err
@@ -747,6 +763,8 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		err = runCmd(cfg, "Train "+cfg.ModelName+" from prepared JSONL", "train.log", cfg.BarrBin, args)
 		guard err == nil else return cfg, err
 	}
+	err = requireTrainingEfficiencyGates(filepath.Join(cfg.LogDir, "train.log"))
+	guard err == nil else return cfg, err
 
 	evalCandidate, err := copyPackageForEval(cfg, "validation")
 	guard err == nil else return cfg, err
