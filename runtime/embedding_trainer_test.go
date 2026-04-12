@@ -1691,6 +1691,35 @@ func TestEmbeddingTrainerBatchedForwardKeepsActivationBindingsWhenBatchedBackwar
 	}
 }
 
+func TestEmbeddingTrainerBatchedBackwardSkipsSingletonUnboundActivationKernels(t *testing.T) {
+	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	trainer.forwardMatMul = &countingMatMulAccelerator{}
+	activation := &countingActivationAccelerator{}
+	trainer.activationAccel = activation
+	trainer.activationAccelFull = true
+	trainer.softmaxBackwardAccel = true
+
+	batch := []EmbeddingContrastiveExample{
+		{QueryTokens: []int32{0}, PositiveTokens: []int32{0}, QueryMask: []int32{1}, PositiveMask: []int32{1}},
+		{QueryTokens: []int32{1}, PositiveTokens: []int32{1, 2}, QueryMask: []int32{1}, PositiveMask: []int32{1, 1}},
+	}
+	if _, err := trainer.TrainContrastiveStep(batch); err != nil {
+		t.Fatalf("train contrastive step: %v", err)
+	}
+	if activation.geluBackwardCalls != 1 {
+		t.Fatalf("gelu backward calls = %d, want 1 grouped batched call", activation.geluBackwardCalls)
+	}
+	if activation.softmaxBackwardCalls != 1 {
+		t.Fatalf("softmax backward calls = %d, want 1 grouped batched call", activation.softmaxBackwardCalls)
+	}
+	if activation.layerNormBackwardCalls != 2 {
+		t.Fatalf("layernorm backward calls = %d, want 2 grouped batched calls", activation.layerNormBackwardCalls)
+	}
+}
+
 func TestEmbeddingTrainerSingleForwardKeepsActivationBindings(t *testing.T) {
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
 	activation := &countingActivationAccelerator{}

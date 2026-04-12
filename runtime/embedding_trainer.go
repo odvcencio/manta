@@ -151,6 +151,7 @@ type embeddingSequenceState struct {
 	projectedBinding    string
 	normalized          []float32
 	pooled              []float32
+	skipUnboundActAccel bool
 }
 
 type embeddingEncodedSequence struct {
@@ -574,6 +575,18 @@ func (t *EmbeddingTrainer) bindSoftmaxActivationForBatchedForward() bool {
 
 func (t *EmbeddingTrainer) bindFullActivationForBatchedForward() bool {
 	return !batchedBackwardEnabled() || !t.fullActivationBackwardAccelEnabled()
+}
+
+func (state *embeddingSequenceState) skipUnboundActivationBackward(bindingNames ...string) bool {
+	if state == nil || !state.skipUnboundActAccel {
+		return false
+	}
+	for _, name := range bindingNames {
+		if name == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *EmbeddingTrainer) unbindSequenceTensor(name string) {
@@ -1410,6 +1423,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 	seqLen := len(states[0].tokens)
 	bindSoftmaxActivation := t.bindSoftmaxActivationForBatchedForward()
 	bindFullActivation := t.bindFullActivationForBatchedForward()
+	skipUnboundActAccel := captureBindings && (!bindSoftmaxActivation || !bindFullActivation)
 	if seqLen == 0 {
 		return fmt.Errorf("tokens are empty")
 	}
@@ -1423,6 +1437,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 		if len(state.input) != seqLen*d {
 			return fmt.Errorf("batch state %d input size %d does not match tokens=%d width=%d", i, len(state.input), seqLen, d)
 		}
+		state.skipUnboundActAccel = skipUnboundActAccel
 	}
 
 	if attentionQuery != nil && attentionKey != nil && attentionValue != nil && attentionOutput != nil {
@@ -3049,9 +3064,14 @@ func (t *EmbeddingTrainer) backpropProjectedFFNSequence(state *embeddingSequence
 		copy(gradOutput, gradProjected[projectedBase:projectedBase+e])
 	}
 	if t.ffnLayerNormEnabled() {
-		if out, ok := t.tryLayerNormBackwardRows(gradOutputMatrix, state.projected, state.ffnResidual, seqLen, e, state.projectedBinding, state.ffnResidualBinding); ok {
-			copy(gradOutputMatrix, out)
-		} else {
+		accelerated := false
+		if !state.skipUnboundActivationBackward(state.projectedBinding, state.ffnResidualBinding) {
+			if out, ok := t.tryLayerNormBackwardRows(gradOutputMatrix, state.projected, state.ffnResidual, seqLen, e, state.projectedBinding, state.ffnResidualBinding); ok {
+				copy(gradOutputMatrix, out)
+				accelerated = true
+			}
+		}
+		if !accelerated {
 			for row := range state.tokens {
 				if state.mask[row] == 0 {
 					continue
@@ -3087,9 +3107,14 @@ func (t *EmbeddingTrainer) backpropProjectedFFNSequence(state *embeddingSequence
 		fillHostMatMulTranspose(gradOutputMatrix, seqLen, e, projData, h, e, false, true, gradActivatedPre)
 	}
 	gradActivated := make([]float32, seqLen*h)
-	if out, ok := t.tryGELUBackwardMul(gradActivatedPre, state.ffnHidden, seqLen, h, state.ffnHiddenBinding); ok {
-		copy(gradActivated, out)
-	} else {
+	acceleratedGELU := false
+	if !state.skipUnboundActivationBackward(state.ffnHiddenBinding) {
+		if out, ok := t.tryGELUBackwardMul(gradActivatedPre, state.ffnHidden, seqLen, h, state.ffnHiddenBinding); ok {
+			copy(gradActivated, out)
+			acceleratedGELU = true
+		}
+	}
+	if !acceleratedGELU {
 		for row := range state.tokens {
 			if state.mask[row] == 0 {
 				continue
@@ -3741,14 +3766,17 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 		gradPreSoftmaxMatrices = make([][]float32, len(states))
 		for i, state := range states {
 			gradPreSoftmaxFlat := make([]float32, seqLen*seqLen)
-			if out, ok := t.trySoftmaxBackwardRows(gradScoresMatrices[i], state.attnScores, seqLen, seqLen, state.attnScoresBinding); ok {
-				copy(gradPreSoftmaxFlat, out)
-			} else {
-				for row := 0; row < seqLen; row++ {
-					rowScores := state.attnScores[row*seqLen : (row+1)*seqLen]
-					gradScores := gradScoresMatrices[i][row*seqLen : (row+1)*seqLen]
-					backwardSoftmaxRow(gradPreSoftmaxFlat[row*seqLen:(row+1)*seqLen], gradScores, rowScores)
+			if !state.skipUnboundActivationBackward(state.attnScoresBinding) {
+				if out, ok := t.trySoftmaxBackwardRows(gradScoresMatrices[i], state.attnScores, seqLen, seqLen, state.attnScoresBinding); ok {
+					copy(gradPreSoftmaxFlat, out)
+					gradPreSoftmaxMatrices[i] = gradPreSoftmaxFlat
+					continue
 				}
+			}
+			for row := 0; row < seqLen; row++ {
+				rowScores := state.attnScores[row*seqLen : (row+1)*seqLen]
+				gradScores := gradScoresMatrices[i][row*seqLen : (row+1)*seqLen]
+				backwardSoftmaxRow(gradPreSoftmaxFlat[row*seqLen:(row+1)*seqLen], gradScores, rowScores)
 			}
 			gradPreSoftmaxMatrices[i] = gradPreSoftmaxFlat
 		}
@@ -3959,12 +3987,17 @@ func (t *EmbeddingTrainer) backpropAttentionSequence(state *embeddingSequenceSta
 		}
 	}
 	if t.attentionLayerNormEnabled() {
-		if out, ok := t.tryLayerNormBackwardRows(gradAttnOutput, state.hidden, state.attnResidual, seqLen, d, state.hiddenBinding, state.attnResidualBinding); ok {
-			copy(gradAttnOutput, out)
-			if t.attentionResidualEnabled() {
-				copy(gradResidualInput, out)
+		accelerated := false
+		if !state.skipUnboundActivationBackward(state.hiddenBinding, state.attnResidualBinding) {
+			if out, ok := t.tryLayerNormBackwardRows(gradAttnOutput, state.hidden, state.attnResidual, seqLen, d, state.hiddenBinding, state.attnResidualBinding); ok {
+				copy(gradAttnOutput, out)
+				if t.attentionResidualEnabled() {
+					copy(gradResidualInput, out)
+				}
+				accelerated = true
 			}
-		} else {
+		}
+		if !accelerated {
 			for row := 0; row < seqLen; row++ {
 				base := row * d
 				backwardLayerNormRow(
@@ -4010,9 +4043,14 @@ func (t *EmbeddingTrainer) backpropAttentionSequence(state *embeddingSequenceSta
 		fillHostMatMulTranspose(gradMixed, seqLen, d, state.attnV, seqLen, d, false, true, gradScoresFlat)
 	}
 	gradPreSoftmaxFlat := make([]float32, seqLen*seqLen)
-	if out, ok := t.trySoftmaxBackwardRows(gradScoresFlat, state.attnScores, seqLen, seqLen, state.attnScoresBinding); ok {
-		copy(gradPreSoftmaxFlat, out)
-	} else {
+	acceleratedSoftmax := false
+	if !state.skipUnboundActivationBackward(state.attnScoresBinding) {
+		if out, ok := t.trySoftmaxBackwardRows(gradScoresFlat, state.attnScores, seqLen, seqLen, state.attnScoresBinding); ok {
+			copy(gradPreSoftmaxFlat, out)
+			acceleratedSoftmax = true
+		}
+	}
+	if !acceleratedSoftmax {
 		for i := 0; i < seqLen; i++ {
 			rowScores := state.attnScores[i*seqLen : (i+1)*seqLen]
 			gradScores := gradScoresFlat[i*seqLen : (i+1)*seqLen]
