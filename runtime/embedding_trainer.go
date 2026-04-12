@@ -4033,11 +4033,9 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 	for i, state := range states {
 		gradMixed := gradMixedMatrices[i]
 		gradPreSoftmaxFlat := gradPreSoftmaxMatrices[i]
-		gradQ := make([]float32, seqLen*d)
-		gradK := make([]float32, seqLen*d)
-		gradV := make([]float32, seqLen*d)
+		var gradQ, gradK, gradV []float32
 		if gradVOK {
-			addFloat32Slice(gradV, batchedGradV[i])
+			gradV = batchedGradV[i]
 		} else if out, ok := t.tryTrainerMatMulBoundLeft(
 			state.attnScoresBinding,
 			tensorF32View([]int{seqLen, seqLen}, state.attnScores),
@@ -4045,24 +4043,25 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 			true,
 			false,
 		); ok {
-			addFloat32Slice(gradV, out)
+			gradV = out
 		} else {
-			gradVStep := make([]float32, seqLen*d)
-			fillHostMatMulTranspose(state.attnScores, seqLen, seqLen, gradMixed, seqLen, d, true, false, gradVStep)
-			addFloat32Slice(gradV, gradVStep)
+			gradV = make([]float32, seqLen*d)
+			fillHostMatMulTranspose(state.attnScores, seqLen, seqLen, gradMixed, seqLen, d, true, false, gradV)
 		}
 		if gradQOK {
-			copy(gradQ, batchedGradQ[i])
+			gradQ = batchedGradQ[i]
 		} else if out, ok := t.tryTrainerMatMul(gradPreSoftmaxFlat, seqLen, seqLen, state.attnK, seqLen, d, false, false); ok {
-			copy(gradQ, out)
+			gradQ = out
 		} else {
+			gradQ = make([]float32, seqLen*d)
 			fillHostMatMulTranspose(gradPreSoftmaxFlat, seqLen, seqLen, state.attnK, seqLen, d, false, false, gradQ)
 		}
 		if gradKOK {
-			copy(gradK, batchedGradK[i])
+			gradK = batchedGradK[i]
 		} else if out, ok := t.tryTrainerMatMul(gradPreSoftmaxFlat, seqLen, seqLen, state.attnQ, seqLen, d, true, false); ok {
-			copy(gradK, out)
+			gradK = out
 		} else {
+			gradK = make([]float32, seqLen*d)
 			fillHostMatMulTranspose(gradPreSoftmaxFlat, seqLen, seqLen, state.attnQ, seqLen, d, true, false, gradK)
 		}
 		gradQMatrices[i] = gradQ
