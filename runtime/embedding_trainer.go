@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/odvcencio/manta/artifact/barr"
@@ -46,6 +47,9 @@ type EmbeddingEvalMetrics struct {
 	PositiveMeanScore  float32
 	NegativeMeanScore  float32
 	PairAccuracy       float32
+	ThresholdAccuracy  float32
+	ScoreThreshold     float32
+	ROCAUC             float32
 	ScoreMargin        float32
 	Top1Accuracy       float32
 	Top5Accuracy       float32
@@ -61,6 +65,11 @@ type EmbeddingEvalMetrics struct {
 type EmbeddingForwardResidencyStats struct {
 	BindSkips int64
 	MatMul    backend.MatMulAcceleratorStats
+}
+
+type embeddingEvalScore struct {
+	Score    float32
+	Positive bool
 }
 
 // EmbeddingTrainer trains a pooled embedding model with quantization-aware forward passes.
@@ -681,6 +690,7 @@ func (t *EmbeddingTrainer) EvaluatePairs(batch []EmbeddingPairExample) (Embeddin
 	)
 
 	metrics := EmbeddingEvalMetrics{PairCount: len(batch)}
+	scores := make([]embeddingEvalScore, 0, len(batch))
 	for i, example := range batch {
 		score, loss, err := t.scoreExamplePair(example, forward)
 		if err != nil {
@@ -688,7 +698,9 @@ func (t *EmbeddingTrainer) EvaluatePairs(batch []EmbeddingPairExample) (Embeddin
 		}
 		metrics.Loss += loss
 		metrics.AverageScore += score
-		if example.Target > 0 {
+		positive := example.Target > 0
+		scores = append(scores, embeddingEvalScore{Score: score, Positive: positive})
+		if positive {
 			metrics.PositiveCount++
 			metrics.PositiveMeanScore += score
 			if score > 0 {
@@ -713,7 +725,93 @@ func (t *EmbeddingTrainer) EvaluatePairs(batch []EmbeddingPairExample) (Embeddin
 		metrics.NegativeMeanScore /= float32(metrics.NegativeCount)
 	}
 	metrics.ScoreMargin = metrics.PositiveMeanScore - metrics.NegativeMeanScore
+	finalizeEvalScoreMetrics(&metrics, scores)
 	return metrics, nil
+}
+
+func finalizeEvalScoreMetrics(metrics *EmbeddingEvalMetrics, scores []embeddingEvalScore) {
+	if metrics == nil || len(scores) == 0 || metrics.PositiveCount == 0 || metrics.NegativeCount == 0 {
+		return
+	}
+	metrics.ThresholdAccuracy, metrics.ScoreThreshold = bestEvalScoreThresholdAccuracy(scores, metrics.PositiveCount, metrics.NegativeCount)
+	metrics.ROCAUC = evalScoreROCAUC(scores, metrics.PositiveCount, metrics.NegativeCount)
+}
+
+func bestEvalScoreThresholdAccuracy(scores []embeddingEvalScore, positiveCount, negativeCount int) (float32, float32) {
+	if len(scores) == 0 {
+		return 0, 0
+	}
+	ordered := append([]embeddingEvalScore(nil), scores...)
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].Score > ordered[j].Score
+	})
+	bestCorrect := negativeCount
+	bestThreshold := ordered[0].Score
+	seenPositives := 0
+	seenNegatives := 0
+	for i := 0; i < len(ordered); {
+		j := i + 1
+		groupPositives := 0
+		groupNegatives := 0
+		for j <= len(ordered) {
+			current := ordered[j-1]
+			if current.Positive {
+				groupPositives++
+			} else {
+				groupNegatives++
+			}
+			if j == len(ordered) || ordered[j].Score != ordered[i].Score {
+				break
+			}
+			j++
+		}
+		seenPositives += groupPositives
+		seenNegatives += groupNegatives
+		correct := seenPositives + (negativeCount - seenNegatives)
+		if correct > bestCorrect {
+			bestCorrect = correct
+			bestThreshold = ordered[i].Score
+		}
+		i = j
+	}
+	return float32(bestCorrect) / float32(len(ordered)), bestThreshold
+}
+
+func evalScoreROCAUC(scores []embeddingEvalScore, positiveCount, negativeCount int) float32 {
+	if len(scores) == 0 || positiveCount == 0 || negativeCount == 0 {
+		return 0
+	}
+	ordered := append([]embeddingEvalScore(nil), scores...)
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].Score < ordered[j].Score
+	})
+	rankSumPositives := float64(0)
+	for i := 0; i < len(ordered); {
+		j := i + 1
+		positivesInGroup := 0
+		if ordered[i].Positive {
+			positivesInGroup++
+		}
+		for j < len(ordered) && ordered[j].Score == ordered[i].Score {
+			if ordered[j].Positive {
+				positivesInGroup++
+			}
+			j++
+		}
+		averageRank := (float64(i+1) + float64(j)) * 0.5
+		rankSumPositives += float64(positivesInGroup) * averageRank
+		i = j
+	}
+	positives := float64(positiveCount)
+	negatives := float64(negativeCount)
+	auc := (rankSumPositives - positives*(positives+1)*0.5) / (positives * negatives)
+	if auc < 0 {
+		return 0
+	}
+	if auc > 1 {
+		return 1
+	}
+	return float32(auc)
 }
 
 // EvaluateContrastive runs pairwise contrastive evaluation without re-encoding each expanded pair.
@@ -1864,6 +1962,7 @@ func evaluateContrastiveEncodings(queries, positives []*embeddingEncodedSequence
 	positiveMatrix := newContrastivePooledMatrix(positives)
 	rowScores := make([]float32, len(positives))
 	rowProbs := make([]float32, len(positives))
+	scores := make([]embeddingEvalScore, 0, metrics.PairCount)
 	for i := range queries {
 		query := queryMatrix.row(i)
 		queryNorm := queryMatrix.norms[i]
@@ -1873,6 +1972,7 @@ func evaluateContrastiveEncodings(queries, positives []*embeddingEncodedSequence
 				target = 1
 			}
 			score := cosineScoreWithNorms(query, positiveMatrix.row(j), queryNorm, positiveMatrix.norms[j])
+			scores = append(scores, embeddingEvalScore{Score: score, Positive: target > 0})
 			rowScores[j] = score
 			scale := score - target
 			if cfg.ContrastiveLoss != "infonce" {
@@ -1949,6 +2049,7 @@ func evaluateContrastiveEncodings(queries, positives []*embeddingEncodedSequence
 		metrics.MeanPositiveRank *= invRows
 	}
 	metrics.ScoreMargin = metrics.PositiveMeanScore - metrics.NegativeMeanScore
+	finalizeEvalScoreMetrics(&metrics, scores)
 	return metrics
 }
 

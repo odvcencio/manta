@@ -910,7 +910,7 @@ func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) e
 
 func validTrainSelectionMetric(metric string) bool {
 	switch metric {
-	case "loss", "pair_accuracy", "score_margin", "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr", "mean_positive_rank", "mean_rank":
+	case "loss", "pair_accuracy", "threshold_accuracy", "score_margin", "auc", "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr", "mean_positive_rank", "mean_rank":
 		return true
 	default:
 		return false
@@ -945,7 +945,19 @@ func betterEvalMetrics(current, best EmbeddingEvalMetrics, metric string, minDel
 				return true
 			}
 		}
-	case "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr":
+	case "threshold_accuracy":
+		if current.ThresholdAccuracy > best.ThresholdAccuracy+primaryDelta {
+			return true
+		}
+		if math.Abs(float64(current.ThresholdAccuracy-best.ThresholdAccuracy)) <= eps {
+			if current.ROCAUC > best.ROCAUC+float32(eps) {
+				return true
+			}
+			if math.Abs(float64(current.ROCAUC-best.ROCAUC)) <= eps && current.ScoreMargin > best.ScoreMargin+float32(eps) {
+				return true
+			}
+		}
+	case "auc", "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr":
 		currentRankMetric := evalRankMetric(current, metric)
 		bestRankMetric := evalRankMetric(best, metric)
 		if currentRankMetric > bestRankMetric+primaryDelta {
@@ -989,6 +1001,8 @@ func betterEvalMetrics(current, best EmbeddingEvalMetrics, metric string, minDel
 
 func evalRankMetric(metrics EmbeddingEvalMetrics, metric string) float32 {
 	switch metric {
+	case "auc":
+		return metrics.ROCAUC
 	case "top5_accuracy":
 		return metrics.Top5Accuracy
 	case "top10_accuracy":

@@ -722,6 +722,25 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
 	}
 }
 
+func TestEvalScoreMetricsCalibratePositiveScoreShift(t *testing.T) {
+	metrics := EmbeddingEvalMetrics{
+		PairAccuracy:  0.5,
+		PositiveCount: 2,
+		NegativeCount: 2,
+	}
+	finalizeEvalScoreMetrics(&metrics, []embeddingEvalScore{
+		{Score: 0.9, Positive: true},
+		{Score: 0.8, Positive: true},
+		{Score: 0.7, Positive: false},
+		{Score: 0.6, Positive: false},
+	})
+
+	assertClose(t, metrics.PairAccuracy, 0.5, 0.000001)
+	assertClose(t, metrics.ThresholdAccuracy, 1, 0.000001)
+	assertClose(t, metrics.ScoreThreshold, 0.8, 0.000001)
+	assertClose(t, metrics.ROCAUC, 1, 0.000001)
+}
+
 func TestDefaultEmbeddingCheckpointPath(t *testing.T) {
 	got := DefaultEmbeddingCheckpointPath("/tmp/tiny_train_embed_q8.barr")
 	if want := "/tmp/tiny_train_embed_q8.embed-train.mll"; got != want {

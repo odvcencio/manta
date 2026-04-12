@@ -86,7 +86,8 @@ Common knobs:
   MANTA_LR=0.005
   MANTA_TEMPERATURE=0.05
   MANTA_SELECT_METRIC=score_margin
-  MANTA_MIN_PAIR_ACCURACY=0.70`)
+  MANTA_MIN_AUC=0.70
+  MANTA_MIN_THRESHOLD_ACCURACY=0.65`)
 }
 
 func getenv(name string, fallback string) string {
@@ -784,6 +785,10 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	err = requireMetricMin(gateLog, "top10", os.Getenv("MANTA_MIN_TOP10"))
 	guard err == nil else return cfg, err
 	err = requireMetricMin(gateLog, "accuracy", os.Getenv("MANTA_MIN_PAIR_ACCURACY"))
+	guard err == nil else return cfg, err
+	err = requireMetricMin(gateLog, "threshold_accuracy", os.Getenv("MANTA_MIN_THRESHOLD_ACCURACY"))
+	guard err == nil else return cfg, err
+	err = requireMetricMin(gateLog, "auc", os.Getenv("MANTA_MIN_AUC"))
 	guard err == nil else return cfg, err
 	err = requireMetricMin(gateLog, "margin", os.Getenv("MANTA_MIN_SCORE_MARGIN"))
 	guard err == nil else return cfg, err

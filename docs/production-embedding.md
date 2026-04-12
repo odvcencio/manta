@@ -51,8 +51,9 @@ MANTA_BATCH_SIZE=1024 \
 MANTA_LR=0.005 \
 MANTA_TEMPERATURE=0.05 \
 MANTA_SELECT_METRIC=score_margin \
+MANTA_MIN_AUC=0.70 \
+MANTA_MIN_THRESHOLD_ACCURACY=0.65 \
 MANTA_MIN_SCORE_MARGIN=0.05 \
-MANTA_MIN_PAIR_ACCURACY=0.70 \
 MANTA_MAX_LOSS=0.35 \
 ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
 ```
@@ -65,12 +66,13 @@ The default acquired eval files are pairwise positive/negative judgments with on
 
 ```text
 MANTA_SELECT_METRIC=score_margin
-MANTA_MIN_PAIR_ACCURACY=0.70
+MANTA_MIN_AUC=0.70
+MANTA_MIN_THRESHOLD_ACCURACY=0.65
 MANTA_MIN_SCORE_MARGIN=0.05
 MANTA_MAX_LOSS=0.35
 ```
 
-These gates are intentionally concrete rather than advisory. Pair accuracy must clear a 0.70 hard threshold against a 0.50 random-sign baseline, positive scores must beat negative scores by at least 0.05 on average, and pairwise loss must stay at or below 0.35. Tighten them after the first stable full-size candidate establishes the project baseline.
+These gates are intentionally concrete rather than advisory. AUC must clear 0.70 as a threshold-free separability check, calibrated threshold accuracy must clear 0.65 against a 0.50 random baseline, positive scores must beat negative scores by at least 0.05 on average, and pairwise loss must stay at or below 0.35. Tighten them after the first stable full-size candidate establishes the project baseline.
 
 ## Corpus Path
 

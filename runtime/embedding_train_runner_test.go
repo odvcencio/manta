@@ -518,6 +518,9 @@ func TestEmbeddingTrainerEvaluateContrastiveMatchesExpandedPairs(t *testing.T) {
 	assertClose(t, got.PositiveMeanScore, want.PositiveMeanScore, 0.000001)
 	assertClose(t, got.NegativeMeanScore, want.NegativeMeanScore, 0.000001)
 	assertClose(t, got.PairAccuracy, want.PairAccuracy, 0.000001)
+	assertClose(t, got.ThresholdAccuracy, want.ThresholdAccuracy, 0.000001)
+	assertClose(t, got.ScoreThreshold, want.ScoreThreshold, 0.000001)
+	assertClose(t, got.ROCAUC, want.ROCAUC, 0.000001)
 	assertClose(t, got.ScoreMargin, want.ScoreMargin, 0.000001)
 	if got.PairCount != want.PairCount {
 		t.Fatalf("pair count = %d, want %d", got.PairCount, want.PairCount)
