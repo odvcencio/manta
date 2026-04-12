@@ -1463,7 +1463,7 @@ func (t *EmbeddingTrainer) encodeBatchSequencesByLength(sequences []*embeddingBa
 			for i, state := range states {
 				sequence := slots[i].sequence
 				sequence.encoded.layers = append(sequence.encoded.layers, state)
-				sequence.current = append(sequence.current[:0], state.projected...)
+				sequence.current = state.projected
 			}
 		}
 	}
@@ -1682,16 +1682,22 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 				return state.input
 			}, t.attnQParam.Name, attentionQuery, d, func(state *embeddingSequenceState) []float32 {
 				return state.attnQ
+			}, func(state *embeddingSequenceState, data []float32) {
+				state.attnQ = data
 			})
 			t.fillBatchedForwardWeightMatMul(states, seqLen, d, func(state *embeddingSequenceState) []float32 {
 				return state.input
 			}, t.attnKParam.Name, attentionKey, d, func(state *embeddingSequenceState) []float32 {
 				return state.attnK
+			}, func(state *embeddingSequenceState, data []float32) {
+				state.attnK = data
 			})
 			t.fillBatchedForwardWeightMatMul(states, seqLen, d, func(state *embeddingSequenceState) []float32 {
 				return state.input
 			}, t.attnVParam.Name, attentionValue, d, func(state *embeddingSequenceState) []float32 {
 				return state.attnV
+			}, func(state *embeddingSequenceState, data []float32) {
+				state.attnV = data
 			})
 		}
 		for _, state := range states {
@@ -1704,7 +1710,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 		batchedScores, batchedScoresOK := t.tryBatchedAttentionScores(states, seqLen, d)
 		for i, state := range states {
 			if batchedScoresOK {
-				copy(state.attnScores, batchedScores[i])
+				state.attnScores = batchedScores[i]
 			} else {
 				kt := transpose2DData(state.attnK, seqLen, d)
 				var (
@@ -1717,7 +1723,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 					scores, matmulOK = t.tryTrainerMatMul(state.attnQ, seqLen, d, state.attnK, seqLen, d, false, true)
 				}
 				if matmulOK {
-					copy(state.attnScores, scores)
+					state.attnScores = scores
 				} else {
 					fillHostMatMul(state.attnQ, seqLen, d, kt, seqLen, state.attnScores)
 				}
@@ -1730,7 +1736,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 		batchedMixed, batchedMixedOK := t.tryBatchedAttentionMixed(states, seqLen, d)
 		for i, state := range states {
 			if batchedMixedOK {
-				copy(state.attnMixed, batchedMixed[i])
+				state.attnMixed = batchedMixed[i]
 			} else {
 				var (
 					mixed    []float32
@@ -1742,7 +1748,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 					mixed, matmulOK = t.tryTrainerMatMul(state.attnScores, seqLen, seqLen, state.attnV, seqLen, d, false, false)
 				}
 				if matmulOK {
-					copy(state.attnMixed, mixed)
+					state.attnMixed = mixed
 				} else {
 					fillHostMatMul(state.attnScores, seqLen, seqLen, state.attnV, d, state.attnMixed)
 				}
@@ -1756,6 +1762,8 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 			return state.attnMixed
 		}, t.attnOParam.Name, attentionOutput, d, func(state *embeddingSequenceState) []float32 {
 			return state.attnOutput
+		}, func(state *embeddingSequenceState, data []float32) {
+			state.attnOutput = data
 		})
 		for _, state := range states {
 			if t.attentionResidualEnabled() || t.attentionLayerNormEnabled() {
@@ -1798,6 +1806,8 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 			return state.hidden
 		}, t.hiddenParam.Name, hiddenProjection, h, func(state *embeddingSequenceState) []float32 {
 			return state.ffnHidden
+		}, func(state *embeddingSequenceState, data []float32) {
+			state.ffnHidden = data
 		})
 		for _, state := range states {
 			if captureBindings {
@@ -1814,6 +1824,8 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 			return state.activated
 		}, t.projParam.Name, projection, e, func(state *embeddingSequenceState) []float32 {
 			return state.ffnOutput
+		}, func(state *embeddingSequenceState, data []float32) {
+			state.ffnOutput = data
 		})
 		for _, state := range states {
 			if t.ffnResidualEnabled() || t.ffnLayerNormEnabled() {
@@ -1845,6 +1857,8 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 			return state.hidden
 		}, t.projParam.Name, projection, e, func(state *embeddingSequenceState) []float32 {
 			return state.projected
+		}, func(state *embeddingSequenceState, data []float32) {
+			state.projected = data
 		})
 	}
 
@@ -1917,14 +1931,14 @@ func (t *EmbeddingTrainer) fillBatchedForwardQKVMatMul(states []*embeddingSequen
 		outs[i] = out
 	}
 	for i, state := range states {
-		copy(state.attnQ, outs[0][i*perInput:(i+1)*perInput])
-		copy(state.attnK, outs[1][i*perInput:(i+1)*perInput])
-		copy(state.attnV, outs[2][i*perInput:(i+1)*perInput])
+		state.attnQ = outs[0][i*perInput : (i+1)*perInput]
+		state.attnK = outs[1][i*perInput : (i+1)*perInput]
+		state.attnV = outs[2][i*perInput : (i+1)*perInput]
 	}
 	return true
 }
 
-func (t *EmbeddingTrainer) fillBatchedForwardWeightMatMul(states []*embeddingSequenceState, rows, inner int, lhs func(*embeddingSequenceState) []float32, rhsName string, rhs *backend.Tensor, cols int, dst func(*embeddingSequenceState) []float32) {
+func (t *EmbeddingTrainer) fillBatchedForwardWeightMatMul(states []*embeddingSequenceState, rows, inner int, lhs func(*embeddingSequenceState) []float32, rhsName string, rhs *backend.Tensor, cols int, dst func(*embeddingSequenceState) []float32, assign func(*embeddingSequenceState, []float32)) {
 	if len(states) == 0 || rhs == nil || rows == 0 || inner == 0 || cols == 0 {
 		return
 	}
@@ -1943,7 +1957,12 @@ func (t *EmbeddingTrainer) fillBatchedForwardWeightMatMul(states []*embeddingSeq
 		if valid {
 			if out, ok := t.tryForwardWeightMatMul(batchedLHS, len(states)*rows, inner, rhsName, rhs, cols); ok && len(out) == len(states)*rows*cols {
 				for i, state := range states {
-					copy(dst(state), out[i*rows*cols:(i+1)*rows*cols])
+					view := out[i*rows*cols : (i+1)*rows*cols]
+					if assign != nil {
+						assign(state, view)
+					} else {
+						copy(dst(state), view)
+					}
 				}
 				return
 			}
@@ -2438,7 +2457,7 @@ func (t *EmbeddingTrainer) encodeSequence(tokens, mask []int32, tokenEmbed, atte
 			return nil, err
 		}
 		encoded.layers = append(encoded.layers, state)
-		current = append([]float32(nil), state.projected...)
+		current = state.projected
 	}
 	if len(encoded.layers) == 0 {
 		return nil, fmt.Errorf("encoder produced zero layers")
@@ -2676,7 +2695,7 @@ func newEmbeddingSequenceState(tokens, mask []int32, input []float32, hiddenProj
 	state := &embeddingSequenceState{
 		tokens:       append([]int32(nil), tokens...),
 		mask:         append([]int32(nil), mask...),
-		input:        make([]float32, len(tokens)*d),
+		input:        input,
 		hidden:       make([]float32, len(tokens)*d),
 		attnQ:        make([]float32, len(tokens)*d),
 		attnK:        make([]float32, len(tokens)*d),
@@ -2694,7 +2713,6 @@ func newEmbeddingSequenceState(tokens, mask []int32, input []float32, hiddenProj
 		pooled:       make([]float32, e),
 		activeCount:  0,
 	}
-	copy(state.input, input)
 	return state, nil
 }
 
