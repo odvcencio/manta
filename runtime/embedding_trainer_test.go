@@ -13,6 +13,53 @@ import (
 	"github.com/odvcencio/manta/runtime/backends/metal"
 )
 
+func TestFlattenFixedFloat32MatricesScratchReusesContiguousViews(t *testing.T) {
+	trainer := &EmbeddingTrainer{}
+	base := []float32{1, 2, 3, 4, 5, 6}
+	matrices := [][]float32{
+		base[0:2],
+		base[2:4],
+		base[4:6],
+	}
+	out, ok := trainer.flattenFixedFloat32MatricesScratch(0, matrices, 2)
+	if !ok {
+		t.Fatal("flatten contiguous matrices failed")
+	}
+	if len(out) != len(base) {
+		t.Fatalf("flattened len = %d, want %d", len(out), len(base))
+	}
+	if &out[0] != &base[0] {
+		t.Fatal("contiguous flatten copied instead of reusing the backing array")
+	}
+	if len(trainer.scratchF32) != 0 {
+		t.Fatalf("scratch buffer count = %d, want 0", len(trainer.scratchF32))
+	}
+}
+
+func TestFlattenFixedFloat32MatricesScratchCopiesNonContiguousViews(t *testing.T) {
+	trainer := &EmbeddingTrainer{}
+	left := []float32{1, 2}
+	right := []float32{3, 4}
+	out, ok := trainer.flattenFixedFloat32MatricesScratch(0, [][]float32{left, right}, 2)
+	if !ok {
+		t.Fatal("flatten non-contiguous matrices failed")
+	}
+	if len(out) != 4 {
+		t.Fatalf("flattened len = %d, want 4", len(out))
+	}
+	if &out[0] == &left[0] {
+		t.Fatal("non-contiguous flatten reused left backing array")
+	}
+	for i, want := range []float32{1, 2, 3, 4} {
+		if out[i] != want {
+			t.Fatalf("out[%d] = %v, want %v", i, out[i], want)
+		}
+	}
+	if len(trainer.scratchF32) != 1 {
+		t.Fatalf("scratch buffer count = %d, want 1", len(trainer.scratchF32))
+	}
+}
+
 type countingMatMulAccelerator struct {
 	bindCalls         int
 	runCalls          int

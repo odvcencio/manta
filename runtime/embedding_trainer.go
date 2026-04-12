@@ -2755,6 +2755,9 @@ func (t *EmbeddingTrainer) flattenFixedFloat32MatricesScratch(slot int, matrices
 	if len(matrices) == 0 || perMatrix <= 0 {
 		return nil, false
 	}
+	if out, ok := contiguousFixedFloat32Matrices(matrices, perMatrix); ok {
+		return out, true
+	}
 	out := t.scratchFloat32(slot, len(matrices)*perMatrix)
 	if !flattenFixedFloat32MatricesInto(out, matrices, perMatrix) {
 		return nil, false
@@ -2766,9 +2769,30 @@ func flattenFixedFloat32Matrices(matrices [][]float32, perMatrix int) ([]float32
 	if len(matrices) == 0 || perMatrix <= 0 {
 		return nil, false
 	}
+	if out, ok := contiguousFixedFloat32Matrices(matrices, perMatrix); ok {
+		return out, true
+	}
 	out := make([]float32, len(matrices)*perMatrix)
 	if !flattenFixedFloat32MatricesInto(out, matrices, perMatrix) {
 		return nil, false
+	}
+	return out, true
+}
+
+func contiguousFixedFloat32Matrices(matrices [][]float32, perMatrix int) ([]float32, bool) {
+	if len(matrices) == 0 || perMatrix <= 0 {
+		return nil, false
+	}
+	total := len(matrices) * perMatrix
+	first := matrices[0]
+	if len(first) != perMatrix || cap(first) < total {
+		return nil, false
+	}
+	out := first[:total]
+	for i, matrix := range matrices {
+		if len(matrix) != perMatrix || &out[i*perMatrix] != &matrix[0] {
+			return nil, false
+		}
 	}
 	return out, true
 }
