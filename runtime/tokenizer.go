@@ -3,7 +3,6 @@ package barruntime
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -13,7 +12,7 @@ import (
 	mll "github.com/odvcencio/mll"
 )
 
-const TokenizerFileVersion = "barr/tokenizer/v0alpha1"
+const TokenizerFileVersion = "manta/tokenizer/v0alpha1"
 
 var tagXTOK = [4]byte{'X', 'T', 'O', 'K'}
 
@@ -76,17 +75,10 @@ func ReadTokenizerFile(path string) (TokenizerFile, error) {
 	if err != nil {
 		return TokenizerFile{}, err
 	}
-	if barr.IsMLLBytes(data) {
-		return decodeTokenizerMLL(data)
+	if !barr.IsMLLBytes(data) {
+		return TokenizerFile{}, fmt.Errorf("tokenizer %q is not an MLL file", path)
 	}
-	var file TokenizerFile
-	if err := json.Unmarshal(data, &file); err != nil {
-		return TokenizerFile{}, err
-	}
-	if err := file.Validate(); err != nil {
-		return TokenizerFile{}, err
-	}
-	return file, nil
+	return decodeTokenizerMLL(data)
 }
 
 func encodeTokenizerMLL(file TokenizerFile) ([]byte, error) {

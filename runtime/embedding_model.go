@@ -2,15 +2,13 @@ package barruntime
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/odvcencio/manta/artifact/barr"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
-const EmbeddingManifestVersion = "barr/embedding-manifest/v0alpha1"
+const EmbeddingManifestVersion = "manta/embedding-manifest/v0alpha1"
 
 // TokenizerManifest carries embedding-model tokenization limits and ids.
 type TokenizerManifest struct {
@@ -52,30 +50,23 @@ type EmbeddingModel struct {
 	manifest EmbeddingManifest
 }
 
-// ReadEmbeddingManifestFile decodes a JSON embedding manifest.
+// ReadEmbeddingManifestFile decodes an authored MLL embedding manifest.
 func ReadEmbeddingManifestFile(path string) (EmbeddingManifest, error) {
-	if doc, err := readAuthoredManifestMLL(path, "embedding_manifest", EmbeddingManifestVersion); err == nil {
-		return embeddingManifestFromDoc(doc)
-	}
-	data, err := os.ReadFile(path)
+	doc, err := readAuthoredManifestMLL(path, "embedding_manifest", EmbeddingManifestVersion)
 	if err != nil {
 		return EmbeddingManifest{}, err
 	}
-	var manifest EmbeddingManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return EmbeddingManifest{}, err
-	}
-	return manifest, nil
+	return embeddingManifestFromDoc(doc)
 }
 
-// DefaultEmbeddingManifestPath returns the conventional sibling manifest path for a .barr artifact.
+// DefaultEmbeddingManifestPath returns the conventional sibling manifest path for an .mll artifact.
 func DefaultEmbeddingManifestPath(barrPath string) string {
 	return defaultManifestPath(barrPath, ".embedding.mll")
 }
 
-// ResolveEmbeddingManifestPath returns the preferred sibling embedding manifest path, falling back to legacy JSON.
+// ResolveEmbeddingManifestPath returns the sibling embedding manifest path.
 func ResolveEmbeddingManifestPath(barrPath string) string {
-	return resolveSiblingPath(barrPath, ".embedding.mll", ".embedding.json")
+	return DefaultEmbeddingManifestPath(barrPath)
 }
 
 // WriteFile writes the embedding manifest as an authored MLL container.
@@ -96,7 +87,7 @@ func (rt *Runtime) LoadEmbedding(ctx context.Context, mod *barr.Module, manifest
 	return &EmbeddingModel{program: prog, manifest: manifest}, nil
 }
 
-// LoadEmbeddingFile reads a .barr artifact and loads it as an embedding model.
+// LoadEmbeddingFile reads a .mll artifact and loads it as an embedding model.
 func (rt *Runtime) LoadEmbeddingFile(ctx context.Context, barrPath string, manifest EmbeddingManifest, opts ...LoadOption) (*EmbeddingModel, error) {
 	mod, err := barr.ReadFile(barrPath)
 	if err != nil {
@@ -105,12 +96,12 @@ func (rt *Runtime) LoadEmbeddingFile(ctx context.Context, barrPath string, manif
 	return rt.LoadEmbedding(ctx, mod, manifest, opts...)
 }
 
-// LoadEmbeddingBundle reads a .barr artifact plus its sibling embedding manifest.
+// LoadEmbeddingBundle reads a .mll artifact plus its sibling embedding manifest.
 func (rt *Runtime) LoadEmbeddingBundle(ctx context.Context, barrPath string, opts ...LoadOption) (*EmbeddingModel, error) {
 	return rt.LoadEmbeddingBundleWithManifest(ctx, barrPath, ResolveEmbeddingManifestPath(barrPath), opts...)
 }
 
-// LoadEmbeddingBundleWithManifest reads a .barr artifact plus an explicit embedding manifest path.
+// LoadEmbeddingBundleWithManifest reads a .mll artifact plus an explicit embedding manifest path.
 func (rt *Runtime) LoadEmbeddingBundleWithManifest(ctx context.Context, barrPath, manifestPath string, opts ...LoadOption) (*EmbeddingModel, error) {
 	manifest, err := ReadEmbeddingManifestFile(manifestPath)
 	if err != nil {

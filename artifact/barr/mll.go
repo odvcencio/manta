@@ -13,9 +13,9 @@ import (
 	mll "github.com/odvcencio/mll"
 )
 
-const MLLMetadataVersion = "barr/mll/v0alpha1"
+const MLLMetadataVersion = "manta/mll/v0alpha1"
 
-var MLLTagXBAR = [4]byte{'X', 'B', 'A', 'R'}
+var MLLTagXMTA = [4]byte{'X', 'M', 'T', 'A'}
 
 // MLLMetadata preserves the Manta module inside an MLL container while
 // the native MLL section model catches up with Manta-specific semantics.
@@ -279,7 +279,7 @@ func EncodeMLL(mod *Module) ([]byte, error) {
 		sections = append(sections, mll.SectionInput{Tag: mll.TagSCHM, Body: body, SchemaVersion: 1})
 	}
 	sections = append(sections, mll.SectionInput{
-		Tag:           MLLTagXBAR,
+		Tag:           MLLTagXMTA,
 		Body:          metaBytes,
 		Flags:         mll.SectionFlagSkippable | mll.SectionFlagSchemaless,
 		SchemaVersion: 1,
@@ -293,9 +293,9 @@ func DecodeMLL(data []byte) (*Module, error) {
 	if err != nil {
 		return nil, err
 	}
-	body, ok := reader.Section(MLLTagXBAR)
+	body, ok := reader.Section(MLLTagXMTA)
 	if !ok {
-		return nil, fmt.Errorf("mll artifact missing XBAR metadata section")
+		return nil, fmt.Errorf("mll artifact missing XMTA metadata section")
 	}
 	meta, err := DecodeMLLMetadata(body)
 	if err != nil {
@@ -309,10 +309,10 @@ func ReadFile(path string) (*Module, error) {
 	if err != nil {
 		return nil, err
 	}
-	if IsMLLBytes(data) {
-		return DecodeMLL(data)
+	if !IsMLLBytes(data) {
+		return nil, fmt.Errorf("artifact %q is not an MLL file", path)
 	}
-	return DecodeJSON(data)
+	return DecodeMLL(data)
 }
 
 func WriteFile(path string, m *Module) error {

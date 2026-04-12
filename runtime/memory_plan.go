@@ -11,7 +11,7 @@ import (
 	mll "github.com/odvcencio/mll"
 )
 
-const MemoryPlanVersion = "barr/memory/v0alpha1"
+const MemoryPlanVersion = "manta/memory/v0alpha1"
 
 var tagXMEM = [4]byte{'X', 'M', 'E', 'M'}
 
@@ -209,17 +209,10 @@ func ReadMemoryPlanFile(path string) (MemoryPlan, error) {
 	if err != nil {
 		return MemoryPlan{}, err
 	}
-	if barr.IsMLLBytes(data) {
-		return decodeMemoryPlanMLL(data)
+	if !barr.IsMLLBytes(data) {
+		return MemoryPlan{}, fmt.Errorf("memory plan %q is not an MLL file", path)
 	}
-	var plan MemoryPlan
-	if err := json.Unmarshal(data, &plan); err != nil {
-		return MemoryPlan{}, err
-	}
-	if err := plan.Validate(); err != nil {
-		return MemoryPlan{}, err
-	}
-	return plan, nil
+	return decodeMemoryPlanMLL(data)
 }
 
 func encodeMemoryPlanMLL(plan MemoryPlan) ([]byte, error) {

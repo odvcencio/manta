@@ -1,11 +1,11 @@
 # Manta
 
-Manta is an inference-first GPU language and runtime stack. It compiles `.manta` source into backend-neutral `.mll` execution plans for GPU-accelerated embedding, reranking, retrieval-time scoring, and decode-time inference. Write the model-facing compute once, then run it on NVIDIA (CUDA) or Apple Silicon (Metal) with the same artifact and the same entrypoint contract.
+Manta is an inference-first GPU language and runtime stack. It compiles `.manta` source into backend-neutral `.mll` execution plans for GPU-accelerated embedding, reranking, retrieval-time scoring, and decode-time inference. Write the model-facing compute once, then run it through CUDA, Metal, Vulkan, DirectML, or WebGPU with the same artifact and the same entrypoint contract.
 
 - **Inference-first product surface** with `kernel` and `pipeline` abstractions
 - **Three-level IR pipeline**: HIR (typed) -> MIR (semantic) -> LIR (scheduled)
 - **Portable artifact format** (`.mll`): compile once, deploy anywhere
-- **Dual backend**: CUDA and Metal from the same source
+- **Portable backend surface**: CUDA, Metal, Vulkan, DirectML, and WebGPU variants from the same source
 - **First-class KV cache**: `kv_cache` type with `kv_read`/`kv_write` for autoregressive decoding
 - **TurboQuant-native direction**: Manta is designed to consume and emit quantized tensors and quantized vectors without repacking through a separate framework
 - **Schedule hints**: `tile`, `vector_width`, `subgroup`, memory classes -- backend-neutral, lowered late
@@ -165,7 +165,7 @@ MIR -- tensor-semantic operations (gather, matmul, softmax, ...)
 LIR -- scheduled plan: buffers, kernels, schedule hints, storage classes
   |
   v
-.mll artifact -- JSON, backend-neutral, CUDA + Metal kernel variants
+.mll artifact -- backend-neutral plan with CUDA, Metal, Vulkan, DirectML, and WebGPU kernel variants
 ```
 
 ### Intermediate representations
@@ -187,7 +187,7 @@ Hints guide backend-specific lowering without leaking backend concepts into the 
 | rope | [128] | 2 | yes | -- |
 | binary ops | [128] | 4 | -- | -- |
 
-These map to thread blocks (CUDA) or threadgroups (Metal) at the backend level.
+These map to thread blocks, threadgroups, workgroups, or backend graph dispatches at the backend level.
 
 ## Artifact Format
 
@@ -199,11 +199,14 @@ The `.mll` artifact carries a Manta execution plan:
   "name": "tiny_embed",
   "params": [{"name": "token_embedding", "binding": "weights/token_embedding", ...}],
   "entry_points": [{"name": "embed", "kind": "pipeline", ...}],
-  "requirements": {"supported_backends": ["cuda", "metal"]},
+  "requirements": {"supported_backends": ["cuda", "metal", "vulkan", "directml", "webgpu"]},
   "buffers": [{"name": "hidden", "dtype": "f16", "storage_class": "device_local", ...}],
   "kernels": [{"name": "l2_normalize", "variants": [
     {"backend": "cuda", "entry": "l2_normalize_cuda", "source": "..."},
-    {"backend": "metal", "entry": "l2_normalize_metal", "source": "..."}
+    {"backend": "metal", "entry": "l2_normalize_metal", "source": "..."},
+    {"backend": "vulkan", "entry": "l2_normalize_vulkan", "source": "..."},
+    {"backend": "directml", "entry": "l2_normalize_directml", "source": "..."},
+    {"backend": "webgpu", "entry": "l2_normalize_webgpu", "source": "..."}
   ], ...}],
   "steps": [
     {"kind": "gather", "inputs": ["token_embedding", "tokens"], "outputs": ["hidden"]},
@@ -226,10 +229,13 @@ import (
     "github.com/odvcencio/manta/runtime"
     "github.com/odvcencio/manta/runtime/backend"
     "github.com/odvcencio/manta/runtime/backends/cuda"
+    "github.com/odvcencio/manta/runtime/backends/directml"
     "github.com/odvcencio/manta/runtime/backends/metal"
+    "github.com/odvcencio/manta/runtime/backends/vulkan"
+    "github.com/odvcencio/manta/runtime/backends/webgpu"
 )
 
-rt := runtime.New(cuda.New(), metal.New())
+rt := runtime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
 
 prog, err := rt.LoadFile(ctx, "model.mll",
     runtime.WithWeight("token_embedding", embeddingData),
@@ -324,12 +330,12 @@ For production-grade `manta-embed-v1` candidate training, use `scripts/acquire_m
 
 ## Status
 
-The compiler, IR pipeline, artifact format, semantic analysis, runtime, and CLI are functional. CUDA executes promoted kernel classes on device on Linux, Metal has the matching device path scaffold for Apple verification, and the retrieval surface includes direct quantized scoring plus `topk`-based reranking.
+The compiler, IR pipeline, artifact format, semantic analysis, runtime, and CLI are functional. CUDA executes promoted kernel classes on device on Linux, Metal has the matching Apple device path, and Vulkan, DirectML, and WebGPU now have artifact/compiler/runtime surfaces that execute through backend-owned host fallback while device runtimes land. The retrieval surface includes direct quantized scoring plus `topk`-based reranking.
 
 ## Development
 
 ```bash
-CGO_ENABLED=0 go test ./artifact/manta ./cmd/manta ./compiler ./models ./runtime/backend ./runtime/backends/metal ./syntax
+CGO_ENABLED=0 go test ./artifact/manta ./cmd/manta ./compiler ./models ./runtime/backend ./runtime/backends/metal ./runtime/backends/vulkan ./runtime/backends/directml ./runtime/backends/webgpu ./syntax
 go build ./cmd/manta/
 ```
 

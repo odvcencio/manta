@@ -9,7 +9,7 @@ import (
 )
 
 func TestDefaultMemoryPlanPath(t *testing.T) {
-	got := DefaultMemoryPlanPath("/tmp/tiny_embed_pooled.barr")
+	got := DefaultMemoryPlanPath("/tmp/tiny_embed_pooled.mll")
 	if want := "/tmp/tiny_embed_pooled.memory.mll"; got != want {
 		t.Fatalf("memory plan path = %q, want %q", got, want)
 	}

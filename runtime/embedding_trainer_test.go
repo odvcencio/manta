@@ -789,7 +789,7 @@ func TestEvalScoreMetricsCalibratePositiveScoreShift(t *testing.T) {
 }
 
 func TestDefaultEmbeddingCheckpointPath(t *testing.T) {
-	got := DefaultEmbeddingCheckpointPath("/tmp/tiny_train_embed_q8.barr")
+	got := DefaultEmbeddingCheckpointPath("/tmp/tiny_train_embed_q8.mll")
 	if want := "/tmp/tiny_train_embed_q8.embed-train.mll"; got != want {
 		t.Fatalf("checkpoint path = %q, want %q", got, want)
 	}
@@ -2730,7 +2730,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
 		}
 	}
 
-	packagePath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.barr")
+	packagePath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
 	paths, err := trainer.WriteEmbeddingPackage(packagePath)
 	if err != nil {
 		t.Fatalf("write embedding package: %v", err)
@@ -2820,7 +2820,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
 		}
 	}
 
-	path := filepath.Join(t.TempDir(), "tiny_train_embed_q8.barr")
+	path := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
 	paths, err := trainer.WriteTrainingPackage(path)
 	if err != nil {
 		t.Fatalf("write training package: %v", err)

@@ -30,7 +30,7 @@ func TestRetrievalManifestRoundTrip(t *testing.T) {
 }
 
 func TestDefaultRetrievalManifestPath(t *testing.T) {
-	got := DefaultRetrievalManifestPath("/tmp/tiny_retrieval.barr")
+	got := DefaultRetrievalManifestPath("/tmp/tiny_retrieval.mll")
 	if want := "/tmp/tiny_retrieval.retrieval.mll"; got != want {
 		t.Fatalf("manifest path = %q, want %q", got, want)
 	}
@@ -156,7 +156,7 @@ func TestLoadRetrievalBundleUsesSiblingManifest(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	barrPath := filepath.Join(dir, "tiny_packed_candidates.barr")
+	barrPath := filepath.Join(dir, "tiny_packed_candidates.mll")
 	if err := barr.WriteFile(barrPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}

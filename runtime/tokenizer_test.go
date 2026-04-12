@@ -7,7 +7,7 @@ import (
 )
 
 func TestDefaultTokenizerPath(t *testing.T) {
-	got := DefaultTokenizerPath("/tmp/tiny_train_embed.barr")
+	got := DefaultTokenizerPath("/tmp/tiny_train_embed.mll")
 	if want := "/tmp/tiny_train_embed.tokenizer.mll"; got != want {
 		t.Fatalf("tokenizer path = %q, want %q", got, want)
 	}

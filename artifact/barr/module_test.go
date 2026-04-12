@@ -3,11 +3,13 @@ package barr
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestEncodeDecodeJSONRoundTrip(t *testing.T) {
 	module := NewModule("demo")
+	module.Requirements.SupportedBackends = []BackendKind{BackendCUDA, BackendMetal}
 	module.Params = []Param{
 		{
 			Name:    "token_embedding",
@@ -58,12 +60,12 @@ func TestEncodeDecodeJSONRoundTrip(t *testing.T) {
 		{Entry: "embed", Kind: StepReturn, Outputs: []string{"embeddings"}},
 	}
 
-	data, err := EncodeJSON(module)
+	jsonData, err := EncodeJSON(module)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
 
-	got, err := DecodeJSON(data)
+	got, err := DecodeJSON(jsonData)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -75,7 +77,7 @@ func TestEncodeDecodeJSONRoundTrip(t *testing.T) {
 		t.Fatalf("param binding mismatch: %+v", got.Params)
 	}
 	if !got.SupportsBackend(BackendCUDA) || !got.SupportsBackend(BackendMetal) {
-		t.Fatalf("expected both CUDA and Metal support: %+v", got.Requirements.SupportedBackends)
+		t.Fatalf("expected CUDA and Metal support: %+v", got.Requirements.SupportedBackends)
 	}
 	if len(got.Steps) != len(module.Steps) {
 		t.Fatalf("step count mismatch: got %d want %d", len(got.Steps), len(module.Steps))
@@ -88,7 +90,7 @@ func TestEncodeDecodeJSONRoundTrip(t *testing.T) {
 	if err := WriteFile(path, module); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	data, err = os.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read raw file: %v", err)
 	}
@@ -103,16 +105,12 @@ func TestEncodeDecodeJSONRoundTrip(t *testing.T) {
 		t.Fatalf("file roundtrip mismatch: %+v", fromFile)
 	}
 
-	jsonPath := filepath.Join(t.TempDir(), "legacy-demo.barr")
-	if err := WriteJSONFile(jsonPath, module); err != nil {
-		t.Fatalf("write legacy json file: %v", err)
+	jsonPath := filepath.Join(t.TempDir(), "json-artifact.mll")
+	if err := os.WriteFile(jsonPath, jsonData, 0o644); err != nil {
+		t.Fatalf("write json artifact: %v", err)
 	}
-	fromJSON, err := ReadFile(jsonPath)
-	if err != nil {
-		t.Fatalf("read legacy json file: %v", err)
-	}
-	if fromJSON.Name != module.Name || len(fromJSON.EntryPoints) != len(module.EntryPoints) {
-		t.Fatalf("legacy json roundtrip mismatch: %+v", fromJSON)
+	if _, err := ReadFile(jsonPath); err == nil || !strings.Contains(err.Error(), "not an MLL file") {
+		t.Fatalf("expected non-MLL artifact rejection, got %v", err)
 	}
 }
 
@@ -186,6 +184,7 @@ func TestValidateRejectsMissingKernelVariantSource(t *testing.T) {
 
 func TestValidateCandidatePackEntryPoint(t *testing.T) {
 	module := NewModule("packed")
+	module.Requirements.SupportedBackends = []BackendKind{BackendCUDA, BackendMetal}
 	module.EntryPoints = []EntryPoint{
 		{
 			Name: "rerank_candidates_packed",

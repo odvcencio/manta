@@ -12,7 +12,7 @@ import (
 )
 
 // EmbeddingTrainCheckpointVersion identifies the trainer checkpoint schema.
-const EmbeddingTrainCheckpointVersion = "barr/embed-train/v0alpha1"
+const EmbeddingTrainCheckpointVersion = "manta/embed-train/v0alpha1"
 
 var tagXCHK = [4]byte{'X', 'C', 'H', 'K'}
 
@@ -106,23 +106,16 @@ func (c EmbeddingTrainCheckpoint) WriteFile(path string) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-// ReadEmbeddingTrainCheckpointFile reads a checkpoint from MLL or legacy JSON.
+// ReadEmbeddingTrainCheckpointFile reads an MLL checkpoint.
 func ReadEmbeddingTrainCheckpointFile(path string) (EmbeddingTrainCheckpoint, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return EmbeddingTrainCheckpoint{}, err
 	}
-	if barr.IsMLLBytes(data) {
-		return decodeEmbeddingCheckpointMLL(data)
+	if !barr.IsMLLBytes(data) {
+		return EmbeddingTrainCheckpoint{}, fmt.Errorf("checkpoint %q is not an MLL file", path)
 	}
-	var checkpoint EmbeddingTrainCheckpoint
-	if err := json.Unmarshal(data, &checkpoint); err != nil {
-		return EmbeddingTrainCheckpoint{}, err
-	}
-	if err := checkpoint.Validate(); err != nil {
-		return EmbeddingTrainCheckpoint{}, err
-	}
-	return checkpoint, nil
+	return decodeEmbeddingCheckpointMLL(data)
 }
 
 func encodeEmbeddingCheckpointMLL(c EmbeddingTrainCheckpoint) ([]byte, error) {

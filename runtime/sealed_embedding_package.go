@@ -64,9 +64,9 @@ func readSealedMantaMLL(path string) (*mll.Reader, barr.MLLMetadata, error) {
 	if reader.Profile() != mll.ProfileSealed {
 		return nil, barr.MLLMetadata{}, fmt.Errorf("sealed package profile = %d, want %d", reader.Profile(), mll.ProfileSealed)
 	}
-	body, ok := reader.Section(barr.MLLTagXBAR)
+	body, ok := reader.Section(barr.MLLTagXMTA)
 	if !ok {
-		return nil, barr.MLLMetadata{}, fmt.Errorf("sealed package missing XBAR metadata")
+		return nil, barr.MLLMetadata{}, fmt.Errorf("sealed package missing XMTA metadata")
 	}
 	meta, err := barr.DecodeMLLMetadata(body)
 	if err != nil {

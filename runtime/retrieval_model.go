@@ -2,15 +2,13 @@ package barruntime
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/odvcencio/manta/artifact/barr"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
-const RetrievalManifestVersion = "barr/retrieval-manifest/v0alpha1"
+const RetrievalManifestVersion = "manta/retrieval-manifest/v0alpha1"
 
 // RetrievalManifest describes the serving contract for a candidate-pack retrieval module.
 type RetrievalManifest struct {
@@ -34,29 +32,22 @@ type RetrievalModel struct {
 	manifest RetrievalManifest
 }
 
-// ReadRetrievalManifestFile decodes a JSON retrieval manifest.
+// ReadRetrievalManifestFile decodes an authored MLL retrieval manifest.
 func ReadRetrievalManifestFile(path string) (RetrievalManifest, error) {
-	if doc, err := readAuthoredManifestMLL(path, "retrieval_manifest", RetrievalManifestVersion); err == nil {
-		return retrievalManifestFromDoc(doc)
-	}
-	data, err := os.ReadFile(path)
+	doc, err := readAuthoredManifestMLL(path, "retrieval_manifest", RetrievalManifestVersion)
 	if err != nil {
 		return RetrievalManifest{}, err
 	}
-	var manifest RetrievalManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return RetrievalManifest{}, err
-	}
-	return manifest, nil
+	return retrievalManifestFromDoc(doc)
 }
 
-// DefaultRetrievalManifestPath returns the conventional sibling manifest path for a .barr artifact.
+// DefaultRetrievalManifestPath returns the conventional sibling manifest path for an .mll artifact.
 func DefaultRetrievalManifestPath(barrPath string) string {
 	return defaultManifestPath(barrPath, ".retrieval.mll")
 }
 
 func ResolveRetrievalManifestPath(barrPath string) string {
-	return resolveSiblingPath(barrPath, ".retrieval.mll", ".retrieval.json")
+	return DefaultRetrievalManifestPath(barrPath)
 }
 
 // WriteFile writes the retrieval manifest as an authored MLL container.
@@ -77,7 +68,7 @@ func (rt *Runtime) LoadRetrieval(ctx context.Context, mod *barr.Module, manifest
 	return &RetrievalModel{program: prog, manifest: manifest}, nil
 }
 
-// LoadRetrievalFile reads a .barr artifact and loads it as a retrieval model.
+// LoadRetrievalFile reads a .mll artifact and loads it as a retrieval model.
 func (rt *Runtime) LoadRetrievalFile(ctx context.Context, barrPath string, manifest RetrievalManifest, opts ...LoadOption) (*RetrievalModel, error) {
 	mod, err := barr.ReadFile(barrPath)
 	if err != nil {
@@ -86,12 +77,12 @@ func (rt *Runtime) LoadRetrievalFile(ctx context.Context, barrPath string, manif
 	return rt.LoadRetrieval(ctx, mod, manifest, opts...)
 }
 
-// LoadRetrievalBundle reads a .barr artifact plus its sibling retrieval manifest.
+// LoadRetrievalBundle reads a .mll artifact plus its sibling retrieval manifest.
 func (rt *Runtime) LoadRetrievalBundle(ctx context.Context, barrPath string, opts ...LoadOption) (*RetrievalModel, error) {
 	return rt.LoadRetrievalBundleWithManifest(ctx, barrPath, ResolveRetrievalManifestPath(barrPath), opts...)
 }
 
-// LoadRetrievalBundleWithManifest reads a .barr artifact plus an explicit retrieval manifest path.
+// LoadRetrievalBundleWithManifest reads a .mll artifact plus an explicit retrieval manifest path.
 func (rt *Runtime) LoadRetrievalBundleWithManifest(ctx context.Context, barrPath, manifestPath string, opts ...LoadOption) (*RetrievalModel, error) {
 	manifest, err := ReadRetrievalManifestFile(manifestPath)
 	if err != nil {

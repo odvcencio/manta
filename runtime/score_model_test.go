@@ -30,7 +30,7 @@ func TestScoreManifestRoundTrip(t *testing.T) {
 }
 
 func TestDefaultScoreManifestPath(t *testing.T) {
-	got := DefaultScoreManifestPath("/tmp/tiny_score.barr")
+	got := DefaultScoreManifestPath("/tmp/tiny_score.mll")
 	if want := "/tmp/tiny_score.score.mll"; got != want {
 		t.Fatalf("manifest path = %q, want %q", got, want)
 	}
@@ -142,7 +142,7 @@ pipeline score(query: f16[D], docs: q4[N, D]) -> f32[N] {
 	}
 
 	dir := t.TempDir()
-	barrPath := filepath.Join(dir, "score_bundle.barr")
+	barrPath := filepath.Join(dir, "score_bundle.mll")
 	if err := barr.WriteFile(barrPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}

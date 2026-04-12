@@ -28,7 +28,7 @@ func DefaultMLLPath(barrPath string) string {
 
 // ExportPackageToMLL exports a Manta artifact plus its sibling package
 // files into a sealed MLL container. The resulting file keeps the current
-// Manta module JSON in a schemaless XBAR section while populating the
+// Manta module JSON in a schemaless XMTA section while populating the
 // closest matching MLL core sections.
 func ExportPackageToMLL(barrPath, outPath string) (string, error) {
 	if barrPath == "" {
@@ -360,7 +360,7 @@ func buildMLLExport(mod *barr.Module, artifactJSON []byte, jsonFiles map[string]
 		})
 	}
 	sections = append(sections, mll.SectionInput{
-		Tag:           barr.MLLTagXBAR,
+		Tag:           barr.MLLTagXMTA,
 		Body:          xbar,
 		Flags:         mll.SectionFlagSkippable | mll.SectionFlagSchemaless,
 		SchemaVersion: 1,
@@ -858,7 +858,7 @@ func encodeTensorStorage(t *backend.Tensor) (mll.DType, []byte, bool, error) {
 	case "q4", "q8":
 		// Manta currently stores fake-quantized q4/q8 tensors as float32
 		// values, so the first MLL export keeps the raw bytes honest and records
-		// the logical dtype in XBAR metadata.
+		// the logical dtype in XMTA metadata.
 		return mll.DTypeF32, encodeFloat32Bytes(t.F32), true, nil
 	default:
 		return mll.DTypeInvalid, nil, false, fmt.Errorf("unsupported tensor dtype %q", t.DType)

@@ -11,7 +11,7 @@ import (
 )
 
 // EmbeddingTrainProfileVersion identifies the serialized Manta training-profile schema.
-const EmbeddingTrainProfileVersion = "barr/embed-train-profile/v0alpha1"
+const EmbeddingTrainProfileVersion = "manta/embed-train-profile/v0alpha1"
 
 var tagXTPR = [4]byte{'X', 'T', 'P', 'R'}
 
@@ -29,7 +29,7 @@ type EmbeddingTrainProfile struct {
 	Contrastive        backend.ContrastiveAcceleratorStats `json:"contrastive"`
 }
 
-// DefaultEmbeddingTrainProfilePath returns the conventional sibling training-profile path for a .barr artifact.
+// DefaultEmbeddingTrainProfilePath returns the conventional sibling training-profile path for a .mll artifact.
 func DefaultEmbeddingTrainProfilePath(barrPath string) string {
 	return defaultManifestPath(barrPath, ".train-profile.mll")
 }
@@ -60,23 +60,16 @@ func (p EmbeddingTrainProfile) WriteFile(path string) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-// ReadEmbeddingTrainProfileFile reads a training profile from MLL or legacy JSON.
+// ReadEmbeddingTrainProfileFile reads an MLL training profile.
 func ReadEmbeddingTrainProfileFile(path string) (EmbeddingTrainProfile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return EmbeddingTrainProfile{}, err
 	}
-	if barr.IsMLLBytes(data) {
-		return decodeEmbeddingTrainProfileMLL(data)
+	if !barr.IsMLLBytes(data) {
+		return EmbeddingTrainProfile{}, fmt.Errorf("training profile %q is not an MLL file", path)
 	}
-	var profile EmbeddingTrainProfile
-	if err := json.Unmarshal(data, &profile); err != nil {
-		return EmbeddingTrainProfile{}, err
-	}
-	if err := profile.Validate(); err != nil {
-		return EmbeddingTrainProfile{}, err
-	}
-	return profile, nil
+	return decodeEmbeddingTrainProfileMLL(data)
 }
 
 func encodeEmbeddingTrainProfileMLL(profile EmbeddingTrainProfile) ([]byte, error) {

@@ -8,7 +8,7 @@ import (
 )
 
 func TestDefaultEmbeddingTrainManifestPath(t *testing.T) {
-	got := DefaultEmbeddingTrainManifestPath("/tmp/tiny_train_embed_q8.barr")
+	got := DefaultEmbeddingTrainManifestPath("/tmp/tiny_train_embed_q8.mll")
 	if want := "/tmp/tiny_train_embed_q8.train.mll"; got != want {
 		t.Fatalf("train manifest path = %q, want %q", got, want)
 	}

@@ -11,7 +11,10 @@ import (
 	"github.com/odvcencio/manta/compiler"
 	"github.com/odvcencio/manta/runtime/backend"
 	"github.com/odvcencio/manta/runtime/backends/cuda"
+	"github.com/odvcencio/manta/runtime/backends/directml"
 	"github.com/odvcencio/manta/runtime/backends/metal"
+	"github.com/odvcencio/manta/runtime/backends/vulkan"
+	"github.com/odvcencio/manta/runtime/backends/webgpu"
 )
 
 type stubBackend struct {
@@ -149,7 +152,7 @@ func TestLoadFileAcceptsSerializedArtifact(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	path := filepath.Join(t.TempDir(), "tiny_embed.barr")
+	path := filepath.Join(t.TempDir(), "tiny_embed.mll")
 	if err := barr.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
@@ -171,7 +174,7 @@ func TestLoadFileUsesSiblingPackageManifestCacheKey(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	path := filepath.Join(dir, "tiny_embed.barr")
+	path := filepath.Join(dir, "tiny_embed.mll")
 	if err := barr.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
@@ -336,6 +339,58 @@ func TestRunTinyEmbedEntryPoint(t *testing.T) {
 	}
 	if result.Trace[len(result.Trace)-2].Variant != "l2_normalize_cuda" {
 		t.Fatalf("trace variant = %q, want l2_normalize_cuda", result.Trace[len(result.Trace)-2].Variant)
+	}
+}
+
+func TestPortableGPUBackendsLoadMLLArtifactsWithHostFallback(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed", Preset: compiler.PresetTinyEmbed})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		rt        *Runtime
+		backend   barr.BackendKind
+		entry     string
+		launchAPI string
+	}{
+		{name: "vulkan", rt: New(vulkan.New()), backend: barr.BackendVulkan, entry: "l2_normalize_vulkan", launchAPI: "vkCmdDispatch"},
+		{name: "directml", rt: New(directml.New()), backend: barr.BackendDirectML, entry: "l2_normalize_directml", launchAPI: "IDMLCommandRecorder::RecordDispatch"},
+		{name: "webgpu", rt: New(webgpu.New()), backend: barr.BackendWebGPU, entry: "l2_normalize_webgpu", launchAPI: "GPUComputePassEncoder.dispatchWorkgroups"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prog, err := tc.rt.Load(context.Background(), bundle.Artifact, tinyEmbedWeights()...)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if got := prog.Backend(); got != tc.backend {
+				t.Fatalf("backend = %q, want %q", got, tc.backend)
+			}
+			result, err := prog.Run(context.Background(), backend.Request{
+				Entry:  "embed",
+				Inputs: map[string]any{"tokens": backend.NewTensorI32([]int{2}, []int32{0, 2})},
+			})
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			output := result.Outputs["embeddings"]
+			if output.Metadata["variant_entry"] != tc.entry {
+				t.Fatalf("variant_entry = %v, want %s", output.Metadata["variant_entry"], tc.entry)
+			}
+			if output.Metadata["launch_api"] != tc.launchAPI {
+				t.Fatalf("launch_api = %v, want %s", output.Metadata["launch_api"], tc.launchAPI)
+			}
+			if output.Metadata["execution_mode"] != "host_fallback" {
+				t.Fatalf("execution_mode = %v, want host_fallback", output.Metadata["execution_mode"])
+			}
+			tensor := output.Data.(*backend.Tensor)
+			assertTensorClose(t, tensor, []int{2, 2}, []float32{
+				1, 0,
+				0.70710677, 0.70710677,
+			})
+		})
 	}
 }
 

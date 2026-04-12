@@ -3,18 +3,20 @@ package barr
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 )
 
 // Version is the current artifact schema version.
-const Version = "barr/v0alpha1"
+const Version = "manta/v0alpha1"
 
 // BackendKind names an execution backend.
 type BackendKind string
 
 const (
-	BackendCUDA  BackendKind = "cuda"
-	BackendMetal BackendKind = "metal"
+	BackendCUDA     BackendKind = "cuda"
+	BackendMetal    BackendKind = "metal"
+	BackendVulkan   BackendKind = "vulkan"
+	BackendDirectML BackendKind = "directml"
+	BackendWebGPU   BackendKind = "webgpu"
 )
 
 // Capability names backend/runtime features required by a module.
@@ -193,7 +195,7 @@ func NewModule(name string) *Module {
 		Version: Version,
 		Name:    name,
 		Requirements: Requirements{
-			SupportedBackends: []BackendKind{BackendCUDA, BackendMetal},
+			SupportedBackends: []BackendKind{BackendCUDA, BackendMetal, BackendVulkan, BackendDirectML, BackendWebGPU},
 		},
 	}
 }
@@ -483,22 +485,4 @@ func DecodeJSON(data []byte) (*Module, error) {
 		return nil, err
 	}
 	return &m, nil
-}
-
-// WriteJSONFile serializes the module to disk as JSON.
-func WriteJSONFile(path string, m *Module) error {
-	data, err := EncodeJSON(m)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
-}
-
-// ReadJSONFile loads a JSON-serialized module from disk.
-func ReadJSONFile(path string) (*Module, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return DecodeJSON(data)
 }

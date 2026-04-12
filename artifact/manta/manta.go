@@ -6,8 +6,11 @@ const (
 	Version            = legacy.Version
 	MLLMetadataVersion = legacy.MLLMetadataVersion
 
-	BackendCUDA  = legacy.BackendCUDA
-	BackendMetal = legacy.BackendMetal
+	BackendCUDA     = legacy.BackendCUDA
+	BackendMetal    = legacy.BackendMetal
+	BackendVulkan   = legacy.BackendVulkan
+	BackendDirectML = legacy.BackendDirectML
+	BackendWebGPU   = legacy.BackendWebGPU
 
 	CapabilityCandidatePack   = legacy.CapabilityCandidatePack
 	CapabilityKVCache         = legacy.CapabilityKVCache
@@ -43,7 +46,7 @@ const (
 	KernelOpReturn    = legacy.KernelOpReturn
 )
 
-var MLLTagXBAR = legacy.MLLTagXBAR
+var MLLTagXMTA = legacy.MLLTagXMTA
 
 type (
 	BackendKind       = legacy.BackendKind

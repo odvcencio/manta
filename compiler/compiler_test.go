@@ -48,12 +48,10 @@ func TestBuildTinyEmbedSource(t *testing.T) {
 	if kernel.Hints.Memory != "workgroup_local" || !kernel.Hints.Subgroup {
 		t.Fatalf("unexpected kernel hints: %+v", kernel.Hints)
 	}
-	if got := len(kernel.Variants); got != 2 {
-		t.Fatalf("variant count = %d, want 2", got)
+	if got := len(kernel.Variants); got != len(kernelBackendEmitters) {
+		t.Fatalf("variant count = %d, want backend emitter count %d", got, len(kernelBackendEmitters))
 	}
-	if kernel.Variants[0].Source == "" || kernel.Variants[1].Source == "" {
-		t.Fatalf("expected emitted backend sources: %+v", kernel.Variants)
-	}
+	assertAllKernelVariantSources(t, kernel)
 }
 
 func TestKernelVariantsFollowBackendEmitterTable(t *testing.T) {
@@ -429,9 +427,7 @@ func TestBuildTinyDecodeSource(t *testing.T) {
 			if kernel.Hints.Memory != "workgroup_local" || !kernel.Hints.Subgroup {
 				t.Fatalf("unexpected softmax hints: %+v", kernel.Hints)
 			}
-			if len(kernel.Variants) != 2 || kernel.Variants[0].Source == "" || kernel.Variants[1].Source == "" {
-				t.Fatalf("expected emitted backend variants: %+v", kernel.Variants)
-			}
+			assertAllKernelVariantSources(t, kernel)
 		}
 	}
 	if !foundKVRead || !foundKVWrite {
@@ -478,10 +474,12 @@ func TestBuildTinyScoreSource(t *testing.T) {
 	if kernel.Hints.Memory != "workgroup_local" || !kernel.Hints.Subgroup {
 		t.Fatalf("unexpected cosine score hints: %+v", kernel.Hints)
 	}
-	if got := len(kernel.Variants); got != 2 {
-		t.Fatalf("variant count = %d, want 2", got)
+	if got := len(kernel.Variants); got != len(kernelBackendEmitters) {
+		t.Fatalf("variant count = %d, want backend emitter count %d", got, len(kernelBackendEmitters))
 	}
-	if !strings.Contains(kernel.Variants[0].Source, "const float* query") || !strings.Contains(kernel.Variants[1].Source, "const device float* query") {
+	cudaVariant := kernelVariantByBackend(t, kernel, barr.BackendCUDA)
+	metalVariant := kernelVariantByBackend(t, kernel, barr.BackendMetal)
+	if !strings.Contains(cudaVariant.Source, "const float* query") || !strings.Contains(metalVariant.Source, "const device float* query") {
 		t.Fatalf("expected emitted score kernel sources, got %+v", kernel.Variants)
 	}
 }
@@ -530,10 +528,12 @@ pipeline ffn(x: f16[T, D], w: f16[D, E]) -> f16[T, E] {
 	if kernel.Hints.Memory != "device_local" || kernel.Hints.VectorWidth != 4 {
 		t.Fatalf("unexpected gelu hints: %+v", kernel.Hints)
 	}
-	if got := len(kernel.Variants); got != 2 {
-		t.Fatalf("variant count = %d, want 2", got)
+	if got := len(kernel.Variants); got != len(kernelBackendEmitters) {
+		t.Fatalf("variant count = %d, want backend emitter count %d", got, len(kernelBackendEmitters))
 	}
-	if !strings.Contains(kernel.Variants[0].Source, "tanhf") || !strings.Contains(kernel.Variants[1].Source, "tanh(") {
+	cudaVariant := kernelVariantByBackend(t, kernel, barr.BackendCUDA)
+	metalVariant := kernelVariantByBackend(t, kernel, barr.BackendMetal)
+	if !strings.Contains(cudaVariant.Source, "tanhf") || !strings.Contains(metalVariant.Source, "tanh(") {
 		t.Fatalf("expected emitted gelu backend sources, got %+v", kernel.Variants)
 	}
 	if got := bundle.Artifact.EntryPoints[0].Outputs[0].Type.Tensor.Shape[1]; got != "E" {
@@ -567,9 +567,7 @@ pipeline encoder_block(x: f16[T, D], w: f16[D, D]) -> f16[T, D] {
 		if kernel.Hints.Memory != "workgroup_local" || !kernel.Hints.Subgroup {
 			t.Fatalf("unexpected layernorm hints: %+v", kernel.Hints)
 		}
-		if len(kernel.Variants) != 2 || kernel.Variants[0].Source == "" || kernel.Variants[1].Source == "" {
-			t.Fatalf("expected emitted backend layernorm variants: %+v", kernel.Variants)
-		}
+		assertAllKernelVariantSources(t, kernel)
 	}
 	if !foundLayerNorm {
 		t.Fatal("missing layernorm kernel")
@@ -971,11 +969,36 @@ pipeline deq(x: q4[T, D]) -> f16[T, D] {
 	if kernel.Name != "qdequant" {
 		t.Fatalf("kernel name = %q, want qdequant", kernel.Name)
 	}
-	if got := len(kernel.Variants); got != 2 {
-		t.Fatalf("variant count = %d, want 2", got)
+	if got := len(kernel.Variants); got != len(kernelBackendEmitters) {
+		t.Fatalf("variant count = %d, want backend emitter count %d", got, len(kernelBackendEmitters))
 	}
-	if !strings.Contains(kernel.Variants[0].Source, "_cuda(") || !strings.Contains(kernel.Variants[1].Source, "_metal(") {
+	cudaVariant := kernelVariantByBackend(t, kernel, barr.BackendCUDA)
+	metalVariant := kernelVariantByBackend(t, kernel, barr.BackendMetal)
+	if !strings.Contains(cudaVariant.Source, "_cuda(") || !strings.Contains(metalVariant.Source, "_metal(") {
 		t.Fatalf("expected emitted CUDA and Metal dequant sources, got %+v", kernel.Variants)
+	}
+}
+
+func kernelVariantByBackend(t *testing.T, kernel barr.Kernel, kind barr.BackendKind) barr.KernelVariant {
+	t.Helper()
+	for _, variant := range kernel.Variants {
+		if variant.Backend == kind {
+			return variant
+		}
+	}
+	t.Fatalf("missing variant for backend %q in %+v", kind, kernel.Variants)
+	return barr.KernelVariant{}
+}
+
+func assertAllKernelVariantSources(t *testing.T, kernel barr.Kernel) {
+	t.Helper()
+	if len(kernel.Variants) != len(kernelBackendEmitters) {
+		t.Fatalf("variant count = %d, want backend emitter count %d", len(kernel.Variants), len(kernelBackendEmitters))
+	}
+	for _, variant := range kernel.Variants {
+		if variant.Source == "" {
+			t.Fatalf("source for backend %q is empty in %+v", variant.Backend, kernel.Variants)
+		}
 	}
 }
 

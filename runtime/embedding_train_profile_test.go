@@ -9,7 +9,7 @@ import (
 )
 
 func TestDefaultEmbeddingTrainProfilePath(t *testing.T) {
-	got := DefaultEmbeddingTrainProfilePath("/tmp/tiny_train_embed_q8.barr")
+	got := DefaultEmbeddingTrainProfilePath("/tmp/tiny_train_embed_q8.mll")
 	if want := "/tmp/tiny_train_embed_q8.train-profile.mll"; got != want {
 		t.Fatalf("training profile path = %q, want %q", got, want)
 	}

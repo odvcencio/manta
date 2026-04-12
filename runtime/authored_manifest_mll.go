@@ -318,16 +318,3 @@ func (d authoredManifestDoc) float(key string) (float64, bool, error) {
 	}
 	return value.f64V, true, nil
 }
-
-func resolveSiblingPath(artifactPath string, preferredSuffix string, legacySuffixes ...string) string {
-	candidates := make([]string, 0, 1+len(legacySuffixes))
-	candidates = append(candidates, preferredSuffix)
-	candidates = append(candidates, legacySuffixes...)
-	for _, suffix := range candidates {
-		path := defaultManifestPath(artifactPath, suffix)
-		if _, err := os.Stat(path); err == nil {
-			return path
-		}
-	}
-	return defaultManifestPath(artifactPath, preferredSuffix)
-}

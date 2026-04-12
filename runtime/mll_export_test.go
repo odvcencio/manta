@@ -14,11 +14,7 @@ import (
 )
 
 func TestDefaultMLLPath(t *testing.T) {
-	path := DefaultMLLPath("/tmp/model.barr")
-	if path != "/tmp/model.mll" {
-		t.Fatalf("DefaultMLLPath = %q, want %q", path, "/tmp/model.mll")
-	}
-	path = DefaultMLLPath("/tmp/model.mll")
+	path := DefaultMLLPath("/tmp/model.mll")
 	if path != "/tmp/model.sealed.mll" {
 		t.Fatalf("DefaultMLLPath for .mll artifact = %q, want %q", path, "/tmp/model.sealed.mll")
 	}
@@ -49,7 +45,7 @@ func TestExportPackageToMLLWritesSealedContainer(t *testing.T) {
 		t.Fatalf("profile = %d, want %d", reader.Profile(), mll.ProfileSealed)
 	}
 
-	for _, tag := range [][4]byte{mll.TagHEAD, mll.TagSTRG, mll.TagDIMS, mll.TagTYPE, mll.TagPARM, mll.TagENTR, mll.TagMEMP, mll.TagTNSR, barr.MLLTagXBAR} {
+	for _, tag := range [][4]byte{mll.TagHEAD, mll.TagSTRG, mll.TagDIMS, mll.TagTYPE, mll.TagPARM, mll.TagENTR, mll.TagMEMP, mll.TagTNSR, barr.MLLTagXMTA} {
 		if _, ok := reader.Section(tag); !ok {
 			t.Fatalf("missing section %q", string(tag[:]))
 		}
@@ -97,13 +93,13 @@ func TestExportPackageToMLLWritesSealedContainer(t *testing.T) {
 		t.Fatalf("stored tensor dtype = %d, want widened f32 (%d)", got, mll.DTypeF32)
 	}
 
-	xbarBody, _ := reader.Section(barr.MLLTagXBAR)
-	meta, err := barr.DecodeMLLMetadata(xbarBody)
+	xmtaBody, _ := reader.Section(barr.MLLTagXMTA)
+	meta, err := barr.DecodeMLLMetadata(xmtaBody)
 	if err != nil {
-		t.Fatalf("decode XBAR: %v", err)
+		t.Fatalf("decode XMTA: %v", err)
 	}
 	if meta.ModuleName != "tiny_train_embed" {
-		t.Fatalf("XBAR module_name = %q", meta.ModuleName)
+		t.Fatalf("XMTA module_name = %q", meta.ModuleName)
 	}
 	if meta.LogicalTensorDType["token_embedding"] != "q8" {
 		t.Fatalf("logical dtype for token_embedding = %q, want q8", meta.LogicalTensorDType["token_embedding"])
@@ -157,7 +153,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	path := filepath.Join(t.TempDir(), "tiny_train_embed.barr")
+	path := filepath.Join(t.TempDir(), "tiny_train_embed.mll")
 	if err := barr.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}

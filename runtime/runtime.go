@@ -85,7 +85,7 @@ func (rt *Runtime) Load(ctx context.Context, mod *barr.Module, opts ...LoadOptio
 	return nil, fmt.Errorf("no compatible backend for module %q: %s", mod.Name, strings.Join(reasons, "; "))
 }
 
-// LoadFile reads a serialized .barr artifact and loads it.
+// LoadFile reads a serialized .mll artifact and loads it.
 func (rt *Runtime) LoadFile(ctx context.Context, path string, opts ...LoadOption) (*Program, error) {
 	mod, err := barr.ReadFile(path)
 	if err != nil {

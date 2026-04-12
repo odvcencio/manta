@@ -14,7 +14,7 @@ import (
 )
 
 // WeightFileVersion identifies the serialized Manta weight file schema.
-const WeightFileVersion = "barr/weights/v0alpha1"
+const WeightFileVersion = "manta/weights/v0alpha1"
 
 var tagXWGT = [4]byte{'X', 'W', 'G', 'T'}
 
@@ -89,23 +89,16 @@ func (w WeightFile) WriteFile(path string) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-// ReadWeightFile reads a serialized weight file from either MLL or legacy JSON.
+// ReadWeightFile reads a serialized MLL weight file.
 func ReadWeightFile(path string) (WeightFile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return WeightFile{}, err
 	}
-	if barr.IsMLLBytes(data) {
-		return decodeWeightFileMLL(data)
+	if !barr.IsMLLBytes(data) {
+		return WeightFile{}, fmt.Errorf("weight file %q is not an MLL file", path)
 	}
-	var weights WeightFile
-	if err := json.Unmarshal(data, &weights); err != nil {
-		return WeightFile{}, err
-	}
-	if err := weights.Validate(); err != nil {
-		return WeightFile{}, err
-	}
-	return weights, nil
+	return decodeWeightFileMLL(data)
 }
 
 // LoadOptions converts a weight file into runtime load options.

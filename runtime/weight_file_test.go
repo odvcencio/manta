@@ -8,7 +8,7 @@ import (
 )
 
 func TestDefaultWeightFilePath(t *testing.T) {
-	got := DefaultWeightFilePath("/tmp/tiny_embed_pooled.barr")
+	got := DefaultWeightFilePath("/tmp/tiny_embed_pooled.mll")
 	if want := "/tmp/tiny_embed_pooled.weights.mll"; got != want {
 		t.Fatalf("weight path = %q, want %q", got, want)
 	}

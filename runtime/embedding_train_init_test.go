@@ -30,7 +30,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	path := filepath.Join(t.TempDir(), "tiny_train_embed.barr")
+	path := filepath.Join(t.TempDir(), "tiny_train_embed.mll")
 	if err := barr.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
@@ -104,7 +104,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	path := filepath.Join(t.TempDir(), "tiny_train_embed.barr")
+	path := filepath.Join(t.TempDir(), "tiny_train_embed.mll")
 	if err := barr.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}

@@ -30,7 +30,7 @@ func TestEmbeddingManifestRoundTrip(t *testing.T) {
 }
 
 func TestDefaultEmbeddingManifestPath(t *testing.T) {
-	got := DefaultEmbeddingManifestPath("/tmp/tiny_embed_pooled.barr")
+	got := DefaultEmbeddingManifestPath("/tmp/tiny_embed_pooled.mll")
 	if want := "/tmp/tiny_embed_pooled.embedding.mll"; got != want {
 		t.Fatalf("manifest path = %q, want %q", got, want)
 	}
@@ -150,7 +150,7 @@ func TestLoadEmbeddingFileUsesManifest(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	barrPath := filepath.Join(dir, "tiny_embed_pooled.barr")
+	barrPath := filepath.Join(dir, "tiny_embed_pooled.mll")
 	manifestPath := filepath.Join(dir, "tiny_embed_pooled.embedding.mll")
 	if err := barr.WriteFile(barrPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
@@ -184,7 +184,7 @@ func TestLoadEmbeddingBundleUsesSiblingManifest(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	barrPath := filepath.Join(dir, "tiny_embed_pooled.barr")
+	barrPath := filepath.Join(dir, "tiny_embed_pooled.mll")
 	if err := barr.WriteFile(barrPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestLoadEmbeddingPackageUsesSiblingWeights(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	barrPath := filepath.Join(dir, "tiny_embed_pooled.barr")
+	barrPath := filepath.Join(dir, "tiny_embed_pooled.mll")
 	if err := barr.WriteFile(barrPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}

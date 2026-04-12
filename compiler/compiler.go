@@ -677,6 +677,27 @@ var kernelBackendEmitters = []kernelBackendEmitter{
 		params:          metalKernelParams,
 		native:          metalNativeEmitter,
 	},
+	{
+		backend:         barr.BackendVulkan,
+		suffix:          "vulkan",
+		prelude:         "#version 450\n",
+		signaturePrefix: "void ",
+		params:          noKernelParams,
+	},
+	{
+		backend:         barr.BackendDirectML,
+		suffix:          "directml",
+		prelude:         "manta_directml_module v0\n",
+		signaturePrefix: "manta_directml_graph ",
+		params:          noKernelParams,
+	},
+	{
+		backend:         barr.BackendWebGPU,
+		suffix:          "webgpu",
+		prelude:         "/* wgsl */\n",
+		signaturePrefix: "@compute @workgroup_size(1)\nfn ",
+		params:          noKernelParams,
+	},
 }
 
 var cudaNativeEmitter = nativeKernelEmitter{
@@ -972,9 +993,15 @@ func emitNativeKernelSourceWithEmitter(emitter nativeKernelEmitter, kernel lir.K
 		if len(kernel.Inputs) != 1 || len(kernel.Outputs) != 1 {
 			return "", false
 		}
+		if emitter.rowKernel == nil {
+			return "", false
+		}
 		return emitter.rowKernel(kernel, emitter.normalizeBody), true
 	case "layernorm":
 		if len(kernel.Inputs) != 1 || len(kernel.Outputs) != 1 {
+			return "", false
+		}
+		if emitter.rowKernel == nil {
 			return "", false
 		}
 		return emitter.rowKernel(kernel, emitter.layerNormBody), true
@@ -982,9 +1009,15 @@ func emitNativeKernelSourceWithEmitter(emitter nativeKernelEmitter, kernel lir.K
 		if len(kernel.Inputs) != 1 || len(kernel.Outputs) != 1 {
 			return "", false
 		}
+		if emitter.rowKernel == nil {
+			return "", false
+		}
 		return emitter.rowKernel(kernel, emitter.softmaxBody), true
 	case "gelu":
 		if len(kernel.Inputs) != 1 || len(kernel.Outputs) != 1 {
+			return "", false
+		}
+		if emitter.geluKernel == nil {
 			return "", false
 		}
 		return emitter.geluKernel(kernel), true
@@ -992,9 +1025,15 @@ func emitNativeKernelSourceWithEmitter(emitter nativeKernelEmitter, kernel lir.K
 		if len(kernel.Inputs) != 1 || len(kernel.Outputs) != 1 {
 			return "", false
 		}
+		if emitter.rowKernel == nil {
+			return "", false
+		}
 		return emitter.rowKernel(kernel, emitter.ropeBody), true
 	case "binary_add", "binary_sub", "binary_mul", "binary_div":
 		if len(kernel.Inputs) != 2 || len(kernel.Outputs) != 1 {
+			return "", false
+		}
+		if emitter.binaryKernel == nil || emitter.binaryExpr == nil {
 			return "", false
 		}
 		return emitter.binaryKernel(kernel, emitter.binaryExpr(op.Op)), true
@@ -1002,9 +1041,15 @@ func emitNativeKernelSourceWithEmitter(emitter nativeKernelEmitter, kernel lir.K
 		if len(kernel.Inputs) != 1 || len(kernel.Outputs) != 1 {
 			return "", false
 		}
+		if emitter.dequantKernel == nil {
+			return "", false
+		}
 		return emitter.dequantKernel(kernel), true
 	case "dot", "cosine", "l2_distance":
 		if len(kernel.Inputs) != 2 || len(kernel.Outputs) != 1 {
+			return "", false
+		}
+		if emitter.scoreKernel == nil {
 			return "", false
 		}
 		body, ok := emitter.scoreBodies[op.Op]
@@ -1214,6 +1259,10 @@ func metalKernelParams(kernel lir.Kernel) []string {
 	}
 	params = append(params, "uint gid [[thread_position_in_grid]]")
 	return params
+}
+
+func noKernelParams(kernel lir.Kernel) []string {
+	return nil
 }
 
 func cudaType(v lir.Value) string {

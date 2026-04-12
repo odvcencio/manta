@@ -15,29 +15,16 @@ import (
 )
 
 func TestDefaultPackageManifestPath(t *testing.T) {
-	got := DefaultPackageManifestPath("/tmp/tiny_embed.barr")
+	got := DefaultPackageManifestPath("/tmp/tiny_embed.mll")
 	want := "/tmp/tiny_embed.package.mll"
 	if got != want {
 		t.Fatalf("package manifest path = %q, want %q", got, want)
 	}
 }
 
-func TestResolvePackageManifestPathFallsBackToLegacyJSON(t *testing.T) {
-	dir := t.TempDir()
-	artifactPath := filepath.Join(dir, "tiny_embed.mll")
-	legacyPath := filepath.Join(dir, "tiny_embed.package.json")
-	if err := os.WriteFile(legacyPath, []byte("{}\n"), 0o644); err != nil {
-		t.Fatalf("write legacy manifest stub: %v", err)
-	}
-	got := ResolvePackageManifestPath(artifactPath)
-	if got != legacyPath {
-		t.Fatalf("ResolvePackageManifestPath = %q, want %q", got, legacyPath)
-	}
-}
-
 func TestPackageManifestRoundTripAndVerify(t *testing.T) {
 	dir := t.TempDir()
-	artifactPath := filepath.Join(dir, "tiny_embed.barr")
+	artifactPath := filepath.Join(dir, "tiny_embed.mll")
 	manifestPath := filepath.Join(dir, "tiny_embed.embedding.mll")
 	weightPath := filepath.Join(dir, "tiny_embed.weights.mll")
 	memoryPlanPath := filepath.Join(dir, "tiny_embed.memory.mll")
@@ -103,7 +90,7 @@ func TestPackageManifestRoundTripAndVerify(t *testing.T) {
 
 func TestPackageManifestRoundTripAndVerifyWithTokenizer(t *testing.T) {
 	dir := t.TempDir()
-	artifactPath := filepath.Join(dir, "tiny_embed.barr")
+	artifactPath := filepath.Join(dir, "tiny_embed.mll")
 	manifestPath := filepath.Join(dir, "tiny_embed.embedding.mll")
 	tokenizerPath := filepath.Join(dir, "tiny_embed.tokenizer.mll")
 	weightPath := filepath.Join(dir, "tiny_embed.weights.mll")
@@ -283,7 +270,7 @@ func TestSyncEmbeddingTokenizerVocabUpdatesTrainingPackageState(t *testing.T) {
 
 func TestLoadEmbeddingPackageRejectsTamperedWeightFile(t *testing.T) {
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
-	packagePath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.barr")
+	packagePath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
 	paths, err := trainer.WriteEmbeddingPackage(packagePath)
 	if err != nil {
 		t.Fatalf("write embedding package: %v", err)

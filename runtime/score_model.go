@@ -2,15 +2,13 @@ package barruntime
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/odvcencio/manta/artifact/barr"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
-const ScoreManifestVersion = "barr/score-manifest/v0alpha1"
+const ScoreManifestVersion = "manta/score-manifest/v0alpha1"
 
 // ScoreManifest describes the serving contract for a score/rerank module.
 type ScoreManifest struct {
@@ -33,29 +31,22 @@ type ScoreModel struct {
 	manifest ScoreManifest
 }
 
-// ReadScoreManifestFile decodes a JSON score manifest.
+// ReadScoreManifestFile decodes an authored MLL score manifest.
 func ReadScoreManifestFile(path string) (ScoreManifest, error) {
-	if doc, err := readAuthoredManifestMLL(path, "score_manifest", ScoreManifestVersion); err == nil {
-		return scoreManifestFromDoc(doc)
-	}
-	data, err := os.ReadFile(path)
+	doc, err := readAuthoredManifestMLL(path, "score_manifest", ScoreManifestVersion)
 	if err != nil {
 		return ScoreManifest{}, err
 	}
-	var manifest ScoreManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return ScoreManifest{}, err
-	}
-	return manifest, nil
+	return scoreManifestFromDoc(doc)
 }
 
-// DefaultScoreManifestPath returns the conventional sibling manifest path for a .barr artifact.
+// DefaultScoreManifestPath returns the conventional sibling manifest path for an .mll artifact.
 func DefaultScoreManifestPath(barrPath string) string {
 	return defaultManifestPath(barrPath, ".score.mll")
 }
 
 func ResolveScoreManifestPath(barrPath string) string {
-	return resolveSiblingPath(barrPath, ".score.mll", ".score.json")
+	return DefaultScoreManifestPath(barrPath)
 }
 
 // WriteFile writes the score manifest as an authored MLL container.
@@ -76,7 +67,7 @@ func (rt *Runtime) LoadScore(ctx context.Context, mod *barr.Module, manifest Sco
 	return &ScoreModel{program: prog, manifest: manifest}, nil
 }
 
-// LoadScoreFile reads a .barr artifact and loads it as a score model.
+// LoadScoreFile reads a .mll artifact and loads it as a score model.
 func (rt *Runtime) LoadScoreFile(ctx context.Context, barrPath string, manifest ScoreManifest, opts ...LoadOption) (*ScoreModel, error) {
 	mod, err := barr.ReadFile(barrPath)
 	if err != nil {
@@ -85,12 +76,12 @@ func (rt *Runtime) LoadScoreFile(ctx context.Context, barrPath string, manifest 
 	return rt.LoadScore(ctx, mod, manifest, opts...)
 }
 
-// LoadScoreBundle reads a .barr artifact plus its sibling score manifest.
+// LoadScoreBundle reads a .mll artifact plus its sibling score manifest.
 func (rt *Runtime) LoadScoreBundle(ctx context.Context, barrPath string, opts ...LoadOption) (*ScoreModel, error) {
 	return rt.LoadScoreBundleWithManifest(ctx, barrPath, ResolveScoreManifestPath(barrPath), opts...)
 }
 
-// LoadScoreBundleWithManifest reads a .barr artifact plus an explicit score manifest path.
+// LoadScoreBundleWithManifest reads a .mll artifact plus an explicit score manifest path.
 func (rt *Runtime) LoadScoreBundleWithManifest(ctx context.Context, barrPath, manifestPath string, opts ...LoadOption) (*ScoreModel, error) {
 	manifest, err := ReadScoreManifestFile(manifestPath)
 	if err != nil {

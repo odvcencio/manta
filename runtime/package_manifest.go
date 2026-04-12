@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -16,7 +15,7 @@ import (
 	mll "github.com/odvcencio/mll"
 )
 
-const PackageManifestVersion = "barr/package/v0alpha1"
+const PackageManifestVersion = "manta/package/v0alpha1"
 
 var tagXPKG = [4]byte{'X', 'P', 'K', 'G'}
 
@@ -47,7 +46,7 @@ func DefaultPackageManifestPath(barrPath string) string {
 }
 
 func ResolvePackageManifestPath(barrPath string) string {
-	return resolveSiblingPath(barrPath, ".package.mll", ".package.json")
+	return DefaultPackageManifestPath(barrPath)
 }
 
 func (m PackageManifest) Validate() error {
@@ -113,17 +112,10 @@ func ReadPackageManifestFile(path string) (PackageManifest, error) {
 	if err != nil {
 		return PackageManifest{}, err
 	}
-	if barr.IsMLLBytes(data) {
-		return decodePackageManifestMLL(data)
+	if !barr.IsMLLBytes(data) {
+		return PackageManifest{}, fmt.Errorf("package manifest %q is not an MLL file", path)
 	}
-	var manifest PackageManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return PackageManifest{}, err
-	}
-	if err := manifest.Validate(); err != nil {
-		return PackageManifest{}, err
-	}
-	return manifest, nil
+	return decodePackageManifestMLL(data)
 }
 
 func encodePackageManifestMLL(manifest PackageManifest) ([]byte, error) {

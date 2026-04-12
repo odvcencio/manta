@@ -19,7 +19,10 @@ import (
 	mantaruntime "github.com/odvcencio/manta/runtime"
 	"github.com/odvcencio/manta/runtime/backend"
 	"github.com/odvcencio/manta/runtime/backends/cuda"
+	"github.com/odvcencio/manta/runtime/backends/directml"
 	"github.com/odvcencio/manta/runtime/backends/metal"
+	"github.com/odvcencio/manta/runtime/backends/vulkan"
+	"github.com/odvcencio/manta/runtime/backends/webgpu"
 )
 
 func main() {
@@ -184,7 +187,7 @@ func runDemo(args []string) error {
 		return err
 	}
 
-	rt := mantaruntime.New(cuda.New(), metal.New())
+	rt := mantaruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
 	prog, err := rt.Load(context.Background(), bundle.Artifact, stubLoadOptions(bundle.Artifact)...)
 	if err != nil {
 		return err
@@ -233,7 +236,7 @@ func runArtifact(args []string) error {
 	if err != nil {
 		return err
 	}
-	rt := mantaruntime.New(cuda.New(), metal.New())
+	rt := mantaruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
 	prog, err := rt.Load(context.Background(), mod, stubLoadOptions(mod)...)
 	if err != nil {
 		return err
@@ -1240,7 +1243,7 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("compile lowers a Manta source file into an .mll artifact.")
 	fmt.Println("inspect summarizes an artifact and verifies its sibling package manifest when present.")
-	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Manta metadata in XBAR.")
+	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Manta metadata in XMTA.")
 	fmt.Println("init-model creates the Manta-owned default quantized embedding training package.")
 	fmt.Println("init-train creates a native training package next to an artifact.")
 	fmt.Println("rename-embed rewrites a training package under a new embedding model identity.")
@@ -1314,7 +1317,7 @@ func displayTrainBackend(kind mantaartifact.BackendKind) string {
 }
 
 func displayArtifactVersion(version string) string {
-	return strings.Replace(version, "barr/", "manta/", 1)
+	return version
 }
 
 func displayManifestName(value string) string {

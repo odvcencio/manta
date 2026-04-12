@@ -1,14 +1,12 @@
 package barruntime
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/odvcencio/manta/artifact/barr"
 )
 
-const EmbeddingTrainManifestVersion = "barr/train-manifest/v0alpha1"
+const EmbeddingTrainManifestVersion = "manta/train-manifest/v0alpha1"
 
 // EmbeddingTrainManifest describes the native training contract for an embedding module.
 type EmbeddingTrainManifest struct {
@@ -17,29 +15,22 @@ type EmbeddingTrainManifest struct {
 	Config    EmbeddingTrainConfig `json:"config"`
 }
 
-// DefaultEmbeddingTrainManifestPath returns the conventional sibling train-manifest path for a .barr artifact.
+// DefaultEmbeddingTrainManifestPath returns the conventional sibling train-manifest path for an .mll artifact.
 func DefaultEmbeddingTrainManifestPath(barrPath string) string {
 	return defaultManifestPath(barrPath, ".train.mll")
 }
 
 func ResolveEmbeddingTrainManifestPath(barrPath string) string {
-	return resolveSiblingPath(barrPath, ".train.mll", ".train.json")
+	return DefaultEmbeddingTrainManifestPath(barrPath)
 }
 
-// ReadEmbeddingTrainManifestFile decodes a JSON training manifest.
+// ReadEmbeddingTrainManifestFile decodes an authored MLL training manifest.
 func ReadEmbeddingTrainManifestFile(path string) (EmbeddingTrainManifest, error) {
-	if doc, err := readAuthoredManifestMLL(path, "train_manifest", EmbeddingTrainManifestVersion); err == nil {
-		return embeddingTrainManifestFromDoc(doc)
-	}
-	data, err := os.ReadFile(path)
+	doc, err := readAuthoredManifestMLL(path, "train_manifest", EmbeddingTrainManifestVersion)
 	if err != nil {
 		return EmbeddingTrainManifest{}, err
 	}
-	var manifest EmbeddingTrainManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return EmbeddingTrainManifest{}, err
-	}
-	return manifest, nil
+	return embeddingTrainManifestFromDoc(doc)
 }
 
 // WriteFile writes the training manifest as an authored MLL container.

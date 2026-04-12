@@ -44,6 +44,18 @@ func validateCompiledKernelSource(kind barr.BackendKind, compiled CompiledKernel
 		if !strings.Contains(compiled.Source, "kernel void "+compiled.Entry+"(") {
 			return fmt.Errorf("kernel %q Metal source does not define entry %q", compiled.Name, compiled.Entry)
 		}
+	case barr.BackendVulkan:
+		if !strings.Contains(compiled.Source, "void "+compiled.Entry+"(") {
+			return fmt.Errorf("kernel %q Vulkan source does not define entry %q", compiled.Name, compiled.Entry)
+		}
+	case barr.BackendDirectML:
+		if !strings.Contains(compiled.Source, "manta_directml_graph "+compiled.Entry+"(") {
+			return fmt.Errorf("kernel %q DirectML source does not define entry %q", compiled.Name, compiled.Entry)
+		}
+	case barr.BackendWebGPU:
+		if !strings.Contains(compiled.Source, "fn "+compiled.Entry+"(") {
+			return fmt.Errorf("kernel %q WebGPU source does not define entry %q", compiled.Name, compiled.Entry)
+		}
 	default:
 		return fmt.Errorf("unsupported backend %q", kind)
 	}
@@ -73,6 +85,21 @@ func nativeLaunchConfig(kind barr.BackendKind, kernel barr.Kernel, compiled Comp
 		config["launch_grid"] = "1d"
 		config["launch_threadgroup_size"] = tile
 		config["launch_threadgroup_memory_bytes"] = estimatedSharedBytes(kernel, tile)
+	case barr.BackendVulkan:
+		config["launch_api"] = "vkCmdDispatch"
+		config["launch_grid"] = "1d"
+		config["launch_workgroup_size"] = tile
+		config["launch_shared_bytes"] = estimatedSharedBytes(kernel, tile)
+	case barr.BackendDirectML:
+		config["launch_api"] = "IDMLCommandRecorder::RecordDispatch"
+		config["launch_grid"] = "1d"
+		config["launch_threadgroup_size"] = tile
+		config["launch_temporary_resource_bytes"] = estimatedSharedBytes(kernel, tile)
+	case barr.BackendWebGPU:
+		config["launch_api"] = "GPUComputePassEncoder.dispatchWorkgroups"
+		config["launch_grid"] = "1d"
+		config["launch_workgroup_size"] = tile
+		config["launch_workgroup_memory_bytes"] = estimatedSharedBytes(kernel, tile)
 	}
 	return config
 }

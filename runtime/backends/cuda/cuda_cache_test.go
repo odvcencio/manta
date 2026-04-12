@@ -73,7 +73,7 @@ func TestRuntimeLoadUsesPackageManifestCacheKey(t *testing.T) {
 		ModuleName:      bundle.Artifact.Name,
 		ArtifactVersion: bundle.Artifact.Version,
 		Files: []barruntime.PackageManifestFile{
-			{Role: "artifact", Path: "tiny_embed.barr", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Bytes: 1},
+			{Role: "artifact", Path: "tiny_embed.mll", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Bytes: 1},
 		},
 	}
 
