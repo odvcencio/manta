@@ -1386,7 +1386,9 @@ func TestTrainerActivationAccelModeFromEnv(t *testing.T) {
 		full    bool
 		softmax bool
 	}{
-		{name: "default disabled"},
+		{
+			name: "default disabled",
+		},
 		{
 			name: "full enables all activation backward",
 			env: map[string]string{
@@ -1461,6 +1463,58 @@ func TestEmbeddingTrainerGELUBackwardAcceleratorMatchesHost(t *testing.T) {
 		want[i] = gradOut[i] * geluBackward(preAct[i])
 	}
 	assertTensorClose(t, backend.NewTensorF32([]int{2, 3}, got), []int{2, 3}, want)
+}
+
+func TestEmbeddingTrainerActivationAccelShapeLimitSkipsLargeUnboundCalls(t *testing.T) {
+	t.Setenv("MANTA_TRAIN_ACTIVATION_ACCEL_MAX_ELEMENTS", "4")
+	activation := &countingActivationAccelerator{}
+	trainer := &EmbeddingTrainer{
+		activationAccel:      activation,
+		activationAccelFull:  true,
+		softmaxBackwardAccel: true,
+	}
+	grad := [][]float32{
+		{0.2, -0.1, 0.05},
+		{-0.25, 0.4, -0.3},
+	}
+	pre := [][]float32{
+		{-1.0, -0.5, 0.0},
+		{0.5, 1.0, 1.5},
+	}
+	if _, ok := trainer.tryBatchedGELUBackwardMul(grad, pre, 1, 3); ok {
+		t.Fatal("expected large unbound activation call to fall back to host")
+	}
+	if activation.geluBackwardCalls != 0 {
+		t.Fatalf("gelu backward calls = %d, want 0", activation.geluBackwardCalls)
+	}
+
+	t.Setenv("MANTA_TRAIN_ACTIVATION_ACCEL_MAX_ELEMENTS", "0")
+	if _, ok := trainer.tryBatchedGELUBackwardMul(grad, pre, 1, 3); !ok {
+		t.Fatal("expected unlimited activation shape limit to allow accelerator")
+	}
+	if activation.geluBackwardCalls != 1 {
+		t.Fatalf("gelu backward calls = %d, want 1", activation.geluBackwardCalls)
+	}
+}
+
+func TestEmbeddingTrainerActivationAccelShapeLimitAllowsBoundInputs(t *testing.T) {
+	t.Setenv("MANTA_TRAIN_ACTIVATION_ACCEL_MAX_ELEMENTS", "4")
+	activation := &countingActivationAccelerator{}
+	trainer := &EmbeddingTrainer{
+		activationAccel:     activation,
+		activationAccelFull: true,
+	}
+	pre := []float32{-1.0, -0.5, 0.0, 0.5, 1.0, 1.5}
+	if err := activation.BindTensor("pre", backend.NewTensorF32([]int{2, 3}, pre)); err != nil {
+		t.Fatalf("bind pre: %v", err)
+	}
+	grad := []float32{0.2, -0.1, 0.05, -0.25, 0.4, -0.3}
+	if _, ok := trainer.tryGELUBackwardMul(grad, nil, 2, 3, "pre"); !ok {
+		t.Fatal("expected bound activation input to bypass unbound shape limit")
+	}
+	if activation.geluBackwardCalls != 1 {
+		t.Fatalf("gelu backward calls = %d, want 1", activation.geluBackwardCalls)
+	}
 }
 
 func TestEmbeddingTrainerSoftmaxBackwardAcceleratorMatchesHost(t *testing.T) {

@@ -1596,6 +1596,28 @@ func batchedBackwardEnabled() bool {
 	}
 }
 
+func activationAccelMaxElements() int {
+	limit := 1 << 20
+	if raw := trainEnv("MANTA_TRAIN_ACTIVATION_ACCEL_MAX_ELEMENTS"); raw != "" {
+		var parsed int
+		if _, err := fmt.Sscanf(raw, "%d", &parsed); err == nil {
+			if parsed <= 0 {
+				return 0
+			}
+			limit = parsed
+		}
+	}
+	return limit
+}
+
+func activationAccelElementsAllowed(rows, cols int) bool {
+	if rows <= 0 || cols <= 0 {
+		return false
+	}
+	limit := activationAccelMaxElements()
+	return limit <= 0 || rows <= limit/cols
+}
+
 func trainEnvFlagEnabled(name string) bool {
 	switch trainEnv(name) {
 	case "1", "true", "TRUE", "yes", "YES":
@@ -4591,6 +4613,9 @@ func (t *EmbeddingTrainer) tryGELUBackwardMul(gradOut, preAct []float32, rows, c
 	if !t.fullActivationBackwardAccelEnabled() || rows == 0 || cols == 0 {
 		return nil, false
 	}
+	if preActBinding == "" && !activationAccelElementsAllowed(rows, cols) {
+		return nil, false
+	}
 	gradTensor := tensorF32View([]int{rows, cols}, gradOut)
 	var (
 		result *backend.Tensor
@@ -4616,6 +4641,9 @@ func (t *EmbeddingTrainer) tryGELUBackwardMul(gradOut, preAct []float32, rows, c
 
 func (t *EmbeddingTrainer) trySoftmaxBackwardRows(gradOut, probs []float32, rows, cols int, probsBinding string) ([]float32, bool) {
 	if !t.softmaxBackwardAccelEnabled() || rows == 0 || cols == 0 {
+		return nil, false
+	}
+	if probsBinding == "" && !activationAccelElementsAllowed(rows, cols) {
 		return nil, false
 	}
 	gradTensor := tensorF32View([]int{rows, cols}, gradOut)
@@ -4645,6 +4673,9 @@ func (t *EmbeddingTrainer) tryBatchedSoftmaxBackwardRows(gradOutMatrices, probsM
 	if !t.softmaxBackwardAccelEnabled() || len(gradOutMatrices) == 0 || len(gradOutMatrices) != len(probsMatrices) || rows == 0 || cols == 0 {
 		return nil, false
 	}
+	if !activationAccelElementsAllowed(len(gradOutMatrices)*rows, cols) {
+		return nil, false
+	}
 	perMatrix := rows * cols
 	gradOut, ok := t.flattenFixedFloat32MatricesScratch(0, gradOutMatrices, perMatrix)
 	if !ok {
@@ -4665,6 +4696,9 @@ func (t *EmbeddingTrainer) tryBatchedGELUBackwardMul(gradOutMatrices, preActMatr
 	if !t.fullActivationBackwardAccelEnabled() || len(gradOutMatrices) == 0 || len(gradOutMatrices) != len(preActMatrices) || rows == 0 || cols == 0 {
 		return nil, false
 	}
+	if !activationAccelElementsAllowed(len(gradOutMatrices)*rows, cols) {
+		return nil, false
+	}
 	perMatrix := rows * cols
 	gradOut, ok := t.flattenFixedFloat32MatricesScratch(0, gradOutMatrices, perMatrix)
 	if !ok {
@@ -4683,6 +4717,9 @@ func (t *EmbeddingTrainer) tryBatchedGELUBackwardMul(gradOutMatrices, preActMatr
 
 func (t *EmbeddingTrainer) tryBatchedLayerNormBackwardRows(gradOutMatrices, normalizedMatrices, preMatrices [][]float32, rows, cols int) ([][]float32, bool) {
 	if !t.fullActivationBackwardAccelEnabled() || len(gradOutMatrices) == 0 || len(gradOutMatrices) != len(normalizedMatrices) || len(gradOutMatrices) != len(preMatrices) || rows == 0 || cols == 0 {
+		return nil, false
+	}
+	if !activationAccelElementsAllowed(len(gradOutMatrices)*rows, cols) {
 		return nil, false
 	}
 	perMatrix := rows * cols
@@ -4707,6 +4744,9 @@ func (t *EmbeddingTrainer) tryBatchedLayerNormBackwardRows(gradOutMatrices, norm
 
 func (t *EmbeddingTrainer) tryLayerNormBackwardRows(gradOut, normalized, pre []float32, rows, cols int, normalizedBinding, preBinding string) ([]float32, bool) {
 	if !t.fullActivationBackwardAccelEnabled() || rows == 0 || cols == 0 {
+		return nil, false
+	}
+	if (normalizedBinding == "" || preBinding == "") && !activationAccelElementsAllowed(rows, cols) {
 		return nil, false
 	}
 	gradTensor := tensorF32View([]int{rows, cols}, gradOut)
