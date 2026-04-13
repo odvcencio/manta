@@ -812,7 +812,9 @@ func bucketContrastiveOrderByLength(trainSet []EmbeddingContrastiveExample, orde
 		}
 		window := order[start:end]
 		sort.SliceStable(window, func(i, j int) bool {
-			return contrastiveExampleLengthLess(trainSet[window[i]], trainSet[window[j]])
+			left := contrastiveExampleSortLength(trainSet[window[i]])
+			right := contrastiveExampleSortLength(trainSet[window[j]])
+			return left < right
 		})
 	}
 }
@@ -836,33 +838,12 @@ func contrastiveLengthBucketWindow(batchSize, total int) int {
 	return windowSize
 }
 
-func contrastiveExampleLengthLess(left, right EmbeddingContrastiveExample) bool {
-	leftMax, leftMin, leftQuery, leftPositive := contrastiveExampleLengthKey(left)
-	rightMax, rightMin, rightQuery, rightPositive := contrastiveExampleLengthKey(right)
-	if leftMax != rightMax {
-		return leftMax < rightMax
+func contrastiveExampleSortLength(example EmbeddingContrastiveExample) int {
+	length := len(example.QueryTokens)
+	if len(example.PositiveTokens) > length {
+		length = len(example.PositiveTokens)
 	}
-	if leftMin != rightMin {
-		return leftMin < rightMin
-	}
-	if leftQuery != rightQuery {
-		return leftQuery < rightQuery
-	}
-	return leftPositive < rightPositive
-}
-
-func contrastiveExampleLengthKey(example EmbeddingContrastiveExample) (maxLen, minLen, queryLen, positiveLen int) {
-	queryLen = len(example.QueryTokens)
-	positiveLen = len(example.PositiveTokens)
-	maxLen = queryLen
-	minLen = positiveLen
-	if positiveLen > maxLen {
-		maxLen = positiveLen
-	}
-	if queryLen < minLen {
-		minLen = queryLen
-	}
-	return maxLen, minLen, queryLen, positiveLen
+	return length
 }
 
 func expandContrastiveExamples(examples []EmbeddingContrastiveExample) []EmbeddingPairExample {

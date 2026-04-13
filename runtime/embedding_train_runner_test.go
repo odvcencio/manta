@@ -348,7 +348,7 @@ func TestBucketContrastiveOrderByLengthSortsWithinDefaultWindows(t *testing.T) {
 	}
 }
 
-func TestBucketContrastiveOrderByLengthUsesPairLengthTieBreaks(t *testing.T) {
+func TestBucketContrastiveOrderByLengthPreservesEqualLengthShuffleOrder(t *testing.T) {
 	t.Setenv("MANTA_TRAIN_LENGTH_BUCKET_WINDOW", "")
 	trainSet := []EmbeddingContrastiveExample{
 		{QueryTokens: make([]int32, 8), PositiveTokens: make([]int32, 10)},
@@ -360,7 +360,7 @@ func TestBucketContrastiveOrderByLengthUsesPairLengthTieBreaks(t *testing.T) {
 
 	bucketContrastiveOrderByLength(trainSet, order, 2)
 
-	want := []int{1, 3, 2, 0}
+	want := []int{0, 1, 2, 3}
 	for i := range want {
 		if order[i] != want[i] {
 			t.Fatalf("order[%d] = %d, want %d (full order %v)", i, order[i], want[i], order)
