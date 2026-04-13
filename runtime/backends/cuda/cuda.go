@@ -225,6 +225,18 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
+	case mantaartifact.StepMSSSIMLoss:
+		if e.device == nil {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		if !supportsBuiltinMSELoss(inputs) {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		result, err := e.device.runMSSSIMLossStep(inputs, outputType)
+		if err != nil {
+			return backend.StepDispatchResult{}, false, err
+		}
+		return result, true, nil
 	case mantaartifact.StepScalarAdd:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil

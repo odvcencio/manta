@@ -35,6 +35,15 @@ func TestCUDAMirageScalarLossSteps(t *testing.T) {
 	}
 	assertScalarClose(t, mse.Outputs[0], 20.0/3.0, 0.0005)
 
+	msssim, err := rt.runMSSSIMLossStep([]*backend.Tensor{lhs, rhs}, outputType)
+	if err != nil {
+		t.Fatalf("run ms-ssim loss: %v", err)
+	}
+	if msssim.VariantEntry != "__builtin_cuda_ms_ssim_loss" {
+		t.Fatalf("ms-ssim variant = %q", msssim.VariantEntry)
+	}
+	assertScalarClose(t, msssim.Outputs[0], expectedMSSSIMLoss(lhs, rhs), 0.0005)
+
 	sum, err := rt.runScalarAddStep([]*backend.Tensor{
 		backend.NewTensorF32([]int{1}, []float32{1.5}),
 		backend.NewTensorF32([]int{1}, []float32{2}),
@@ -212,6 +221,42 @@ func expectedLogNormal(codes, params *backend.Tensor) float64 {
 		total += -math.Log2(p)
 	}
 	return total
+}
+
+func expectedMSSSIMLoss(lhs, rhs *backend.Tensor) float64 {
+	meanA, meanB := 0.0, 0.0
+	for i := range lhs.F32 {
+		meanA += float64(lhs.F32[i])
+		meanB += float64(rhs.F32[i])
+	}
+	meanA /= float64(len(lhs.F32))
+	meanB /= float64(len(rhs.F32))
+	varA, varB, cov := 0.0, 0.0, 0.0
+	for i := range lhs.F32 {
+		da := float64(lhs.F32[i]) - meanA
+		db := float64(rhs.F32[i]) - meanB
+		varA += da * da
+		varB += db * db
+		cov += da * db
+	}
+	denom := float64(len(lhs.F32))
+	varA /= denom
+	varB /= denom
+	cov /= denom
+	const c1 = 0.01 * 0.01
+	const c2 = 0.03 * 0.03
+	ssim := ((2*meanA*meanB + c1) * (2*cov + c2)) / ((meanA*meanA + meanB*meanB + c1) * (varA + varB + c2))
+	if math.IsNaN(ssim) || math.IsInf(ssim, 0) {
+		ssim = 0
+	}
+	loss := 1 - ssim
+	if loss < 0 {
+		return 0
+	}
+	if loss > 1 {
+		return 1
+	}
+	return loss
 }
 
 func softmaxProbabilityForTest(values []float32, base, stride, count, idx int) float64 {

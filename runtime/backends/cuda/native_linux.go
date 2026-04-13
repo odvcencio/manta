@@ -461,6 +461,11 @@ static int mantaCudaLaunchMSEPartials(MantaCudaRuntime* rt, MantaCudaKernel* ker
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
+static int mantaCudaLaunchMSSSIMPartials(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr partials, int elements, char** err) {
+	void* args[] = {&lhs, &rhs, &partials, &elements};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
 static int mantaCudaLaunchScalarSum(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr values, CUdeviceptr out0, int count, char** err) {
 	void* args[] = {&values, &out0, &count};
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
@@ -837,6 +842,62 @@ extern "C" __global__ void manta_mse_partials(
 }
 `
 
+const msssimLossKernelSource = `
+extern "C" __global__ void manta_msssim_partials(
+    const float* lhs,
+    const float* rhs,
+    float* partials,
+    int elements
+) {
+    __shared__ float sumA[256];
+    __shared__ float sumB[256];
+    __shared__ float sumAA[256];
+    __shared__ float sumBB[256];
+    __shared__ float sumAB[256];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+    int stride = gridDim.x * blockDim.x;
+    float a = 0.0f;
+    float b = 0.0f;
+    float aa = 0.0f;
+    float bb = 0.0f;
+    float ab = 0.0f;
+    for (int i = idx; i < elements; i += stride) {
+        float x = lhs[i];
+        float y = rhs[i];
+        a += x;
+        b += y;
+        aa += x * x;
+        bb += y * y;
+        ab += x * y;
+    }
+    sumA[tid] = a;
+    sumB[tid] = b;
+    sumAA[tid] = aa;
+    sumBB[tid] = bb;
+    sumAB[tid] = ab;
+    __syncthreads();
+    for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            sumA[tid] += sumA[tid + offset];
+            sumB[tid] += sumB[tid + offset];
+            sumAA[tid] += sumAA[tid + offset];
+            sumBB[tid] += sumBB[tid + offset];
+            sumAB[tid] += sumAB[tid + offset];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        int base = blockIdx.x * 5;
+        partials[base + 0] = sumA[0];
+        partials[base + 1] = sumB[0];
+        partials[base + 2] = sumAA[0];
+        partials[base + 3] = sumBB[0];
+        partials[base + 4] = sumAB[0];
+    }
+}
+`
+
 const scalarLossKernelSource = `
 extern "C" __global__ void manta_scalar_sum(
     const float* values,
@@ -1118,6 +1179,7 @@ type deviceRuntime struct {
 	conv2DKernel       *auxKernel
 	conv2DTransKernel  *auxKernel
 	mseLossKernel      *auxKernel
+	msssimLossKernel   *auxKernel
 	scalarAddKernel    *auxKernel
 	rdLossKernel       *auxKernel
 	crossEntropyKernel *auxKernel
@@ -1186,6 +1248,8 @@ func (rt *deviceRuntime) close() {
 	rt.conv2DTransKernel = nil
 	rt.destroyAuxKernel(rt.mseLossKernel)
 	rt.mseLossKernel = nil
+	rt.destroyAuxKernel(rt.msssimLossKernel)
+	rt.msssimLossKernel = nil
 	rt.destroyAuxKernel(rt.scalarAddKernel)
 	rt.scalarAddKernel = nil
 	rt.destroyAuxKernel(rt.rdLossKernel)
@@ -1671,6 +1735,21 @@ func (rt *deviceRuntime) ensureMSELossKernel() (*auxKernel, error) {
 	return kernel, nil
 }
 
+func (rt *deviceRuntime) ensureMSSSIMLossKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.msssimLossKernel != nil {
+		return rt.msssimLossKernel, nil
+	}
+	kernel, err := rt.compileAuxKernel(msssimLossKernelSource, "manta_msssim_partials")
+	if err != nil {
+		return nil, err
+	}
+	rt.msssimLossKernel = kernel
+	return kernel, nil
+}
+
 func (rt *deviceRuntime) ensureScalarAddKernel() (*auxKernel, error) {
 	if rt == nil {
 		return nil, fmt.Errorf("cuda runtime is not initialized")
@@ -1935,6 +2014,60 @@ func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType man
 	}
 	value := sumFloat32(partials) / float32(elements)
 	return cudaScalarStepResult(outputType, "__builtin_cuda_mse_loss", "mse_loss", "cuda_reduction", value), nil
+}
+
+func (rt *deviceRuntime) runMSSSIMLossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+	if rt == nil || rt.ptr == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if len(inputs) != 2 || inputs[0] == nil || inputs[1] == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda ms_ssim_loss expects two inputs")
+	}
+	lhs, rhs := inputs[0], inputs[1]
+	if !lhs.EqualShape(rhs) || len(lhs.F32) != len(rhs.F32) {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda ms_ssim_loss shape mismatch")
+	}
+	elements := len(lhs.F32)
+	if elements == 0 {
+		return cudaScalarStepResult(outputType, "__builtin_cuda_ms_ssim_loss", "ms_ssim_loss", "cuda_reduction", 0), nil
+	}
+	kernel, err := rt.ensureMSSSIMLossKernel()
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	lhsBuf, err := rt.uploadFloat32(lhs.F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(lhsBuf)
+	rhsBuf, err := rt.uploadFloat32(rhs.F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(rhsBuf)
+	grid, block := reductionLaunchConfig(elements)
+	partialsBuf, err := rt.allocFloat32(int(grid) * 5)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(partialsBuf)
+	if err := rt.launchMSSSIMPartials(kernel, grid, block, lhsBuf, rhsBuf, partialsBuf, elements); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	partials := make([]float32, int(grid)*5)
+	if err := rt.downloadFloat32(partials, partialsBuf); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	sumA, sumB, sumAA, sumBB, sumAB := 0.0, 0.0, 0.0, 0.0, 0.0
+	for i := 0; i < len(partials); i += 5 {
+		sumA += float64(partials[i])
+		sumB += float64(partials[i+1])
+		sumAA += float64(partials[i+2])
+		sumBB += float64(partials[i+3])
+		sumAB += float64(partials[i+4])
+	}
+	value := float32(msSSIMLossFromMoments(sumA, sumB, sumAA, sumBB, sumAB, elements))
+	return cudaScalarStepResult(outputType, "__builtin_cuda_ms_ssim_loss", "ms_ssim_loss", "cuda_reduction", value), nil
 }
 
 func (rt *deviceRuntime) runScalarAddStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
@@ -2271,6 +2404,17 @@ func (rt *deviceRuntime) launchMSEPartials(kernel *auxKernel, grid, block uint, 
 	}
 	var errStr *C.char
 	if C.mantaCudaLaunchMSEPartials(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), lhs, rhs, partials, C.int(elements), &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchMSSSIMPartials(kernel *auxKernel, grid, block uint, lhs, rhs, partials C.CUdeviceptr, elements int) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda ms_ssim_loss kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchMSSSIMPartials(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), lhs, rhs, partials, C.int(elements), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3384,6 +3528,32 @@ func cfgTransposeMetadata(cfg cudaConv2DTransposeConfig) map[string]any {
 		"output_padding_w": cfg.outPadW,
 		"has_bias":         cfg.hasBias,
 	}
+}
+
+func msSSIMLossFromMoments(sumA, sumB, sumAA, sumBB, sumAB float64, elements int) float64 {
+	if elements <= 0 {
+		return 0
+	}
+	denom := float64(elements)
+	meanA := sumA / denom
+	meanB := sumB / denom
+	varA := sumAA/denom - meanA*meanA
+	varB := sumBB/denom - meanB*meanB
+	cov := sumAB/denom - meanA*meanB
+	const c1 = 0.01 * 0.01
+	const c2 = 0.03 * 0.03
+	ssim := ((2*meanA*meanB + c1) * (2*cov + c2)) / ((meanA*meanA + meanB*meanB + c1) * (varA + varB + c2))
+	if math.IsNaN(ssim) || math.IsInf(ssim, 0) {
+		ssim = 0
+	}
+	loss := 1 - ssim
+	if loss < 0 {
+		return 0
+	}
+	if loss > 1 {
+		return 1
+	}
+	return loss
 }
 
 func cudaScalarStepResult(outputType mantaartifact.ValueType, variant, op, launchAPI string, value float32) backend.StepDispatchResult {

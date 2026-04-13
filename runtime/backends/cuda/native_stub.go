@@ -52,6 +52,10 @@ func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType man
 	return backend.StepDispatchResult{}, nil
 }
 
+func (rt *deviceRuntime) runMSSSIMLossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+
 func (rt *deviceRuntime) runScalarAddStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
