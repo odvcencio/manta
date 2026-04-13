@@ -123,6 +123,8 @@ func run(args []string) error {
 		return runTrainEmbed(args[1:])
 	case "train-corpus":
 		return runTrainCorpus(args[1:])
+	case "compare-train-metrics":
+		return runCompareTrainMetrics(args[1:])
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
@@ -1522,6 +1524,121 @@ func bytesToMiB(bytes int64) float64 {
 	return float64(bytes) / (1024 * 1024)
 }
 
+func runCompareTrainMetrics(args []string) error {
+	fs := flag.NewFlagSet("compare-train-metrics", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || fs.Arg(0) == "" {
+		return fmt.Errorf("usage: manta compare-train-metrics <current.metrics.json> [baseline.metrics.json]")
+	}
+	currentPath := fs.Arg(0)
+	current, err := readTrainMetricsJSON(currentPath)
+	if err != nil {
+		return err
+	}
+	var baseline *trainMetricsJSON
+	baselinePath := ""
+	if fs.NArg() > 1 && fs.Arg(1) != "" {
+		baselinePath = fs.Arg(1)
+		loaded, err := readTrainMetricsJSON(baselinePath)
+		if err != nil {
+			return err
+		}
+		baseline = &loaded
+	}
+	fmt.Print(formatTrainMetricsReport(currentPath, current, baselinePath, baseline))
+	return nil
+}
+
+func readTrainMetricsJSON(path string) (trainMetricsJSON, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return trainMetricsJSON{}, err
+	}
+	var metrics trainMetricsJSON
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		return trainMetricsJSON{}, fmt.Errorf("parse metrics JSON %q: %w", path, err)
+	}
+	if metrics.Schema == "" {
+		return trainMetricsJSON{}, fmt.Errorf("metrics JSON %q is missing schema", path)
+	}
+	return metrics, nil
+}
+
+func formatTrainMetricsReport(currentPath string, current trainMetricsJSON, baselinePath string, baseline *trainMetricsJSON) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "metrics: %s\n", currentPath)
+	fmt.Fprintf(&b, "identity: schema=%s command=%s mode=%s artifact=%s\n", current.Schema, current.Command, current.Mode, current.Artifact)
+	if current.FinalEval != nil {
+		fmt.Fprintf(&b, "quality: top1=%.6f top5=%.6f top10=%.6f mrr=%.6f auc=%.6f margin=%.6f loss=%.6f mean_rank=%.3f pairs=%d\n",
+			current.FinalEval.Top1Accuracy,
+			current.FinalEval.Top5Accuracy,
+			current.FinalEval.Top10Accuracy,
+			current.FinalEval.MeanReciprocalRank,
+			current.FinalEval.ROCAUC,
+			current.FinalEval.ScoreMargin,
+			current.FinalEval.Loss,
+			current.FinalEval.MeanPositiveRank,
+			current.FinalEval.PairCount,
+		)
+	}
+	fmt.Fprintf(&b, "throughput: train_pairs/s=%.2f eval_pairs/s=%.2f optimizer_steps/s=%.2f pairs/s=%.2f elapsed_s=%.3f\n",
+		current.Throughput.TrainPairsPerSecond,
+		current.Throughput.EvalPairsPerSecond,
+		current.Throughput.OptimizerStepsPerSecond,
+		current.Throughput.PairsPerSecond,
+		current.Throughput.ElapsedSeconds,
+	)
+	fmt.Fprintf(&b, "accelerators: forward=%s optimizer=%s activation=%s contrastive=%s\n",
+		current.Accelerators.Forward,
+		current.Accelerators.Optimizer,
+		current.Accelerators.Activation,
+		current.Accelerators.Contrastive,
+	)
+	fmt.Fprintf(&b, "profile_delta: matmul_runs=%d upload_mb=%.2f download_mb=%.2f optimizer_updates=%d activation_calls=%d contrastive_calls=%d\n",
+		current.ProfileDelta.MatMulRuns,
+		current.ProfileDelta.MatMulRunUploadMB,
+		current.ProfileDelta.MatMulRunDownloadMB,
+		current.ProfileDelta.OptimizerUpdates,
+		current.ProfileDelta.ActivationCalls,
+		current.ProfileDelta.ContrastiveCalls,
+	)
+	if baseline == nil {
+		return b.String()
+	}
+	fmt.Fprintf(&b, "baseline: %s\n", baselinePath)
+	if current.FinalEval != nil && baseline.FinalEval != nil {
+		fmt.Fprintf(&b, "quality_delta: top1=%+.6f top5=%+.6f top10=%+.6f mrr=%+.6f auc=%+.6f margin=%+.6f loss=%+.6f mean_rank=%+.3f\n",
+			current.FinalEval.Top1Accuracy-baseline.FinalEval.Top1Accuracy,
+			current.FinalEval.Top5Accuracy-baseline.FinalEval.Top5Accuracy,
+			current.FinalEval.Top10Accuracy-baseline.FinalEval.Top10Accuracy,
+			current.FinalEval.MeanReciprocalRank-baseline.FinalEval.MeanReciprocalRank,
+			current.FinalEval.ROCAUC-baseline.FinalEval.ROCAUC,
+			current.FinalEval.ScoreMargin-baseline.FinalEval.ScoreMargin,
+			current.FinalEval.Loss-baseline.FinalEval.Loss,
+			current.FinalEval.MeanPositiveRank-baseline.FinalEval.MeanPositiveRank,
+		)
+	}
+	fmt.Fprintf(&b, "throughput_delta: train_pairs/s=%+.2f eval_pairs/s=%+.2f optimizer_steps/s=%+.2f pairs/s=%+.2f elapsed_s=%+.3f\n",
+		current.Throughput.TrainPairsPerSecond-baseline.Throughput.TrainPairsPerSecond,
+		current.Throughput.EvalPairsPerSecond-baseline.Throughput.EvalPairsPerSecond,
+		current.Throughput.OptimizerStepsPerSecond-baseline.Throughput.OptimizerStepsPerSecond,
+		current.Throughput.PairsPerSecond-baseline.Throughput.PairsPerSecond,
+		current.Throughput.ElapsedSeconds-baseline.Throughput.ElapsedSeconds,
+	)
+	fmt.Fprintf(&b, "profile_delta_delta: matmul_runs=%+d upload_mb=%+.2f download_mb=%+.2f optimizer_updates=%+d activation_calls=%+d contrastive_calls=%+d\n",
+		current.ProfileDelta.MatMulRuns-baseline.ProfileDelta.MatMulRuns,
+		current.ProfileDelta.MatMulRunUploadMB-baseline.ProfileDelta.MatMulRunUploadMB,
+		current.ProfileDelta.MatMulRunDownloadMB-baseline.ProfileDelta.MatMulRunDownloadMB,
+		current.ProfileDelta.OptimizerUpdates-baseline.ProfileDelta.OptimizerUpdates,
+		current.ProfileDelta.ActivationCalls-baseline.ProfileDelta.ActivationCalls,
+		current.ProfileDelta.ContrastiveCalls-baseline.ProfileDelta.ContrastiveCalls,
+	)
+	return b.String()
+}
+
 func runTrainTokenizer(args []string) error {
 	fs := flag.NewFlagSet("train-tokenizer", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -1709,6 +1826,7 @@ func printUsage() {
 	fmt.Println("  manta tokenize-embed [flags] <artifact.mll> <input-text.jsonl> <output-token.jsonl>")
 	fmt.Println("  manta train-corpus [flags] <artifact.mll> <corpus.txt>")
 	fmt.Println("  manta train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]")
+	fmt.Println("  manta compare-train-metrics <current.metrics.json> [baseline.metrics.json]")
 	fmt.Println("  manta run <artifact.mll> [entry]")
 	fmt.Println("  manta demo [module-name]")
 	fmt.Println()
@@ -1724,6 +1842,7 @@ func printUsage() {
 	fmt.Println("tokenize-embed converts text JSONL into reusable token JSONL for training or eval.")
 	fmt.Println("train-corpus trains tokenizer + mined text pairs + embedder in one Manta job from a raw text corpus.")
 	fmt.Println("train-embed reloads a training package, fits or --eval-only evaluates token JSONL or text JSONL (with --tokenizer or a sibling .tokenizer.mll; use --no-tokenizer for token JSONL beside a tokenizer), and writes it back.")
+	fmt.Println("compare-train-metrics summarizes metrics JSON and prints deltas against a baseline metrics JSON when provided.")
 	fmt.Println("run loads an artifact, binds stub weights and inputs, and executes one entrypoint.")
 	fmt.Println("demo creates a tiny inference-style module and loads it through the runtime.")
 }

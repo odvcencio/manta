@@ -514,6 +514,90 @@ func TestRunTrainEmbedEvalOnlyWritesMetricsJSON(t *testing.T) {
 	}
 }
 
+func TestRunCompareTrainMetricsReportsCurrentAndBaselineDeltas(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "current.metrics.json")
+	baselinePath := filepath.Join(dir, "baseline.metrics.json")
+	current := trainMetricsJSON{
+		Schema:   "manta.embedding_train_metrics.v1",
+		Command:  "train-embed",
+		Mode:     "eval",
+		Artifact: "current.mll",
+		FinalEval: &evalMetricsJSON{
+			Top1Accuracy:       0.9,
+			Top5Accuracy:       0.98,
+			Top10Accuracy:      1,
+			MeanReciprocalRank: 0.95,
+			ROCAUC:             0.73,
+			ScoreMargin:        0.12,
+			Loss:               0.11,
+			MeanPositiveRank:   1.1,
+			PairCount:          128,
+		},
+		Throughput: trainThroughputJSON{
+			TrainPairsPerSecond:     120000,
+			EvalPairsPerSecond:      300,
+			OptimizerStepsPerSecond: 0.15,
+			PairsPerSecond:          150000,
+			ElapsedSeconds:          10,
+		},
+		Accelerators: trainAcceleratorsJSON{Forward: "cuda", Optimizer: "cuda", Activation: "cuda", Contrastive: "cuda"},
+		ProfileDelta: trainProfileDeltaJSON{
+			MatMulRuns:          1000,
+			MatMulRunUploadMB:   100,
+			MatMulRunDownloadMB: 80,
+			OptimizerUpdates:    4,
+			ActivationCalls:     3,
+			ContrastiveCalls:    2,
+		},
+	}
+	baseline := current
+	baseline.Artifact = "baseline.mll"
+	baseline.FinalEval = &evalMetricsJSON{
+		Top1Accuracy:       0.8,
+		Top5Accuracy:       0.95,
+		Top10Accuracy:      0.99,
+		MeanReciprocalRank: 0.9,
+		ROCAUC:             0.7,
+		ScoreMargin:        0.10,
+		Loss:               0.13,
+		MeanPositiveRank:   1.3,
+		PairCount:          128,
+	}
+	baseline.Throughput.TrainPairsPerSecond = 100000
+	baseline.ProfileDelta.MatMulRuns = 1500
+	writeMetricsJSONForTest(t, currentPath, current)
+	writeMetricsJSONForTest(t, baselinePath, baseline)
+
+	output := captureRunOutput(t, []string{"compare-train-metrics", currentPath, baselinePath})
+	for _, want := range []string{
+		"identity: schema=manta.embedding_train_metrics.v1 command=train-embed mode=eval artifact=current.mll",
+		"quality: top1=0.900000",
+		"throughput: train_pairs/s=120000.00",
+		"accelerators: forward=cuda optimizer=cuda activation=cuda contrastive=cuda",
+		"profile_delta: matmul_runs=1000",
+		"baseline: " + baselinePath,
+		"quality_delta: top1=+0.100000",
+		"throughput_delta: train_pairs/s=+20000.00",
+		"profile_delta_delta: matmul_runs=-500",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("compare output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func writeMetricsJSONForTest(t *testing.T, path string, metrics trainMetricsJSON) {
+	t.Helper()
+	data, err := json.Marshal(metrics)
+	if err != nil {
+		t.Fatalf("marshal metrics json: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write metrics json: %v", err)
+	}
+}
+
 func TestRunTrainEmbedFitsTextContrastivePackage(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
