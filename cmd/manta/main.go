@@ -125,6 +125,8 @@ func run(args []string) error {
 		return runTrainCorpus(args[1:])
 	case "compare-train-metrics":
 		return runCompareTrainMetrics(args[1:])
+	case "diagnose-train-metrics":
+		return runDiagnoseTrainMetrics(args[1:])
 	case "gate-train-metrics":
 		return runGateTrainMetrics(args[1:])
 	default:
@@ -1641,6 +1643,151 @@ func formatTrainMetricsReport(currentPath string, current trainMetricsJSON, base
 	return b.String()
 }
 
+func runDiagnoseTrainMetrics(args []string) error {
+	fs := flag.NewFlagSet("diagnose-train-metrics", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || fs.Arg(0) == "" {
+		return fmt.Errorf("usage: manta diagnose-train-metrics <metrics.json>")
+	}
+	metricsPath := fs.Arg(0)
+	metrics, err := readTrainMetricsJSON(metricsPath)
+	if err != nil {
+		return err
+	}
+	fmt.Print(formatTrainMetricsDiagnosis(metricsPath, metrics))
+	return nil
+}
+
+func formatTrainMetricsDiagnosis(metricsPath string, metrics trainMetricsJSON) string {
+	var b strings.Builder
+	warnings := 0
+	notes := 0
+	fmt.Fprintf(&b, "metrics: %s\n", metricsPath)
+	fmt.Fprintf(&b, "identity: schema=%s command=%s mode=%s artifact=%s\n", metrics.Schema, metrics.Command, metrics.Mode, metrics.Artifact)
+	fmt.Fprintf(&b, "backend: forward=%s optimizer=%s activation=%s contrastive=%s\n",
+		metrics.Accelerators.Forward,
+		metrics.Accelerators.Optimizer,
+		metrics.Accelerators.Activation,
+		metrics.Accelerators.Contrastive,
+	)
+	fmt.Fprintf(&b, "throughput: train_pairs/s=%.2f eval_pairs/s=%.2f optimizer_steps/s=%.2f elapsed_s=%.3f\n",
+		metrics.Throughput.TrainPairsPerSecond,
+		metrics.Throughput.EvalPairsPerSecond,
+		metrics.Throughput.OptimizerStepsPerSecond,
+		metrics.Throughput.ElapsedSeconds,
+	)
+	pairCount := trainMetricsDiagnosisPairCount(metrics)
+	if metrics.ProfileDelta.MatMulRuns > 0 {
+		parts := []string{}
+		if metrics.ProfileDelta.OptimizerUpdates > 0 {
+			parts = append(parts, fmt.Sprintf("matmul_runs/update=%.2f", float64(metrics.ProfileDelta.MatMulRuns)/float64(metrics.ProfileDelta.OptimizerUpdates)))
+		} else {
+			parts = append(parts, fmt.Sprintf("matmul_runs=%d", metrics.ProfileDelta.MatMulRuns))
+		}
+		if pairCount > 0 {
+			parts = append(parts, fmt.Sprintf("pairs/matmul_run=%.2f", float64(pairCount)/float64(metrics.ProfileDelta.MatMulRuns)))
+		}
+		if metrics.ProfileDelta.OptimizerUpdates > 0 {
+			parts = append(parts, fmt.Sprintf("optimizer_syncs/update=%.2f", float64(metrics.ProfileDelta.OptimizerSyncs)/float64(metrics.ProfileDelta.OptimizerUpdates)))
+		}
+		fmt.Fprintf(&b, "efficiency: %s\n", strings.Join(parts, " "))
+	}
+	totalTransferMB := metrics.ProfileDelta.MatMulRunUploadMB + metrics.ProfileDelta.MatMulRunDownloadMB
+	if totalTransferMB > 0 {
+		parts := []string{fmt.Sprintf("total_mb=%.2f", totalTransferMB)}
+		if metrics.ProfileDelta.MatMulRuns > 0 {
+			parts = append(parts, fmt.Sprintf("mb/matmul_run=%.4f", totalTransferMB/float64(metrics.ProfileDelta.MatMulRuns)))
+		}
+		if pairCount > 0 {
+			parts = append(parts, fmt.Sprintf("kb/pair=%.4f", totalTransferMB*1024/float64(pairCount)))
+		}
+		fmt.Fprintf(&b, "transfer: %s\n", strings.Join(parts, " "))
+	}
+	hostBackends := trainMetricsHostCriticalBackends(metrics)
+	if len(hostBackends) == 0 {
+		fmt.Fprintf(&b, "finding: ok production-critical accelerators are device-backed\n")
+	} else {
+		warnings++
+		fmt.Fprintf(&b, "finding: warn production-critical accelerators include host fallback: %s\n", strings.Join(hostBackends, " "))
+	}
+	if trainMetricsEvalOnly(metrics) {
+		if metrics.ProfileDelta.OptimizerUpdates == 0 {
+			fmt.Fprintf(&b, "finding: ok eval-only run recorded zero optimizer updates\n")
+		} else {
+			warnings++
+			fmt.Fprintf(&b, "finding: warn eval-only run recorded optimizer_updates=%d\n", metrics.ProfileDelta.OptimizerUpdates)
+		}
+	} else {
+		if metrics.ProfileDelta.OptimizerUpdates == 0 {
+			warnings++
+			fmt.Fprintf(&b, "finding: warn training run recorded zero optimizer updates\n")
+		} else if metrics.Throughput.OptimizerStepsPerSecond == 0 && metrics.Throughput.TrainSeconds > 0 {
+			warnings++
+			fmt.Fprintf(&b, "finding: warn optimizer updates were recorded but optimizer_steps/s is zero\n")
+		}
+		if metrics.Throughput.TrainPairsPerSecond == 0 && metrics.Workload.ActualTrainPairs > 0 {
+			warnings++
+			fmt.Fprintf(&b, "finding: warn training pairs were processed but train_pairs/s is zero\n")
+		}
+		if metrics.Throughput.EvalSeconds > metrics.Throughput.TrainSeconds && metrics.Throughput.TrainSeconds > 0 {
+			notes++
+			fmt.Fprintf(&b, "finding: note eval time exceeds train time; keep production gates in final eval-only passes unless debugging convergence\n")
+		}
+	}
+	if metrics.Accelerators.Activation == "" || metrics.Accelerators.Activation == "host" {
+		notes++
+		fmt.Fprintf(&b, "finding: note activation accelerator is host; this can be intentional until activation residency avoids extra transfers\n")
+	}
+	status := "OK"
+	if warnings > 0 {
+		status = "WARN"
+	}
+	fmt.Fprintf(&b, "diagnosis: %s warnings=%d notes=%d\n", status, warnings, notes)
+	return b.String()
+}
+
+func trainMetricsDiagnosisPairCount(metrics trainMetricsJSON) int64 {
+	if metrics.Workload.ActualTrainPairs > 0 {
+		return metrics.Workload.ActualTrainPairs
+	}
+	if metrics.Workload.ActualEvalPairs > 0 {
+		return metrics.Workload.ActualEvalPairs
+	}
+	return metrics.Workload.ActualTotalPairs
+}
+
+func trainMetricsEvalOnly(metrics trainMetricsJSON) bool {
+	return strings.EqualFold(metrics.Mode, "eval") || metrics.Config.EvalOnly
+}
+
+func trainMetricsHostCriticalBackends(metrics trainMetricsJSON) []string {
+	backends := []string{}
+	if trainMetricsHostBackend(metrics.Accelerators.Forward) {
+		backends = append(backends, "forward="+displayBackendLabel(metrics.Accelerators.Forward))
+	}
+	if !trainMetricsEvalOnly(metrics) && trainMetricsHostBackend(metrics.Accelerators.Optimizer) {
+		backends = append(backends, "optimizer="+displayBackendLabel(metrics.Accelerators.Optimizer))
+	}
+	if trainMetricsHostBackend(metrics.Accelerators.Contrastive) {
+		backends = append(backends, "contrastive="+displayBackendLabel(metrics.Accelerators.Contrastive))
+	}
+	return backends
+}
+
+func trainMetricsHostBackend(backend string) bool {
+	return backend == "" || backend == "host"
+}
+
+func displayBackendLabel(backend string) string {
+	if backend == "" {
+		return "unknown"
+	}
+	return backend
+}
+
 type trainMetricThreshold struct {
 	Env    string
 	Metric string
@@ -2046,6 +2193,7 @@ func printUsage() {
 	fmt.Println("  manta train-corpus [flags] <artifact.mll> <corpus.txt>")
 	fmt.Println("  manta train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]")
 	fmt.Println("  manta compare-train-metrics <current.metrics.json> [baseline.metrics.json]")
+	fmt.Println("  manta diagnose-train-metrics <metrics.json>")
 	fmt.Println("  manta gate-train-metrics [flags] <metrics.json>")
 	fmt.Println("  manta run <artifact.mll> [entry]")
 	fmt.Println("  manta demo [module-name]")
@@ -2063,6 +2211,7 @@ func printUsage() {
 	fmt.Println("train-corpus trains tokenizer + mined text pairs + embedder in one Manta job from a raw text corpus.")
 	fmt.Println("train-embed reloads a training package, fits or --eval-only evaluates token JSONL or text JSONL (with --tokenizer or a sibling .tokenizer.mll; use --no-tokenizer for token JSONL beside a tokenizer), and writes it back.")
 	fmt.Println("compare-train-metrics summarizes metrics JSON and prints deltas against a baseline metrics JSON when provided.")
+	fmt.Println("diagnose-train-metrics explains backend use, transfer pressure, and suspicious training/eval counters from metrics JSON.")
 	fmt.Println("gate-train-metrics checks metrics JSON against MANTA_* thresholds from the environment or a thresholds env file.")
 	fmt.Println("run loads an artifact, binds stub weights and inputs, and executes one entrypoint.")
 	fmt.Println("demo creates a tiny inference-style module and loads it through the runtime.")

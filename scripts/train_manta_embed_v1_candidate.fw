@@ -282,6 +282,10 @@ func runMetricsGate(cfg candidateConfig, label string, logName string, scope str
 	return runCmd(cfg, label, logName, cfg.MantaBin, args)
 }
 
+func runMetricsDiagnosis(cfg candidateConfig, label string, logName string, metricsPath string) error {
+	return runCmd(cfg, label, logName, cfg.MantaBin, []string{"diagnose-train-metrics", metricsPath})
+}
+
 func renderCommand(name string, args []string) string {
 	parts := []string{shellQuote(name)}
 	for arg in args {
@@ -837,6 +841,8 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		err = runCmd(cfg, "Train "+cfg.ModelName+" from prepared JSONL", "train.log", cfg.MantaBin, args)
 		guard err == nil else return cfg, err
 	}
+	err = runMetricsDiagnosis(cfg, "Training metrics diagnosis", "train-diagnosis.log", cfg.TrainMetricsJSON)
+	guard err == nil else return cfg, err
 	if hasEfficiencyGateThresholds() {
 		err = runMetricsGate(cfg, "Training efficiency metrics gate", "train-efficiency-gate.log", "efficiency", cfg.TrainMetricsJSON)
 		guard err == nil else return cfg, err
@@ -852,6 +858,8 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	}
 	evalArgs = append(evalArgs, evalCandidate, evalJSONLForRun)
 	err = runCmd(cfg, "Final validation eval-only", "final-eval.log", cfg.MantaBin, evalArgs)
+	guard err == nil else return cfg, err
+	err = runMetricsDiagnosis(cfg, "Final validation metrics diagnosis", "final-eval-diagnosis.log", cfg.FinalEvalMetricsJSON)
 	guard err == nil else return cfg, err
 	err = runMetricsGate(cfg, "Final validation eval-only metrics gate", "final-eval-gate.log", "eval-only", cfg.FinalEvalMetricsJSON)
 	guard err == nil else return cfg, err
@@ -870,6 +878,8 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		err = runCmd(cfg, "Hard holdout eval-only", "hard-eval.log", cfg.MantaBin, hardArgs)
 		guard err == nil else return cfg, err
 		gateMetrics = cfg.HardEvalMetricsJSON
+		err = runMetricsDiagnosis(cfg, "Hard holdout metrics diagnosis", "hard-eval-diagnosis.log", gateMetrics)
+		guard err == nil else return cfg, err
 		err = runMetricsGate(cfg, "Hard holdout eval-only metrics gate", "hard-eval-gate.log", "eval-only", gateMetrics)
 		guard err == nil else return cfg, err
 	}

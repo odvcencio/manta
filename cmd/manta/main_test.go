@@ -587,6 +587,131 @@ func TestRunCompareTrainMetricsReportsCurrentAndBaselineDeltas(t *testing.T) {
 	}
 }
 
+func TestRunDiagnoseTrainMetricsReportsDeviceBackedEfficiency(t *testing.T) {
+	dir := t.TempDir()
+	metricsPath := filepath.Join(dir, "current.metrics.json")
+	metrics := trainMetricsJSON{
+		Schema:   "manta.embedding_train_metrics.v1",
+		Command:  "train-embed",
+		Mode:     "train",
+		Artifact: "current.mll",
+		Workload: trainWorkloadJSON{
+			ActualTrainPairs: 100000,
+		},
+		Throughput: trainThroughputJSON{
+			ElapsedSeconds:          90,
+			TrainSeconds:            80,
+			EvalSeconds:             10,
+			TrainPairsPerSecond:     120000,
+			EvalPairsPerSecond:      50000,
+			OptimizerStepsPerSecond: 0.5,
+		},
+		Accelerators: trainAcceleratorsJSON{
+			Forward:     "cuda",
+			Optimizer:   "cuda",
+			Activation:  "host",
+			Contrastive: "cuda",
+		},
+		ProfileDelta: trainProfileDeltaJSON{
+			MatMulRuns:          1000,
+			MatMulRunUploadMB:   500,
+			MatMulRunDownloadMB: 250,
+			OptimizerUpdates:    10,
+			OptimizerSyncs:      20,
+		},
+	}
+	writeMetricsJSONForTest(t, metricsPath, metrics)
+
+	output := captureRunOutput(t, []string{"diagnose-train-metrics", metricsPath})
+	for _, want := range []string{
+		"metrics: " + metricsPath,
+		"backend: forward=cuda optimizer=cuda activation=host contrastive=cuda",
+		"efficiency: matmul_runs/update=100.00 pairs/matmul_run=100.00 optimizer_syncs/update=2.00",
+		"transfer: total_mb=750.00 mb/matmul_run=0.7500 kb/pair=7.6800",
+		"finding: ok production-critical accelerators are device-backed",
+		"finding: note activation accelerator is host",
+		"diagnosis: OK warnings=0 notes=1",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("diagnosis output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunDiagnoseTrainMetricsWarnsOnHostFallbacks(t *testing.T) {
+	dir := t.TempDir()
+	metricsPath := filepath.Join(dir, "current.metrics.json")
+	metrics := trainMetricsJSON{
+		Schema:   "manta.embedding_train_metrics.v1",
+		Command:  "train-embed",
+		Mode:     "train",
+		Artifact: "current.mll",
+		Workload: trainWorkloadJSON{
+			ActualTrainPairs: 100,
+		},
+		Throughput: trainThroughputJSON{
+			ElapsedSeconds:      10,
+			TrainSeconds:        10,
+			TrainPairsPerSecond: 0,
+		},
+		Accelerators: trainAcceleratorsJSON{
+			Forward:     "host",
+			Optimizer:   "host",
+			Activation:  "host",
+			Contrastive: "host",
+		},
+	}
+	writeMetricsJSONForTest(t, metricsPath, metrics)
+
+	output := captureRunOutput(t, []string{"diagnose-train-metrics", metricsPath})
+	for _, want := range []string{
+		"finding: warn production-critical accelerators include host fallback: forward=host optimizer=host contrastive=host",
+		"finding: warn training run recorded zero optimizer updates",
+		"finding: warn training pairs were processed but train_pairs/s is zero",
+		"diagnosis: WARN warnings=3 notes=1",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("warning diagnosis output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunDiagnoseTrainMetricsWarnsOnMissingOptimizerStepRate(t *testing.T) {
+	dir := t.TempDir()
+	metricsPath := filepath.Join(dir, "current.metrics.json")
+	metrics := trainMetricsJSON{
+		Schema:   "manta.embedding_train_metrics.v1",
+		Command:  "train-embed",
+		Mode:     "train",
+		Artifact: "current.mll",
+		Throughput: trainThroughputJSON{
+			TrainSeconds:            2,
+			TrainPairsPerSecond:     500,
+			OptimizerStepsPerSecond: 0,
+		},
+		Accelerators: trainAcceleratorsJSON{
+			Forward:     "cuda",
+			Optimizer:   "cuda",
+			Activation:  "cuda",
+			Contrastive: "cuda",
+		},
+		ProfileDelta: trainProfileDeltaJSON{
+			OptimizerUpdates: 2,
+		},
+	}
+	writeMetricsJSONForTest(t, metricsPath, metrics)
+
+	output := captureRunOutput(t, []string{"diagnose-train-metrics", metricsPath})
+	for _, want := range []string{
+		"finding: warn optimizer updates were recorded but optimizer_steps/s is zero",
+		"diagnosis: WARN warnings=1 notes=0",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("optimizer-rate diagnosis output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
 func TestRunGateTrainMetricsChecksThresholdFile(t *testing.T) {
 	clearTrainMetricGateEnv(t)
 	dir := t.TempDir()

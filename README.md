@@ -315,6 +315,7 @@ manta train-embed [flags] <artifact.mll> <train>    Fit an initialized package o
 manta train-embed --eval-only <artifact.mll> <eval> Evaluate a package without optimizer steps
 manta train-embed --no-tokenizer <artifact.mll> <tokens> Force token JSONL beside a tokenizer
 manta compare-train-metrics <current> [baseline]    Summarize training metrics JSON and deltas
+manta diagnose-train-metrics <metrics.json>        Explain backend use and transfer pressure
 manta gate-train-metrics [flags] <metrics.json>    Enforce quality and efficiency thresholds
 manta export-mll <artifact.mll> [output.mll]        Seal an artifact package into a weight-carrying MLL file
 manta inspect <artifact.mll>                        Inspect and verify an artifact package

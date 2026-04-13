@@ -73,7 +73,7 @@ ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
 
 When prepared JSONL is text and a tokenizer is available, the production workflow tokenizes train, validation, and hard-eval JSONL into run-local token files before training. Training and eval then read token JSONL directly, which front-loads BPE cost, makes the optimizer profile reflect model work, and records the generated token files in `datasets.sha256`.
 Use `manta train-embed --no-tokenizer` when directly training token JSONL beside a sibling tokenizer; otherwise the CLI intentionally auto-discovers that tokenizer and treats the JSONL as text.
-Use `manta gate-train-metrics --thresholds /path/to/thresholds.env --scope quality /path/to/final-eval.metrics.json` to apply the same quality gate outside the production workflow. Use `--scope efficiency` for training throughput and backend counters, and `--scope eval-only` to enforce zero optimizer updates on validation runs.
+Use `manta diagnose-train-metrics /path/to/train.metrics.json` to explain backend use, transfer pressure, and suspicious training/eval counters from any run. Use `manta gate-train-metrics --thresholds /path/to/thresholds.env --scope quality /path/to/final-eval.metrics.json` to apply the same quality gate outside the production workflow. Use `--scope efficiency` for training throughput and backend counters, and `--scope eval-only` to enforce zero optimizer updates on validation runs.
 
 Contrastive training uses pair-length-aware bucketing by default so batches reach larger exact-length matmul groups. `MANTA_TRAIN_LENGTH_BUCKET_WINDOW` controls the shuffled sort window; larger values can improve grouping but must be profiled because they reduce local length randomness and can increase per-batch working-set pressure.
 
