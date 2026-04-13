@@ -83,6 +83,11 @@ func conv2DTensor(input, weight, bias *Tensor, attrs map[string]string) (*Tensor
 	return out, nil
 }
 
+// Conv2DReference runs the backend-neutral reference conv2d implementation.
+func Conv2DReference(input, weight, bias *Tensor, attrs map[string]string) (*Tensor, error) {
+	return conv2DTensor(input, weight, bias, attrs)
+}
+
 func conv2DTransposeTensor(input, weight, bias *Tensor, attrs map[string]string) (*Tensor, error) {
 	if input == nil || weight == nil {
 		return nil, fmt.Errorf("conv2d_transpose expects input and weight")
@@ -159,6 +164,11 @@ func conv2DTransposeTensor(input, weight, bias *Tensor, attrs map[string]string)
 	return out, nil
 }
 
+// Conv2DTransposeReference runs the backend-neutral reference conv2d_transpose implementation.
+func Conv2DTransposeReference(input, weight, bias *Tensor, attrs map[string]string) (*Tensor, error) {
+	return conv2DTransposeTensor(input, weight, bias, attrs)
+}
+
 func gdnTensor(input, beta, gamma *Tensor, inverse bool) (*Tensor, error) {
 	if input == nil {
 		return nil, fmt.Errorf("gdn expects input")
@@ -192,6 +202,11 @@ func gdnTensor(input, beta, gamma *Tensor, inverse bool) (*Tensor, error) {
 		}
 	}
 	return out, nil
+}
+
+// GDNReference runs the backend-neutral reference GDN/IGDN implementation.
+func GDNReference(input, beta, gamma *Tensor, inverse bool) (*Tensor, error) {
+	return gdnTensor(input, beta, gamma, inverse)
 }
 
 func turboQuantEncodeTensor(input *Tensor, attrs map[string]string) (*Tensor, *Tensor, error) {
@@ -229,6 +244,11 @@ func turboQuantEncodeTensor(input *Tensor, attrs map[string]string) (*Tensor, *T
 	return coords, norms, nil
 }
 
+// TurboQuantEncodeReference runs the backend-neutral reference TurboQuant encode implementation.
+func TurboQuantEncodeReference(input *Tensor, attrs map[string]string) (*Tensor, *Tensor, error) {
+	return turboQuantEncodeTensor(input, attrs)
+}
+
 func turboQuantDecodeTensor(coords, norms *Tensor, attrs map[string]string) (*Tensor, error) {
 	if coords == nil || norms == nil {
 		return nil, fmt.Errorf("turboquant_decode expects coords and norms")
@@ -264,6 +284,11 @@ func turboQuantDecodeTensor(coords, norms *Tensor, attrs map[string]string) (*Te
 		}
 	}
 	return out, nil
+}
+
+// TurboQuantDecodeReference runs the backend-neutral reference TurboQuant decode implementation.
+func TurboQuantDecodeReference(coords, norms *Tensor, attrs map[string]string) (*Tensor, error) {
+	return turboQuantDecodeTensor(coords, norms, attrs)
 }
 
 func crossEntropyFactorizedTensor(codes, logits *Tensor, attrs map[string]string) (*Tensor, error) {

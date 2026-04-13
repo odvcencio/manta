@@ -136,6 +136,47 @@ func TestDefaultMirageV1AutogradProducesTrainableGradients(t *testing.T) {
 	}
 }
 
+func TestDefaultMirageV1WebGPUSynthesizeUsesDecodeBuiltins(t *testing.T) {
+	mod, err := DefaultMirageV1Module(MirageV1Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := mantaruntime.New(webgpu.New())
+	prog, err := rt.Load(context.Background(), mod, mirageLoadOptions(t, mod)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := prog.Run(context.Background(), backend.Request{
+		Entry: "synthesize_image",
+		Inputs: map[string]any{
+			"c_coords": backend.NewTensorQ4([]int{1, 4, 1, 1}, []float32{1, 2, 3, 4}),
+			"c_norms":  backend.NewTensorQNorm([]int{1, 1, 1}, []float32{128}),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantVariants := map[string]bool{
+		"manta_webgpu_turboquant_decode_nchw": false,
+		"manta_webgpu_conv2d_transpose_nchw":  false,
+		"manta_webgpu_igdn_nchw":              false,
+	}
+	for _, step := range result.Trace {
+		if _, ok := wantVariants[step.Variant]; ok {
+			wantVariants[step.Variant] = true
+		}
+	}
+	for variant, seen := range wantVariants {
+		if !seen {
+			t.Fatalf("missing WebGPU builtin variant %s in trace %+v", variant, result.Trace)
+		}
+	}
+	out := result.Outputs["x_hat"]
+	if out.Metadata["execution_mode"] != "wgsl_host_reference" {
+		t.Fatalf("x_hat execution_mode = %v", out.Metadata["execution_mode"])
+	}
+}
+
 func mirageLoadOptions(t *testing.T, mod *mantaartifact.Module) []mantaruntime.LoadOption {
 	t.Helper()
 	opts := make([]mantaruntime.LoadOption, 0, len(mod.Params))
