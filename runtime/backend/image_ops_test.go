@@ -125,6 +125,55 @@ func TestLosses(t *testing.T) {
 	if ce.F32[0] != 8 {
 		t.Fatalf("uniform q4 two-symbol CE: got %v want 8", ce.F32[0])
 	}
+	codes := NewTensorQ2([]int{1, 2, 1, 1}, []float32{1, 2})
+	logits := NewTensorF16([]int{1, 2 * 4, 1, 1}, []float32{
+		0, 4, 0, 0,
+		0, 0, 4, 0,
+	})
+	catCE, err := crossEntropyFactorizedTensor(codes, logits, map[string]string{
+		"bits":          "2",
+		"logits_layout": "nchw_alphabet",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catCE.F32[0] >= 1 {
+		t.Fatalf("peaked categorical CE should be low, got %v", catCE.F32[0])
+	}
+	bitLogits := NewTensorF16([]int{1, 2 * 2 * 2, 1, 1}, []float32{
+		4, 0, 0, 4,
+		0, 4, 4, 0,
+	})
+	bitCE, err := crossEntropyFactorizedTensor(codes, bitLogits, map[string]string{
+		"bits":          "2",
+		"factorization": "bit-plane",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bitCE.F32[0] >= 1 {
+		t.Fatalf("peaked bit-plane CE should be low, got %v", bitCE.F32[0])
+	}
+	norms := NewTensorQNorm([]int{1, 1, 1}, []float32{float32(quantizeQNorm(1))})
+	normParams := NewTensorF16([]int{1, 2, 1, 1}, []float32{0, 0.5})
+	normCE, err := crossEntropyFactorizedTensor(norms, normParams, map[string]string{"distribution": "log_normal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normCE.F32[0] <= 0 {
+		t.Fatalf("norm CE should be positive, got %v", normCE.F32[0])
+	}
+	sum, err := scalarAddTensor(ce, normCE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rd, err := rateDistortionLossTensor(mse, sum, 0.01)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rd.F32[0] <= mse.F32[0] {
+		t.Fatalf("RD loss should include rate term: mse=%v rd=%v", mse.F32[0], rd.F32[0])
+	}
 }
 
 func sameInts(a, b []int) bool {

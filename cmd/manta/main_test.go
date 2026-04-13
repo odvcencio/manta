@@ -148,7 +148,7 @@ func TestRunInitMirageCreatesArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read artifact: %v", err)
 	}
-	if mod.Name != "mirage_image_v1" || len(mod.EntryPoints) != 2 {
+	if mod.Name != "mirage_image_v1" || len(mod.EntryPoints) != 4 {
 		t.Fatalf("unexpected Mirage artifact: %+v", mod)
 	}
 }

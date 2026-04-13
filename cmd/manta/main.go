@@ -531,12 +531,18 @@ func runInitMirage(args []string) error {
 	var imageHeight int
 	var imageWidth int
 	var latentChannels int
+	var hyperChannels int
 	var bits int
+	var factorization string
+	var lambda float64
 	fs.StringVar(&name, "name", "", "model name")
 	fs.IntVar(&imageHeight, "height", 0, "image height")
 	fs.IntVar(&imageWidth, "width", 0, "image width")
 	fs.IntVar(&latentChannels, "latent-channels", 0, "latent channels")
+	fs.IntVar(&hyperChannels, "hyper-channels", 0, "hyperprior channels")
 	fs.IntVar(&bits, "bits", 0, "TurboQuant bits: 2, 4, or 8")
+	fs.StringVar(&factorization, "factorization", "", "coordinate entropy factorization: categorical or bit-plane")
+	fs.Float64Var(&lambda, "lambda", 0, "rate-distortion lambda")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -548,7 +554,10 @@ func runInitMirage(args []string) error {
 		ImageHeight:    imageHeight,
 		ImageWidth:     imageWidth,
 		LatentChannels: latentChannels,
+		HyperChannels:  hyperChannels,
 		BitWidth:       bits,
+		Factorization:  factorization,
+		Lambda:         lambda,
 	}
 	if err := models.InitMirageV1Artifact(fs.Arg(0), cfg); err != nil {
 		return err
@@ -1360,7 +1369,7 @@ func printUsage() {
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Manta metadata in XMTA.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("init-model creates the Manta-owned default quantized embedding training package.")
-	fmt.Println("init-mirage creates the Manta-owned Mirage Image v1 smoke artifact.")
+	fmt.Println("init-mirage creates the Manta-owned Mirage Image v1 host-reference artifact.")
 	fmt.Println("init-train creates a native training package next to an artifact.")
 	fmt.Println("rename-embed rewrites a training package under a new embedding model identity.")
 	fmt.Println("train-tokenizer builds a sibling .tokenizer.mll from a raw text corpus, using embedding-manifest vocab_size by default.")

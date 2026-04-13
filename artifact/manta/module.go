@@ -66,6 +66,8 @@ const (
 	StepCrossEntropy StepKind = "cross_entropy_factorized"
 	StepMSELoss      StepKind = "mse_loss"
 	StepMSSSIMLoss   StepKind = "ms_ssim_loss"
+	StepScalarAdd    StepKind = "scalar_add"
+	StepRDLoss       StepKind = "rate_distortion_loss"
 )
 
 // ValueKind classifies the values used by params and entrypoints.

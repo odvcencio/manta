@@ -282,6 +282,40 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 			return nil, "", err
 		}
 		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata(string(step.Kind)))}, "", nil
+	case mantaartifact.StepScalarAdd:
+		if len(step.Inputs) < 1 || len(step.Outputs) != 1 {
+			return nil, "", fmt.Errorf("scalar_add step %q expects at least 1 input and 1 output", step.Name)
+		}
+		inputs := make([]*Tensor, 0, len(step.Inputs))
+		for _, name := range step.Inputs {
+			t, err := requireTensor(env[name], name)
+			if err != nil {
+				return nil, "", err
+			}
+			inputs = append(inputs, t)
+		}
+		out, err := scalarAddTensor(inputs...)
+		if err != nil {
+			return nil, "", err
+		}
+		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata("scalar_add"))}, "", nil
+	case mantaartifact.StepRDLoss:
+		if len(step.Inputs) != 2 || len(step.Outputs) != 1 {
+			return nil, "", fmt.Errorf("rate_distortion_loss step %q expects distortion, rate, and 1 output", step.Name)
+		}
+		distortion, err := requireTensor(env[step.Inputs[0]], step.Inputs[0])
+		if err != nil {
+			return nil, "", err
+		}
+		rate, err := requireTensor(env[step.Inputs[1]], step.Inputs[1])
+		if err != nil {
+			return nil, "", err
+		}
+		out, err := rateDistortionLossTensor(distortion, rate, attrFloat(step.Attributes, "lambda", 1))
+		if err != nil {
+			return nil, "", err
+		}
+		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata("rate_distortion_loss"))}, "", nil
 	case mantaartifact.StepKVRead:
 		if len(step.Inputs) != 1 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("kv_read step %q expects 1 input and 1 output", step.Name)

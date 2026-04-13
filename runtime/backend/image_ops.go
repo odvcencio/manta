@@ -274,6 +274,9 @@ func crossEntropyFactorizedTensor(codes, logits *Tensor, attrs map[string]string
 	if codes == nil {
 		return nil, fmt.Errorf("cross_entropy_factorized expects codes")
 	}
+	if attrs != nil && attrs["distribution"] == "log_normal" {
+		return logNormalNormCrossEntropyTensor(codes, logits, attrs)
+	}
 	levels := attrInt(attrs, "levels", 0)
 	if levels <= 0 {
 		if bits := attrInt(attrs, "bits", bitsForQTensor(codes)); bits > 0 {
@@ -282,14 +285,34 @@ func crossEntropyFactorizedTensor(codes, logits *Tensor, attrs map[string]string
 			levels = 256
 		}
 	}
+	bits := attrInt(attrs, "bits", bitsForQTensor(codes))
 	total := 0.0
-	for i, raw := range codes.F32 {
-		idx := clampInt(int(math.Round(float64(raw))), 0, levels-1)
-		p := probabilityForCode(logits, i, idx, levels)
-		if p < 1e-12 {
-			p = 1e-12
+	switch factorizationAttr(attrs) {
+	case "bit-plane":
+		if bits <= 0 {
+			return nil, fmt.Errorf("cross_entropy_factorized bit-plane mode requires bits")
 		}
-		total += -math.Log2(p)
+		for i, raw := range codes.F32 {
+			idx := clampInt(int(math.Round(float64(raw))), 0, (1<<bits)-1)
+			for bit := 0; bit < bits; bit++ {
+				shift := bits - 1 - bit
+				bitValue := (idx >> shift) & 1
+				p := probabilityForBit(logits, codes.Shape, i, bit, bitValue, bits)
+				if p < 1e-12 {
+					p = 1e-12
+				}
+				total += -math.Log2(p)
+			}
+		}
+	default:
+		for i, raw := range codes.F32 {
+			idx := clampInt(int(math.Round(float64(raw))), 0, levels-1)
+			p := probabilityForCode(logits, codes.Shape, i, idx, levels, attrs)
+			if p < 1e-12 {
+				p = 1e-12
+			}
+			total += -math.Log2(p)
+		}
 	}
 	return NewTensorF32([]int{1}, []float32{float32(total)}), nil
 }
@@ -363,9 +386,36 @@ func msSSIMLossTensor(lhs, rhs *Tensor) (*Tensor, error) {
 	return NewTensorF32([]int{1}, []float32{float32(loss)}), nil
 }
 
-func probabilityForCode(logits *Tensor, offset, idx, levels int) float64 {
+func scalarAddTensor(inputs ...*Tensor) (*Tensor, error) {
+	sum := float32(0)
+	for i, input := range inputs {
+		if input == nil || len(input.F32) != 1 {
+			return nil, fmt.Errorf("scalar_add input %d must be a scalar tensor", i)
+		}
+		sum += input.F32[0]
+	}
+	return NewTensorF32([]int{1}, []float32{sum}), nil
+}
+
+func rateDistortionLossTensor(distortion, rate *Tensor, lambda float64) (*Tensor, error) {
+	if distortion == nil || rate == nil || len(distortion.F32) != 1 || len(rate.F32) != 1 {
+		return nil, fmt.Errorf("rate_distortion_loss expects scalar distortion and rate")
+	}
+	if math.IsNaN(lambda) || math.IsInf(lambda, 0) || lambda < 0 {
+		return nil, fmt.Errorf("rate_distortion_loss lambda must be finite and non-negative")
+	}
+	loss := float64(distortion.F32[0]) + lambda*float64(rate.F32[0])
+	return NewTensorF32([]int{1}, []float32{float32(loss)}), nil
+}
+
+func probabilityForCode(logits *Tensor, codeShape []int, offset, idx, levels int, attrs map[string]string) float64 {
 	if logits == nil || len(logits.F32) == 0 {
 		return 1 / float64(levels)
+	}
+	if attrs != nil && attrs["logits_layout"] == "nchw_alphabet" {
+		if p, ok := probabilityForNCHWAlphabet(logits, codeShape, offset, idx, levels); ok {
+			return p
+		}
 	}
 	if len(logits.F32) == levels {
 		return softmaxProbability(logits.F32, 0, levels, idx)
@@ -378,6 +428,191 @@ func probabilityForCode(logits *Tensor, offset, idx, levels int) float64 {
 		return 1 - p
 	}
 	return p / float64(maxInt(levels-1, 1))
+}
+
+func probabilityForBit(logits *Tensor, codeShape []int, offset, bit, bitValue, bitWidth int) float64 {
+	if logits == nil || len(logits.F32) == 0 {
+		return 0.5
+	}
+	if p, ok := probabilityForNCHWBitPair(logits, codeShape, offset, bit, bitValue, bitWidth); ok {
+		return p
+	}
+	if len(logits.F32) == bitWidth*2 {
+		return softmaxProbability(logits.F32, bit*2, 2, bitValue)
+	}
+	base := (offset*bitWidth + bit) * 2
+	if len(logits.F32) >= base+2 {
+		return softmaxProbability(logits.F32, base, 2, bitValue)
+	}
+	p := 1 / (1 + math.Exp(-float64(logits.F32[(offset*bitWidth+bit)%len(logits.F32)])))
+	if bitValue == 1 {
+		return p
+	}
+	return 1 - p
+}
+
+func probabilityForNCHWBitPair(logits *Tensor, codeShape []int, offset, bit, bitValue, bitWidth int) (float64, bool) {
+	if len(codeShape) != 4 || len(logits.Shape) != 4 {
+		return 0, false
+	}
+	n, c, h, w := unpackOffset4(codeShape, offset)
+	if logits.Shape[0] != codeShape[0] || logits.Shape[2] != codeShape[2] || logits.Shape[3] != codeShape[3] {
+		return 0, false
+	}
+	ch := c*bitWidth*2 + bit*2
+	if logits.Shape[1] < ch+2 {
+		return 0, false
+	}
+	base0 := offset4(logits.Shape, n, ch, h, w)
+	base1 := offset4(logits.Shape, n, ch+1, h, w)
+	a := float64(logits.F32[base0])
+	b := float64(logits.F32[base1])
+	maxV := math.Max(a, b)
+	pa := math.Exp(a - maxV)
+	pb := math.Exp(b - maxV)
+	sum := pa + pb
+	if sum == 0 {
+		return 0.5, true
+	}
+	if bitValue == 0 {
+		return pa / sum, true
+	}
+	return pb / sum, true
+}
+
+func probabilityForNCHWAlphabet(logits *Tensor, codeShape []int, offset, idx, levels int) (float64, bool) {
+	if len(codeShape) != 4 || len(logits.Shape) != 4 {
+		return 0, false
+	}
+	n, c, h, w := unpackOffset4(codeShape, offset)
+	if logits.Shape[0] != codeShape[0] || logits.Shape[2] != codeShape[2] || logits.Shape[3] != codeShape[3] {
+		return 0, false
+	}
+	if logits.Shape[1] < (c+1)*levels {
+		return 0, false
+	}
+	baseChannel := c * levels
+	maxV := float64(logits.F32[offset4(logits.Shape, n, baseChannel, h, w)])
+	for i := 1; i < levels; i++ {
+		v := float64(logits.F32[offset4(logits.Shape, n, baseChannel+i, h, w)])
+		if v > maxV {
+			maxV = v
+		}
+	}
+	sum := 0.0
+	target := 0.0
+	for i := 0; i < levels; i++ {
+		v := math.Exp(float64(logits.F32[offset4(logits.Shape, n, baseChannel+i, h, w)]) - maxV)
+		if i == idx {
+			target = v
+		}
+		sum += v
+	}
+	if sum == 0 {
+		return 1 / float64(levels), true
+	}
+	return target / sum, true
+}
+
+func logNormalNormCrossEntropyTensor(codes, params *Tensor, attrs map[string]string) (*Tensor, error) {
+	if params == nil {
+		return nil, fmt.Errorf("cross_entropy_factorized log_normal mode expects norm params")
+	}
+	if len(codes.Shape) != 3 || len(params.Shape) != 4 {
+		return nil, fmt.Errorf("cross_entropy_factorized log_normal expects codes NHW and params N2HW")
+	}
+	if params.Shape[0] != codes.Shape[0] || params.Shape[1] < 2 || params.Shape[2] != codes.Shape[1] || params.Shape[3] != codes.Shape[2] {
+		return nil, fmt.Errorf("cross_entropy_factorized norm param shape %v does not match codes %v", params.Shape, codes.Shape)
+	}
+	total := 0.0
+	for i, raw := range codes.F32 {
+		n, y, x := unpackOffset3(codes.Shape, i)
+		mu := float64(params.F32[offset4(params.Shape, n, 0, y, x)])
+		sigma := normSigma(float64(params.F32[offset4(params.Shape, n, 1, y, x)]), attrs)
+		if math.IsNaN(mu) || math.IsInf(mu, 0) || math.IsNaN(sigma) || math.IsInf(sigma, 0) || sigma <= 0 {
+			return nil, fmt.Errorf("cross_entropy_factorized invalid norm params at offset %d", i)
+		}
+		sym := clampInt(int(math.Round(float64(raw))), 0, 255)
+		lo, hi := qNormLogBounds(sym)
+		p := normalCDF((hi-mu)/sigma) - normalCDF((lo-mu)/sigma)
+		if p < 1e-12 {
+			p = 1e-12
+		}
+		total += -math.Log2(p)
+	}
+	return NewTensorF32([]int{1}, []float32{float32(total)}), nil
+}
+
+func normSigma(raw float64, attrs map[string]string) float64 {
+	if attrs == nil {
+		return raw
+	}
+	switch attrs["sigma_parameter"] {
+	case "softplus":
+		if raw > 32 {
+			return raw + 1e-6
+		}
+		return math.Log1p(math.Exp(raw)) + 1e-6
+	case "exp":
+		return math.Exp(raw)
+	default:
+		return raw
+	}
+}
+
+func factorizationAttr(attrs map[string]string) string {
+	if attrs == nil {
+		return "categorical"
+	}
+	switch attrs["factorization"] {
+	case "bit-plane", "bitplane", "bit_plane":
+		return "bit-plane"
+	default:
+		return "categorical"
+	}
+}
+
+func qNormLogBounds(sym int) (float64, float64) {
+	span := qNormLogMax - qNormLogMin
+	switch sym {
+	case 0:
+		return math.Inf(-1), qNormLogMin + (0.5/255)*span
+	case 255:
+		return qNormLogMin + (254.5/255)*span, math.Inf(1)
+	default:
+		lower := (float64(sym) - 0.5) / 255
+		upper := (float64(sym) + 0.5) / 255
+		return qNormLogMin + lower*span, qNormLogMin + upper*span
+	}
+}
+
+func normalCDF(x float64) float64 {
+	switch {
+	case math.IsInf(x, -1):
+		return 0
+	case math.IsInf(x, 1):
+		return 1
+	default:
+		return 0.5 * (1 + math.Erf(x/math.Sqrt2))
+	}
+}
+
+func unpackOffset4(shape []int, offset int) (int, int, int, int) {
+	w := offset % shape[3]
+	offset /= shape[3]
+	h := offset % shape[2]
+	offset /= shape[2]
+	c := offset % shape[1]
+	n := offset / shape[1]
+	return n, c, h, w
+}
+
+func unpackOffset3(shape []int, offset int) (int, int, int) {
+	w := offset % shape[2]
+	offset /= shape[2]
+	h := offset % shape[1]
+	n := offset / shape[1]
+	return n, h, w
 }
 
 func softmaxProbability(values []float32, base, count, idx int) float64 {
@@ -427,6 +662,21 @@ func attrInt(attrs map[string]string, key string, fallback int) int {
 		return fallback
 	}
 	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func attrFloat(attrs map[string]string, key string, fallback float64) float64 {
+	if attrs == nil {
+		return fallback
+	}
+	raw := attrs[key]
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
 		return fallback
 	}
