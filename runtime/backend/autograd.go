@@ -446,7 +446,8 @@ func GDNGrad(input, beta, gamma *GradTensor, inverse bool) (*GradTensor, error) 
 }
 
 // TurboQuantEncodeGrad applies TurboQuant encode. The backward path implements
-// the v1 identity STE by passing coordinate gradients back to the input.
+// the v1 STE by passing coordinate gradients back to the input and mapping
+// q_norm gradients onto the input vector magnitude.
 func TurboQuantEncodeGrad(input *GradTensor, attrs map[string]string) (*GradTensor, *GradTensor, error) {
 	if input == nil {
 		return nil, nil, fmt.Errorf("turboquant_encode autograd expects input")
@@ -459,7 +460,11 @@ func TurboQuantEncodeGrad(input *GradTensor, attrs map[string]string) (*GradTens
 		return accumulateGrad(input, self.Grad)
 	})
 	normNode := gradOpTensor("turboquant_encode.norms", norms, []*GradTensor{input}, func(self *GradTensor) error {
-		return nil
+		grad, err := turboQuantNormSTEGrad(input.Value, self.Grad)
+		if err != nil {
+			return err
+		}
+		return accumulateGrad(input, grad)
 	})
 	return coordNode, normNode, nil
 }
@@ -484,8 +489,9 @@ func TurboQuantDecodeGrad(coords, norms *GradTensor, attrs map[string]string) (*
 }
 
 // CrossEntropyFactorizedGrad applies the Mirage factorized entropy loss and
-// records gradients for logits/parameters. Code gradients are intentionally not
-// propagated; discrete code tensors are handled by the TurboQuant STE path.
+// records gradients for logits/parameters plus a finite-difference surrogate
+// for code indices. The code-index surrogate is what lets the rate term reach
+// the TurboQuant STE path and then the analysis network.
 func CrossEntropyFactorizedGrad(codes, logits *GradTensor, attrs map[string]string) (*GradTensor, error) {
 	if codes == nil {
 		return nil, fmt.Errorf("cross_entropy_factorized autograd expects codes")
@@ -496,10 +502,17 @@ func CrossEntropyFactorizedGrad(codes, logits *GradTensor, attrs map[string]stri
 	}
 	parents := compactParents(codes, logits)
 	node := gradOpTensor("cross_entropy_factorized", out, parents, func(self *GradTensor) error {
+		scale := scalarGrad(self.Grad)
+		codeGrad, err := crossEntropyCodeGrad(codes.Value, valueOrNil(logits), attrs, scale)
+		if err != nil {
+			return err
+		}
+		if err := accumulateGrad(codes, codeGrad); err != nil {
+			return err
+		}
 		if logits == nil || logits.Value == nil {
 			return nil
 		}
-		scale := scalarGrad(self.Grad)
 		grad, err := crossEntropyLogitsGrad(codes.Value, logits.Value, attrs, scale)
 		if err != nil {
 			return err
@@ -591,6 +604,50 @@ func RateDistortionLossGrad(distortion, rate *GradTensor, lambda float64) (*Grad
 		return accumulateGrad(rate, NewTensorF32([]int{1}, []float32{float32(float64(scale) * lambda)}))
 	})
 	return node, nil
+}
+
+func turboQuantNormSTEGrad(input, normGrad *Tensor) (*Tensor, error) {
+	if input == nil || normGrad == nil {
+		return nil, fmt.Errorf("turboquant norm STE expects input and norm grad")
+	}
+	if len(input.Shape) != 4 || len(normGrad.Shape) != 3 {
+		return nil, fmt.Errorf("turboquant norm STE expects input NCHW and norm grad NHW")
+	}
+	n, channels, height, width := input.Shape[0], input.Shape[1], input.Shape[2], input.Shape[3]
+	if normGrad.Shape[0] != n || normGrad.Shape[1] != height || normGrad.Shape[2] != width {
+		return nil, fmt.Errorf("turboquant norm STE grad shape %v does not match input %v", normGrad.Shape, input.Shape)
+	}
+	grad := zeroGradLike(input)
+	const eps = 1e-12
+	qScale := 255.0 / (qNormLogMax - qNormLogMin)
+	for b := 0; b < n; b++ {
+		for y := 0; y < height; y++ {
+			for x := 0; x < width; x++ {
+				g := float64(normGrad.F32[(b*height+y)*width+x])
+				if g == 0 {
+					continue
+				}
+				normSq := 0.0
+				for c := 0; c < channels; c++ {
+					v := float64(input.F32[offset4(input.Shape, b, c, y, x)])
+					normSq += v * v
+				}
+				if normSq <= eps {
+					share := float32(g * qScale / float64(channels))
+					for c := 0; c < channels; c++ {
+						grad.F32[offset4(grad.Shape, b, c, y, x)] += share
+					}
+					continue
+				}
+				scale := g * qScale / normSq
+				for c := 0; c < channels; c++ {
+					idx := offset4(input.Shape, b, c, y, x)
+					grad.F32[idx] += float32(scale * float64(input.F32[idx]))
+				}
+			}
+		}
+	}
+	return grad, nil
 }
 
 func conv2DBackwardTensors(input, weight, bias, gradOut *Tensor, attrs map[string]string) (*Tensor, *Tensor, *Tensor, error) {
@@ -861,6 +918,84 @@ func crossEntropyLogitsGrad(codes, logits *Tensor, attrs map[string]string, scal
 	return grad, nil
 }
 
+func crossEntropyCodeGrad(codes, logits *Tensor, attrs map[string]string, scale float32) (*Tensor, error) {
+	if codes == nil {
+		return nil, fmt.Errorf("cross entropy code backward expects codes")
+	}
+	if attrs != nil && attrs["distribution"] == "log_normal" {
+		return logNormalCodeGrad(codes, logits, attrs, scale)
+	}
+	grad := zeroGradLike(codes)
+	levels := attrInt(attrs, "levels", 0)
+	if levels <= 0 {
+		if bits := attrInt(attrs, "bits", bitsForQTensor(codes)); bits > 0 {
+			levels = 1 << bits
+		} else {
+			levels = 256
+		}
+	}
+	bits := attrInt(attrs, "bits", bitsForQTensor(codes))
+	if levels <= 1 {
+		return grad, nil
+	}
+	switch factorizationAttr(attrs) {
+	case "bit-plane":
+		if bits <= 0 {
+			return nil, fmt.Errorf("cross entropy bit-plane code backward requires bits")
+		}
+		levels = 1 << bits
+		for offset, raw := range codes.F32 {
+			idx := clampInt(int(math.Round(float64(raw))), 0, levels-1)
+			grad.F32[offset] = finiteDifferenceCodeLoss(func(sym int) float64 {
+				return bitPlaneCodeLoss(logits, codes.Shape, offset, sym, bits)
+			}, idx, levels, scale)
+		}
+	default:
+		for offset, raw := range codes.F32 {
+			idx := clampInt(int(math.Round(float64(raw))), 0, levels-1)
+			grad.F32[offset] = finiteDifferenceCodeLoss(func(sym int) float64 {
+				return categoricalCodeLoss(logits, codes.Shape, offset, sym, levels, attrs)
+			}, idx, levels, scale)
+		}
+	}
+	return grad, nil
+}
+
+func finiteDifferenceCodeLoss(lossAt func(int) float64, idx, levels int, scale float32) float32 {
+	switch {
+	case levels <= 1:
+		return 0
+	case idx <= 0:
+		return float32(float64(scale) * (lossAt(1) - lossAt(0)))
+	case idx >= levels-1:
+		return float32(float64(scale) * (lossAt(levels-1) - lossAt(levels-2)))
+	default:
+		return float32(float64(scale) * 0.5 * (lossAt(idx+1) - lossAt(idx-1)))
+	}
+}
+
+func categoricalCodeLoss(logits *Tensor, codeShape []int, offset, idx, levels int, attrs map[string]string) float64 {
+	p := probabilityForCode(logits, codeShape, offset, idx, levels, attrs)
+	if p < 1e-12 {
+		p = 1e-12
+	}
+	return -math.Log2(p)
+}
+
+func bitPlaneCodeLoss(logits *Tensor, codeShape []int, offset, idx, bitWidth int) float64 {
+	total := 0.0
+	for bit := 0; bit < bitWidth; bit++ {
+		shift := bitWidth - 1 - bit
+		bitValue := (idx >> shift) & 1
+		p := probabilityForBit(logits, codeShape, offset, bit, bitValue, bitWidth)
+		if p < 1e-12 {
+			p = 1e-12
+		}
+		total += -math.Log2(p)
+	}
+	return total
+}
+
 func logNormalParamsGrad(codes, params *Tensor, attrs map[string]string, scale float32) (*Tensor, error) {
 	if len(codes.Shape) != 3 || len(params.Shape) != 4 {
 		return nil, fmt.Errorf("log-normal backward expects codes NHW and params N2HW")
@@ -892,6 +1027,38 @@ func logNormalParamsGrad(codes, params *Tensor, attrs map[string]string, scale f
 		dSigma := (normalPDFTimesX(a) - normalPDFTimesX(b)) / (sigma * p * ln2)
 		grad.F32[muIdx] += float32(float64(scale) * dMu)
 		grad.F32[sigmaIdx] += float32(float64(scale) * dSigma * sigmaParamDerivative(rawSigma, sigma, attrs))
+	}
+	return grad, nil
+}
+
+func logNormalCodeGrad(codes, params *Tensor, attrs map[string]string, scale float32) (*Tensor, error) {
+	if params == nil {
+		return nil, fmt.Errorf("log-normal code backward expects params")
+	}
+	if len(codes.Shape) != 3 || len(params.Shape) != 4 {
+		return nil, fmt.Errorf("log-normal code backward expects codes NHW and params N2HW")
+	}
+	if params.Shape[0] != codes.Shape[0] || params.Shape[1] < 2 || params.Shape[2] != codes.Shape[1] || params.Shape[3] != codes.Shape[2] {
+		return nil, fmt.Errorf("log-normal code backward param shape %v does not match codes %v", params.Shape, codes.Shape)
+	}
+	grad := zeroGradLike(codes)
+	for offset, raw := range codes.F32 {
+		n, y, x := unpackOffset3(codes.Shape, offset)
+		mu := float64(params.F32[offset4(params.Shape, n, 0, y, x)])
+		rawSigma := float64(params.F32[offset4(params.Shape, n, 1, y, x)])
+		sigma := normSigma(rawSigma, attrs)
+		if sigma <= 0 || math.IsNaN(sigma) || math.IsInf(sigma, 0) {
+			return nil, fmt.Errorf("log-normal code backward invalid sigma at offset %d", offset)
+		}
+		sym := clampInt(int(math.Round(float64(raw))), 0, 255)
+		grad.F32[offset] = finiteDifferenceCodeLoss(func(candidate int) float64 {
+			lo, hi := qNormLogBounds(candidate)
+			p := normalCDF((hi-mu)/sigma) - normalCDF((lo-mu)/sigma)
+			if p < 1e-12 {
+				p = 1e-12
+			}
+			return -math.Log2(p)
+		}, sym, 256, scale)
 	}
 	return grad, nil
 }

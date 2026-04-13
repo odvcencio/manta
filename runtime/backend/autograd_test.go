@@ -117,6 +117,69 @@ func TestCrossEntropyAutogradUpdatesCategoricalLogits(t *testing.T) {
 	}
 }
 
+func TestCrossEntropyAutogradPropagatesCodeSurrogate(t *testing.T) {
+	codes := NewGradTensor("codes", NewTensorQ2([]int{3}, []float32{0, 1, 2}), true)
+	logits := NewGradTensor("logits", NewTensorF16([]int{4}, []float32{3, 1, -1, -3}), true)
+	loss, err := CrossEntropyFactorizedGrad(codes, logits, map[string]string{"bits": "2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Backward(loss); err != nil {
+		t.Fatal(err)
+	}
+	if codes.Grad == nil {
+		t.Fatalf("missing code gradient")
+	}
+	if allZero(codes.Grad.F32) {
+		t.Fatalf("code gradient is all zero: %v", codes.Grad.F32)
+	}
+	if codes.Grad.F32[1] <= 0 {
+		t.Fatalf("middle code gradient = %.6f want positive for decreasing logits", codes.Grad.F32[1])
+	}
+}
+
+func TestRateGradientFlowsThroughTurboQuantEncodeToInput(t *testing.T) {
+	mod := mantaartifact.NewModule("tq_rate_ste")
+	mod.EntryPoints = []mantaartifact.EntryPoint{{
+		Name: "train",
+		Kind: mantaartifact.EntryPointPipeline,
+		Inputs: []mantaartifact.ValueBinding{
+			{Name: "y", Type: autogradTensorType("f16", []string{"1", "4", "1", "1"})},
+			{Name: "logits", Type: autogradTensorType("f16", []string{"4"})},
+		},
+		Outputs: []mantaartifact.ValueBinding{{Name: "loss", Type: autogradTensorType("f32", []string{"1"})}},
+	}}
+	mod.Buffers = []mantaartifact.Buffer{
+		{Name: "coords", DType: "q2", Shape: []string{"1", "4", "1", "1"}},
+		{Name: "norms", DType: "q_norm", Shape: []string{"1", "1", "1"}},
+		{Name: "loss", DType: "f32", Shape: []string{"1"}},
+	}
+	mod.Steps = []mantaartifact.Step{
+		{Entry: "train", Kind: mantaartifact.StepTurboQEncode, Name: "encode", Inputs: []string{"y"}, Outputs: []string{"coords", "norms"}, Attributes: map[string]string{"bits": "2", "seed": "17"}},
+		{Entry: "train", Kind: mantaartifact.StepCrossEntropy, Name: "rate", Inputs: []string{"coords", "logits"}, Outputs: []string{"loss"}, Attributes: map[string]string{"bits": "2"}},
+		{Entry: "train", Kind: mantaartifact.StepReturn, Name: "return", Outputs: []string{"loss"}},
+	}
+
+	result, err := ExecuteAutograd(mod, GradRequest{
+		Entry: "train",
+		Inputs: map[string]*Tensor{
+			"y":      NewTensorF16([]int{1, 4, 1, 1}, []float32{0.4, -0.2, 0.6, -0.1}),
+			"logits": NewTensorF16([]int{4}, []float32{3, 1, -1, -3}),
+		},
+		TrainableInputs: map[string]bool{"y": true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grad := result.InputGradients["y"]
+	if grad == nil {
+		t.Fatalf("missing y gradient")
+	}
+	if allZero(grad.F32) {
+		t.Fatalf("rate gradient did not reach y through TurboQuant STE")
+	}
+}
+
 func TestGDNAutogradInputMatchesFiniteDifference(t *testing.T) {
 	input := NewGradTensor("x", NewTensorF16([]int{1, 2, 1, 1}, []float32{0.4, -0.3}), true)
 	beta := NewGradTensor("beta", NewTensorF16([]int{2}, []float32{1.1, 0.9}), true)

@@ -42,6 +42,12 @@ func TestMirageV1ReferenceTrainSingleImageConverges(t *testing.T) {
 	if len(history.Losses) != 25 {
 		t.Fatalf("loss history length = %d want 25", len(history.Losses))
 	}
+	if len(history.GradientNorms) != 24 {
+		t.Fatalf("gradient norm history length = %d want 24", len(history.GradientNorms))
+	}
+	if history.GradientNorms[0].Total <= 0 || history.GradientNorms[0].Analysis <= 0 {
+		t.Fatalf("expected non-zero total and analysis gradient norms: %+v", history.GradientNorms[0])
+	}
 	if history.FinalLoss >= history.InitialLoss {
 		t.Fatalf("loss did not decrease: initial=%.6f final=%.6f losses=%v", history.InitialLoss, history.FinalLoss, history.Losses)
 	}

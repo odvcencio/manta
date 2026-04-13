@@ -23,11 +23,24 @@ type MirageV1ReferenceTrainConfig struct {
 
 // MirageV1ReferenceTrainHistory records loss movement through a reference run.
 type MirageV1ReferenceTrainHistory struct {
-	InitialLoss float32
-	FinalLoss   float32
-	Losses      []float32
-	MSEs        []float32
-	Rates       []float32
+	InitialLoss   float32
+	FinalLoss     float32
+	Losses        []float32
+	MSEs          []float32
+	Rates         []float32
+	GradientNorms []MirageV1ReferenceGradientNorms
+}
+
+// MirageV1ReferenceGradientNorms records raw gradient L2 norms by graph region
+// before clipping and SGD updates are applied.
+type MirageV1ReferenceGradientNorms struct {
+	Total          float32
+	Analysis       float32
+	HyperAnalysis  float32
+	HyperSynthesis float32
+	Synthesis      float32
+	Prior          float32
+	Other          float32
 }
 
 // InitMirageV1ReferenceWeights creates deterministic trainable weights for the
@@ -83,10 +96,11 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 		return MirageV1ReferenceTrainHistory{}, err
 	}
 	history := MirageV1ReferenceTrainHistory{
-		InitialLoss: initial.Loss,
-		Losses:      make([]float32, 0, cfg.Steps+1),
-		MSEs:        make([]float32, 0, cfg.Steps+1),
-		Rates:       make([]float32, 0, cfg.Steps+1),
+		InitialLoss:   initial.Loss,
+		Losses:        make([]float32, 0, cfg.Steps+1),
+		MSEs:          make([]float32, 0, cfg.Steps+1),
+		Rates:         make([]float32, 0, cfg.Steps+1),
+		GradientNorms: make([]MirageV1ReferenceGradientNorms, 0, cfg.Steps),
 	}
 	for step := 0; step < cfg.Steps; step++ {
 		image := images[step%len(images)]
@@ -105,6 +119,7 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 		history.Losses = append(history.Losses, metrics.Loss)
 		history.MSEs = append(history.MSEs, metrics.MSE)
 		history.Rates = append(history.Rates, metrics.Rate)
+		history.GradientNorms = append(history.GradientNorms, mirageReferenceGradientNorms(result.Gradients))
 		if err := applyMirageReferenceSGD(mod, weights, result.Gradients, cfg); err != nil {
 			return MirageV1ReferenceTrainHistory{}, err
 		}
@@ -118,6 +133,48 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 	history.MSEs = append(history.MSEs, final.MSE)
 	history.Rates = append(history.Rates, final.Rate)
 	return history, nil
+}
+
+func mirageReferenceGradientNorms(grads map[string]*backend.Tensor) MirageV1ReferenceGradientNorms {
+	var total, analysis, hyperAnalysis, hyperSynthesis, synthesis, prior, other float64
+	for name, grad := range grads {
+		if grad == nil {
+			continue
+		}
+		sum := gradSquaredNorm(grad)
+		total += sum
+		switch {
+		case strings.HasPrefix(name, "ga") || strings.HasPrefix(name, "gdn"):
+			analysis += sum
+		case strings.HasPrefix(name, "ha_"):
+			hyperAnalysis += sum
+		case strings.HasPrefix(name, "hs_"):
+			hyperSynthesis += sum
+		case strings.HasPrefix(name, "gs") || strings.HasPrefix(name, "igdn"):
+			synthesis += sum
+		case name == "prior_z_logits":
+			prior += sum
+		default:
+			other += sum
+		}
+	}
+	return MirageV1ReferenceGradientNorms{
+		Total:          float32(math.Sqrt(total)),
+		Analysis:       float32(math.Sqrt(analysis)),
+		HyperAnalysis:  float32(math.Sqrt(hyperAnalysis)),
+		HyperSynthesis: float32(math.Sqrt(hyperSynthesis)),
+		Synthesis:      float32(math.Sqrt(synthesis)),
+		Prior:          float32(math.Sqrt(prior)),
+		Other:          float32(math.Sqrt(other)),
+	}
+}
+
+func gradSquaredNorm(t *backend.Tensor) float64 {
+	sum := 0.0
+	for _, v := range t.F32 {
+		sum += float64(v) * float64(v)
+	}
+	return sum
 }
 
 // MirageV1ReferenceMetrics summarizes one average reference eval pass.
