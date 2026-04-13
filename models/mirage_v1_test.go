@@ -2,6 +2,7 @@ package models
 
 import (
 	"context"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -104,6 +105,37 @@ func TestDefaultMirageV1BitPlaneModuleRuns(t *testing.T) {
 	}
 }
 
+func TestDefaultMirageV1AutogradProducesTrainableGradients(t *testing.T) {
+	mod, err := DefaultMirageV1Module(MirageV1Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := backend.NewTensorF16([]int{1, 3, 16, 16}, filled(1*3*16*16, 0.1))
+	result, err := backend.ExecuteAutograd(mod, backend.GradRequest{
+		Entry:   "train_step",
+		Inputs:  map[string]*backend.Tensor{"x": x},
+		Weights: mirageGradWeights(t, mod),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outputs["loss"] == nil {
+		t.Fatalf("missing loss output")
+	}
+	for _, name := range []string{"ga0_weight", "gs3_weight", "hs_logits_weight", "hs_norm_weight", "prior_z_logits"} {
+		grad := result.Gradients[name]
+		if grad == nil {
+			t.Fatalf("missing gradient for %s", name)
+		}
+		if len(grad.F32) != grad.Elements() {
+			t.Fatalf("%s gradient storage = %d want %d", name, len(grad.F32), grad.Elements())
+		}
+		if !hasFiniteNonZero(grad.F32) {
+			t.Fatalf("%s gradient is not finite and non-zero: %v", name, grad.F32)
+		}
+	}
+}
+
 func mirageLoadOptions(t *testing.T, mod *mantaartifact.Module) []mantaruntime.LoadOption {
 	t.Helper()
 	opts := make([]mantaruntime.LoadOption, 0, len(mod.Params))
@@ -125,6 +157,29 @@ func mirageLoadOptions(t *testing.T, mod *mantaartifact.Module) []mantaruntime.L
 		opts = append(opts, mantaruntime.WithWeight(param.Name, backend.NewTensorF16(shape, filled(n, value))))
 	}
 	return opts
+}
+
+func mirageGradWeights(t *testing.T, mod *mantaartifact.Module) map[string]*backend.Tensor {
+	t.Helper()
+	weights := make(map[string]*backend.Tensor, len(mod.Params))
+	for _, param := range mod.Params {
+		shape := concreteShape(t, param.Type.Tensor.Shape)
+		n := 1
+		for _, dim := range shape {
+			n *= dim
+		}
+		value := float32(0.01)
+		switch {
+		case strings.Contains(param.Name, "beta"):
+			value = 1
+		case strings.Contains(param.Name, "gamma"):
+			value = 0.001
+		case strings.Contains(param.Name, "bias"):
+			value = 0.05
+		}
+		weights[param.Name] = backend.NewTensorF16(shape, filled(n, value))
+	}
+	return weights
 }
 
 func concreteShape(t *testing.T, dims []string) []int {
@@ -158,4 +213,13 @@ func sameShape(a, b []int) bool {
 		}
 	}
 	return true
+}
+
+func hasFiniteNonZero(values []float32) bool {
+	for _, value := range values {
+		if value != 0 && !math.IsNaN(float64(value)) && !math.IsInf(float64(value), 0) {
+			return true
+		}
+	}
+	return false
 }
