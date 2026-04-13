@@ -126,6 +126,33 @@ func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
 	}
 }
 
+func TestRunInitMirageCreatesArtifact(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "mirage-v1.mll")
+	output := captureRunOutput(t, []string{
+		"init-mirage",
+		"--height", "16",
+		"--width", "16",
+		"--latent-channels", "8",
+		"--bits", "2",
+		path,
+	})
+	for _, want := range []string{
+		"initialized Mirage Image v1 module",
+		"capabilities: image_ops, turboquant, training_losses, host_fallback",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("init-mirage output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	mod, err := mantaartifact.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read artifact: %v", err)
+	}
+	if mod.Name != "mirage_image_v1" || len(mod.EntryPoints) != 2 {
+		t.Fatalf("unexpected Mirage artifact: %+v", mod)
+	}
+}
+
 func TestRunInitModelTrainCorpusExportFlow(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "manta-embed-v1.mll")
