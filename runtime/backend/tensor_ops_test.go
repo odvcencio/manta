@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"math"
 	"testing"
 
@@ -200,6 +201,122 @@ func TestMatmulTensorBatchedRHS(t *testing.T) {
 		4, 4,
 		10, 8,
 	})
+}
+
+func TestExecuteSymbolicDispatchesImageStep(t *testing.T) {
+	mod := mantaartifact.NewModule("image_dispatch")
+	mod.EntryPoints = []mantaartifact.EntryPoint{{
+		Name: "conv",
+		Kind: mantaartifact.EntryPointPipeline,
+		Inputs: []mantaartifact.ValueBinding{
+			{Name: "x", Type: tensorValueType("f16", []string{"1", "1", "2", "2"})},
+			{Name: "w", Type: tensorValueType("f16", []string{"1", "1", "2", "2"})},
+			{Name: "b", Type: tensorValueType("f16", []string{"1"})},
+		},
+		Outputs: []mantaartifact.ValueBinding{
+			{Name: "y", Type: tensorValueType("f16", []string{"1", "1", "1", "1"})},
+		},
+	}}
+	mod.Buffers = []mantaartifact.Buffer{{Name: "y", DType: "f16", Shape: []string{"1", "1", "1", "1"}}}
+	mod.Steps = []mantaartifact.Step{
+		{Entry: "conv", Kind: mantaartifact.StepConv2D, Name: "conv2d", Inputs: []string{"x", "w", "b"}, Outputs: []string{"y"}},
+		{Entry: "conv", Kind: mantaartifact.StepReturn, Name: "return", Outputs: []string{"y"}},
+	}
+	if err := mod.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	dispatch := func(_ context.Context, step mantaartifact.Step, outputType mantaartifact.ValueType, inputs []*Tensor) (StepDispatchResult, bool, error) {
+		if step.Kind != mantaartifact.StepConv2D {
+			return StepDispatchResult{}, false, nil
+		}
+		if len(inputs) != 3 {
+			t.Fatalf("dispatch inputs = %d want 3", len(inputs))
+		}
+		if outputType.Tensor == nil || outputType.Tensor.DType != "f16" {
+			t.Fatalf("unexpected output type: %+v", outputType)
+		}
+		return StepDispatchResult{
+			Outputs:      []*Tensor{NewTensorF16([]int{1, 1, 1, 1}, []float32{42})},
+			VariantEntry: "cuda_conv2d_test",
+			Metadata:     map[string]any{"dispatch_mode": "test_device"},
+		}, true, nil
+	}
+	result, err := ExecuteSymbolic(context.Background(), mod, nil, nil, nil, dispatch, mantaartifact.BackendCUDA, Request{
+		Entry: "conv",
+		Inputs: map[string]any{
+			"x": NewTensorF16([]int{1, 1, 2, 2}, []float32{1, 2, 3, 4}),
+			"w": NewTensorF16([]int{1, 1, 2, 2}, []float32{1, 0, 0, 1}),
+			"b": NewTensorF16([]int{1}, []float32{0}),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := result.Outputs["y"].Data.(*Tensor)
+	if out.F32[0] != 42 {
+		t.Fatalf("dispatched output = %v", out.F32)
+	}
+	if got := result.Outputs["y"].Metadata["dispatch_mode"]; got != "test_device" {
+		t.Fatalf("dispatch metadata = %v", got)
+	}
+	if len(result.Trace) == 0 || result.Trace[0].Variant != "cuda_conv2d_test" {
+		t.Fatalf("trace variant not recorded: %+v", result.Trace)
+	}
+}
+
+func TestExecuteSymbolicDispatchesMultiOutputImageStep(t *testing.T) {
+	mod := mantaartifact.NewModule("turboquant_dispatch")
+	mod.EntryPoints = []mantaartifact.EntryPoint{{
+		Name: "quantize",
+		Kind: mantaartifact.EntryPointPipeline,
+		Inputs: []mantaartifact.ValueBinding{
+			{Name: "y", Type: tensorValueType("f16", []string{"1", "2", "1", "1"})},
+		},
+		Outputs: []mantaartifact.ValueBinding{
+			{Name: "coords", Type: tensorValueType("q2", []string{"1", "2", "1", "1"})},
+			{Name: "norms", Type: tensorValueType("q_norm", []string{"1", "1", "1"})},
+		},
+	}}
+	mod.Buffers = []mantaartifact.Buffer{
+		{Name: "coords", DType: "q2", Shape: []string{"1", "2", "1", "1"}},
+		{Name: "norms", DType: "q_norm", Shape: []string{"1", "1", "1"}},
+	}
+	mod.Steps = []mantaartifact.Step{
+		{Entry: "quantize", Kind: mantaartifact.StepTurboQEncode, Name: "quantize", Inputs: []string{"y"}, Outputs: []string{"coords", "norms"}, Attributes: map[string]string{"bits": "2"}},
+		{Entry: "quantize", Kind: mantaartifact.StepReturn, Name: "return", Outputs: []string{"coords", "norms"}},
+	}
+	if err := mod.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	dispatch := func(_ context.Context, step mantaartifact.Step, _ mantaartifact.ValueType, inputs []*Tensor) (StepDispatchResult, bool, error) {
+		if step.Kind != mantaartifact.StepTurboQEncode {
+			return StepDispatchResult{}, false, nil
+		}
+		if len(inputs) != 1 {
+			t.Fatalf("dispatch inputs = %d want 1", len(inputs))
+		}
+		return StepDispatchResult{
+			Outputs: []*Tensor{
+				NewTensorQ2([]int{1, 2, 1, 1}, []float32{1, 2}),
+				NewTensorQNorm([]int{1, 1, 1}, []float32{128}),
+			},
+			VariantEntry: "cuda_turboquant_encode_test",
+			Metadata:     map[string]any{"dispatch_mode": "test_device"},
+		}, true, nil
+	}
+	result, err := ExecuteSymbolic(context.Background(), mod, nil, nil, nil, dispatch, mantaartifact.BackendCUDA, Request{
+		Entry:  "quantize",
+		Inputs: map[string]any{"y": NewTensorF16([]int{1, 2, 1, 1}, []float32{1, 2})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Outputs["coords"].Data.(*Tensor).F32; got[0] != 1 || got[1] != 2 {
+		t.Fatalf("coords = %v", got)
+	}
+	if got := result.Outputs["norms"].Data.(*Tensor).F32[0]; got != 128 {
+		t.Fatalf("norm = %v", got)
+	}
 }
 
 func TestTransposeTensor(t *testing.T) {
@@ -708,6 +825,13 @@ func assertTensorI64(t *testing.T, tensor *Tensor, wantShape []int, want []int64
 		if got != want[i] {
 			t.Fatalf("tensor[%d] = %d, want %d", i, got, want[i])
 		}
+	}
+}
+
+func tensorValueType(dtype string, shape []string) mantaartifact.ValueType {
+	return mantaartifact.ValueType{
+		Kind:   mantaartifact.ValueTensor,
+		Tensor: &mantaartifact.TensorType{DType: dtype, Shape: append([]string(nil), shape...)},
 	}
 }
 

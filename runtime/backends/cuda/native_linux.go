@@ -441,6 +441,11 @@ static int mantaCudaLaunchQuantizeInPlace(MantaCudaRuntime* rt, MantaCudaKernel*
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
+static int mantaCudaLaunchGDN(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr beta, CUdeviceptr gamma, CUdeviceptr out0, int elements, int channels, int height, int width, int inverse, char** err) {
+	void* args[] = {&input, &beta, &gamma, &out0, &elements, &channels, &height, &width, &inverse};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
 static int mantaCudaLaunchContrastiveScores(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr positive, CUdeviceptr queryNorms, CUdeviceptr positiveNorms, CUdeviceptr scores, int rows, int width, char** err) {
 	void* args[] = {&query, &positive, &queryNorms, &positiveNorms, &scores, &rows, &width};
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
@@ -609,11 +614,50 @@ extern "C" __global__ void manta_forward_quantize_in_place(
 }
 `
 
+const gdnKernelSource = `
+extern "C" __global__ void manta_gdn_forward(
+    const float* input,
+    const float* beta,
+    const float* gamma,
+    float* out,
+    int elements,
+    int channels,
+    int height,
+    int width,
+    int inverse
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= elements) {
+        return;
+    }
+    int spatial = height * width;
+    int c = (idx / spatial) % channels;
+    int n = idx / (channels * spatial);
+    int hw = idx % spatial;
+    float sum = beta[c];
+    for (int j = 0; j < channels; ++j) {
+        int input_idx = ((n * channels + j) * spatial) + hw;
+        float v = input[input_idx];
+        sum += gamma[c * channels + j] * v * v;
+    }
+    if (sum < 1.0e-12f) {
+        sum = 1.0e-12f;
+    }
+    float scale = sqrtf(sum);
+    if (inverse != 0) {
+        out[idx] = input[idx] * scale;
+    } else {
+        out[idx] = input[idx] / scale;
+    }
+}
+`
+
 type deviceRuntime struct {
 	ptr              *C.MantaCudaRuntime
 	residentMatrices map[string]residentMatrix
 	matMulScratch    map[string]deviceScratchBuffer
 	quantizeKernel   *auxKernel
+	gdnKernel        *auxKernel
 	matMulStats      backend.MatMulAcceleratorStats
 }
 
@@ -671,6 +715,8 @@ func (rt *deviceRuntime) close() {
 	}
 	rt.destroyAuxKernel(rt.quantizeKernel)
 	rt.quantizeKernel = nil
+	rt.destroyAuxKernel(rt.gdnKernel)
+	rt.gdnKernel = nil
 	C.mantaCudaRuntimeDestroy(rt.ptr)
 	rt.ptr = nil
 }
@@ -1090,6 +1136,94 @@ func (rt *deviceRuntime) ensureQuantizeKernel() (*auxKernel, error) {
 	return kernel, nil
 }
 
+func (rt *deviceRuntime) ensureGDNKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.gdnKernel != nil {
+		return rt.gdnKernel, nil
+	}
+	kernel, err := rt.compileAuxKernel(gdnKernelSource, "manta_gdn_forward")
+	if err != nil {
+		return nil, err
+	}
+	rt.gdnKernel = kernel
+	return kernel, nil
+}
+
+func (rt *deviceRuntime) runGDNStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, inverse bool) (backend.StepDispatchResult, error) {
+	if rt == nil || rt.ptr == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if len(inputs) < 3 || inputs[0] == nil || inputs[1] == nil || inputs[2] == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda gdn expects input, beta, and gamma")
+	}
+	input, beta, gamma := inputs[0], inputs[1], inputs[2]
+	if len(input.Shape) != 4 {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda gdn expects NCHW input")
+	}
+	elements := input.Elements()
+	if elements == 0 {
+		return backend.StepDispatchResult{Outputs: []*backend.Tensor{newStepOutputTensor(outputType, input.Shape, nil)}}, nil
+	}
+	channels, height, width := input.Shape[1], input.Shape[2], input.Shape[3]
+	if len(beta.F32) < channels || len(gamma.F32) < channels*channels {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda gdn beta/gamma shape mismatch")
+	}
+	kernel, err := rt.ensureGDNKernel()
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	inputBuf, err := rt.uploadFloat32(input.F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(inputBuf)
+	betaBuf, err := rt.uploadFloat32(beta.F32[:channels])
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(betaBuf)
+	gammaBuf, err := rt.uploadFloat32(gamma.F32[:channels*channels])
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(gammaBuf)
+	outBuf, err := rt.allocFloat32(elements)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(outBuf)
+	block := uint(128)
+	grid := uint((elements + int(block) - 1) / int(block))
+	inverseFlag := 0
+	entry := "__builtin_cuda_gdn"
+	op := "gdn"
+	if inverse {
+		inverseFlag = 1
+		entry = "__builtin_cuda_igdn"
+		op = "igdn"
+	}
+	if err := rt.launchGDN(kernel, grid, block, inputBuf, betaBuf, gammaBuf, outBuf, elements, channels, height, width, inverseFlag); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	outHost := make([]float32, elements)
+	if err := rt.downloadFloat32(outHost, outBuf); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	return backend.StepDispatchResult{
+		Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, input.Shape, outHost)},
+		VariantEntry: entry,
+		Metadata: map[string]any{
+			"dispatch_mode":    "backend_step",
+			"device_execution": true,
+			"execution_mode":   "cuda_device",
+			"launch_api":       "cuda_driver",
+			"op":               op,
+		},
+	}, nil
+}
+
 func (rt *deviceRuntime) quantizeBufferInPlace(ptr C.CUdeviceptr, elements, bits int) (bool, error) {
 	if rt == nil || rt.ptr == nil || elements == 0 || bits <= 0 {
 		return false, nil
@@ -1169,6 +1303,17 @@ func (rt *deviceRuntime) launchAuxElementWise(kernel *auxKernel, grid, block uin
 		return fmt.Errorf("cuda auxiliary elementwise kernel is not initialized")
 	}
 	return rt.launchElementWise(kernel.ptr, C.uint(grid), C.uint(block), lhs, rhs, out0, C.int(elements))
+}
+
+func (rt *deviceRuntime) launchGDN(kernel *auxKernel, grid, block uint, input, beta, gamma, out0 C.CUdeviceptr, elements, channels, height, width, inverse int) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda gdn kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchGDN(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), input, beta, gamma, out0, C.int(elements), C.int(channels), C.int(height), C.int(width), C.int(inverse), &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
 }
 
 func (rt *deviceRuntime) launchUnary(kernel *C.MantaCudaKernel, grid, block C.uint, in0, out0 C.CUdeviceptr, elements C.int) error {

@@ -162,6 +162,17 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 		if err != nil {
 			return nil, "", err
 		}
+		outputType := resolveStepOutputType(mod, entry, step, 0, env)
+		dispatchInputs := optionalDispatchInputs(input, weight, bias)
+		if dispatchStep != nil {
+			result, handled, err := dispatchStep(ctx, step, outputType, dispatchInputs)
+			if err != nil {
+				return nil, "", err
+			}
+			if handled {
+				return tensorValuesFromDispatch(mod, entry, step, result, bindings, kind), result.VariantEntry, nil
+			}
+		}
 		out, err := conv2DTensor(input, weight, bias, step.Attributes)
 		if err != nil {
 			return nil, "", err
@@ -182,6 +193,17 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 		bias, err := optionalTensorInput(env, step.Inputs, 2)
 		if err != nil {
 			return nil, "", err
+		}
+		outputType := resolveStepOutputType(mod, entry, step, 0, env)
+		dispatchInputs := optionalDispatchInputs(input, weight, bias)
+		if dispatchStep != nil {
+			result, handled, err := dispatchStep(ctx, step, outputType, dispatchInputs)
+			if err != nil {
+				return nil, "", err
+			}
+			if handled {
+				return tensorValuesFromDispatch(mod, entry, step, result, bindings, kind), result.VariantEntry, nil
+			}
 		}
 		out, err := conv2DTransposeTensor(input, weight, bias, step.Attributes)
 		if err != nil {
@@ -204,6 +226,17 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 		if err != nil {
 			return nil, "", err
 		}
+		outputType := resolveStepOutputType(mod, entry, step, 0, env)
+		dispatchInputs := optionalDispatchInputs(input, beta, gamma)
+		if dispatchStep != nil {
+			result, handled, err := dispatchStep(ctx, step, outputType, dispatchInputs)
+			if err != nil {
+				return nil, "", err
+			}
+			if handled {
+				return tensorValuesFromDispatch(mod, entry, step, result, bindings, kind), result.VariantEntry, nil
+			}
+		}
 		out, err := gdnTensor(input, beta, gamma, step.Kind == mantaartifact.StepIGDN)
 		if err != nil {
 			return nil, "", err
@@ -216,6 +249,16 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 		input, err := requireTensor(env[step.Inputs[0]], step.Inputs[0])
 		if err != nil {
 			return nil, "", err
+		}
+		outputType := resolveStepOutputType(mod, entry, step, 0, env)
+		if dispatchStep != nil {
+			result, handled, err := dispatchStep(ctx, step, outputType, []*Tensor{input})
+			if err != nil {
+				return nil, "", err
+			}
+			if handled {
+				return tensorValuesFromDispatch(mod, entry, step, result, bindings, kind), result.VariantEntry, nil
+			}
 		}
 		coords, norms, err := turboQuantEncodeTensor(input, step.Attributes)
 		if err != nil {
@@ -238,6 +281,16 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 		if err != nil {
 			return nil, "", err
 		}
+		outputType := resolveStepOutputType(mod, entry, step, 0, env)
+		if dispatchStep != nil {
+			result, handled, err := dispatchStep(ctx, step, outputType, []*Tensor{coords, norms})
+			if err != nil {
+				return nil, "", err
+			}
+			if handled {
+				return tensorValuesFromDispatch(mod, entry, step, result, bindings, kind), result.VariantEntry, nil
+			}
+		}
 		out, err := turboQuantDecodeTensor(coords, norms, step.Attributes)
 		if err != nil {
 			return nil, "", err
@@ -255,6 +308,17 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 		if err != nil {
 			return nil, "", err
 		}
+		outputType := resolveStepOutputType(mod, entry, step, 0, env)
+		dispatchInputs := optionalDispatchInputs(codes, logits)
+		if dispatchStep != nil {
+			result, handled, err := dispatchStep(ctx, step, outputType, dispatchInputs)
+			if err != nil {
+				return nil, "", err
+			}
+			if handled {
+				return tensorValuesFromDispatch(mod, entry, step, result, bindings, kind), result.VariantEntry, nil
+			}
+		}
 		out, err := crossEntropyFactorizedTensor(codes, logits, step.Attributes)
 		if err != nil {
 			return nil, "", err
@@ -271,6 +335,16 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 		rhs, err := requireTensor(env[step.Inputs[1]], step.Inputs[1])
 		if err != nil {
 			return nil, "", err
+		}
+		outputType := resolveStepOutputType(mod, entry, step, 0, env)
+		if dispatchStep != nil {
+			result, handled, err := dispatchStep(ctx, step, outputType, []*Tensor{lhs, rhs})
+			if err != nil {
+				return nil, "", err
+			}
+			if handled {
+				return tensorValuesFromDispatch(mod, entry, step, result, bindings, kind), result.VariantEntry, nil
+			}
 		}
 		var out *Tensor
 		if step.Kind == mantaartifact.StepMSELoss {
@@ -294,6 +368,16 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 			}
 			inputs = append(inputs, t)
 		}
+		outputType := resolveStepOutputType(mod, entry, step, 0, env)
+		if dispatchStep != nil {
+			result, handled, err := dispatchStep(ctx, step, outputType, inputs)
+			if err != nil {
+				return nil, "", err
+			}
+			if handled {
+				return tensorValuesFromDispatch(mod, entry, step, result, bindings, kind), result.VariantEntry, nil
+			}
+		}
 		out, err := scalarAddTensor(inputs...)
 		if err != nil {
 			return nil, "", err
@@ -310,6 +394,16 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 		rate, err := requireTensor(env[step.Inputs[1]], step.Inputs[1])
 		if err != nil {
 			return nil, "", err
+		}
+		outputType := resolveStepOutputType(mod, entry, step, 0, env)
+		if dispatchStep != nil {
+			result, handled, err := dispatchStep(ctx, step, outputType, []*Tensor{distortion, rate})
+			if err != nil {
+				return nil, "", err
+			}
+			if handled {
+				return tensorValuesFromDispatch(mod, entry, step, result, bindings, kind), result.VariantEntry, nil
+			}
 		}
 		out, err := rateDistortionLossTensor(distortion, rate, attrFloat(step.Attributes, "lambda", 1))
 		if err != nil {
@@ -1622,6 +1716,24 @@ func makeTensorValue(mod *mantaartifact.Module, entry mantaartifact.EntryPoint, 
 		Inputs:   cloneStrings(step.Inputs),
 		Metadata: meta,
 	}
+}
+
+func tensorValuesFromDispatch(mod *mantaartifact.Module, entry mantaartifact.EntryPoint, step mantaartifact.Step, result StepDispatchResult, bindings map[string]int, kind mantaartifact.BackendKind) []Value {
+	values := make([]Value, 0, len(result.Outputs))
+	for i, tensor := range result.Outputs {
+		values = append(values, makeTensorValue(mod, entry, step, i, tensor, bindings, kind, result.VariantEntry, result.SourceHash, result.Metadata))
+	}
+	return values
+}
+
+func optionalDispatchInputs(inputs ...*Tensor) []*Tensor {
+	out := make([]*Tensor, 0, len(inputs))
+	for _, input := range inputs {
+		if input != nil {
+			out = append(out, input)
+		}
+	}
+	return out
 }
 
 func makeCandidatePackValue(mod *mantaartifact.Module, entry mantaartifact.EntryPoint, step mantaartifact.Step, pack *CandidatePack, bindings map[string]int, kind mantaartifact.BackendKind) Value {

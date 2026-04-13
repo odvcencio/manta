@@ -173,6 +173,18 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
+	case mantaartifact.StepGDN, mantaartifact.StepIGDN:
+		if e.device == nil {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		if !supportsBuiltinGDN(inputs) {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		result, err := e.device.runGDNStep(inputs, outputType, step.Kind == mantaartifact.StepIGDN)
+		if err != nil {
+			return backend.StepDispatchResult{}, false, err
+		}
+		return result, true, nil
 	default:
 		return backend.StepDispatchResult{}, false, nil
 	}
@@ -199,6 +211,24 @@ func supportsBuiltinMatMul(inputs []*backend.Tensor) bool {
 	default:
 		return false
 	}
+}
+
+func supportsBuiltinGDN(inputs []*backend.Tensor) bool {
+	if len(inputs) < 3 || inputs[0] == nil || inputs[1] == nil || inputs[2] == nil {
+		return false
+	}
+	input, beta, gamma := inputs[0], inputs[1], inputs[2]
+	if len(input.Shape) != 4 || len(input.F32) != input.Elements() {
+		return false
+	}
+	channels := input.Shape[1]
+	if len(beta.F32) < channels {
+		return false
+	}
+	if len(gamma.Shape) != 2 || gamma.Shape[0] != channels || gamma.Shape[1] != channels || len(gamma.F32) < channels*channels {
+		return false
+	}
+	return true
 }
 
 func shouldFallbackScoreKernel(kernel mantaartifact.Kernel, inputs []*backend.Tensor) bool {

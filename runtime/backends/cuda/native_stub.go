@@ -36,6 +36,10 @@ func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, output
 	return backend.StepDispatchResult{}, nil
 }
 
+func (rt *deviceRuntime) runGDNStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, inverse bool) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+
 func (rt *deviceRuntime) bindMatMulRight(name string, tensor *backend.Tensor) error {
 	return nil
 }
