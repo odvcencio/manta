@@ -446,6 +446,26 @@ static int mantaCudaLaunchGDN(MantaCudaRuntime* rt, MantaCudaKernel* kernel, uns
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
+static int mantaCudaLaunchMSEPartials(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr partials, int elements, char** err) {
+	void* args[] = {&lhs, &rhs, &partials, &elements};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
+static int mantaCudaLaunchScalarSum(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr values, CUdeviceptr out0, int count, char** err) {
+	void* args[] = {&values, &out0, &count};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
+static int mantaCudaLaunchRDLoss(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr distortion, CUdeviceptr rate, CUdeviceptr out0, float lambda, char** err) {
+	void* args[] = {&distortion, &rate, &out0, &lambda};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
+static int mantaCudaLaunchCrossEntropyPartials(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr codes, CUdeviceptr logits, CUdeviceptr partials, int elements, int mode, int layout, int levels, int bits, int codeRank, int codeN, int codeC, int codeH, int codeW, int logitsLen, int logitsN, int logitsC, int logitsH, int logitsW, int sigmaMode, char** err) {
+	void* args[] = {&codes, &logits, &partials, &elements, &mode, &layout, &levels, &bits, &codeRank, &codeN, &codeC, &codeH, &codeW, &logitsLen, &logitsN, &logitsC, &logitsH, &logitsW, &sigmaMode};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
 static int mantaCudaLaunchContrastiveScores(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr positive, CUdeviceptr queryNorms, CUdeviceptr positiveNorms, CUdeviceptr scores, int rows, int width, char** err) {
 	void* args[] = {&query, &positive, &queryNorms, &positiveNorms, &scores, &rows, &width};
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
@@ -652,13 +672,319 @@ extern "C" __global__ void manta_gdn_forward(
 }
 `
 
+const mseLossKernelSource = `
+extern "C" __global__ void manta_mse_partials(
+    const float* lhs,
+    const float* rhs,
+    float* partials,
+    int elements
+) {
+    __shared__ float shared[256];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+    int stride = gridDim.x * blockDim.x;
+    float sum = 0.0f;
+    for (int i = idx; i < elements; i += stride) {
+        float diff = lhs[i] - rhs[i];
+        sum += diff * diff;
+    }
+    shared[tid] = sum;
+    __syncthreads();
+    for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            shared[tid] += shared[tid + offset];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        partials[blockIdx.x] = shared[0];
+    }
+}
+`
+
+const scalarLossKernelSource = `
+extern "C" __global__ void manta_scalar_sum(
+    const float* values,
+    float* out,
+    int count
+) {
+    __shared__ float shared[256];
+    int tid = threadIdx.x;
+    float sum = 0.0f;
+    for (int i = tid; i < count; i += blockDim.x) {
+        sum += values[i];
+    }
+    shared[tid] = sum;
+    __syncthreads();
+    for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            shared[tid] += shared[tid + offset];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        out[0] = shared[0];
+    }
+}
+
+extern "C" __global__ void manta_rd_loss(
+    const float* distortion,
+    const float* rate,
+    float* out,
+    float lambda
+) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        out[0] = distortion[0] + lambda * rate[0];
+    }
+}
+`
+
+const crossEntropyKernelSource = `
+static __device__ int manta_clamp_int(int value, int lo, int hi) {
+    if (value < lo) return lo;
+    if (value > hi) return hi;
+    return value;
+}
+
+static __device__ float manta_neg_log2(float p) {
+    if (!(p >= 1.0e-12f)) {
+        p = 1.0e-12f;
+    }
+    return -logf(p) * 1.4426950408889634f;
+}
+
+static __device__ float manta_softmax_probability_strided(const float* values, int base, int step, int count, int idx) {
+    float maxv = values[base];
+    for (int i = 1; i < count; ++i) {
+        float v = values[base + i * step];
+        if (v > maxv) {
+            maxv = v;
+        }
+    }
+    float sum = 0.0f;
+    float target = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        float v = expf(values[base + i * step] - maxv);
+        if (i == idx) {
+            target = v;
+        }
+        sum += v;
+    }
+    if (sum == 0.0f) {
+        return 1.0f / (float)count;
+    }
+    return target / sum;
+}
+
+static __device__ void manta_unpack_offset4(int offset, int channels, int height, int width, int* n, int* c, int* h, int* w) {
+    int spatial = height * width;
+    *w = offset % width;
+    int rem = offset / width;
+    *h = rem % height;
+    rem /= height;
+    *c = rem % channels;
+    *n = rem / channels;
+}
+
+static __device__ float manta_categorical_probability(
+    const float* logits,
+    int layout,
+    int offset,
+    int idx,
+    int levels,
+    int codeC,
+    int codeH,
+    int codeW,
+    int logitsLen,
+    int logitsC,
+    int logitsH,
+    int logitsW
+) {
+    if (layout == 0 || logits == 0 || logitsLen == 0) {
+        return 1.0f / (float)levels;
+    }
+    if (layout == 1) {
+        return manta_softmax_probability_strided(logits, 0, 1, levels, idx);
+    }
+    if (layout == 2) {
+        return manta_softmax_probability_strided(logits, offset * levels, 1, levels, idx);
+    }
+    if (layout == 3) {
+        int n, c, h, w;
+        manta_unpack_offset4(offset, codeC, codeH, codeW, &n, &c, &h, &w);
+        int baseChannel = c * levels;
+        int base = ((n * logitsC + baseChannel) * logitsH + h) * logitsW + w;
+        return manta_softmax_probability_strided(logits, base, logitsH * logitsW, levels, idx);
+    }
+    float p = 1.0f / (1.0f + expf(-logits[offset % logitsLen]));
+    if (idx == 0) {
+        return 1.0f - p;
+    }
+    int denom = levels - 1;
+    if (denom < 1) {
+        denom = 1;
+    }
+    return p / (float)denom;
+}
+
+static __device__ float manta_bit_probability(
+    const float* logits,
+    int layout,
+    int offset,
+    int bit,
+    int bitValue,
+    int bits,
+    int codeC,
+    int codeH,
+    int codeW,
+    int logitsLen,
+    int logitsC,
+    int logitsH,
+    int logitsW
+) {
+    if (layout == 0 || logits == 0 || logitsLen == 0) {
+        return 0.5f;
+    }
+    if (layout == 1) {
+        return manta_softmax_probability_strided(logits, bit * 2, 1, 2, bitValue);
+    }
+    if (layout == 2) {
+        return manta_softmax_probability_strided(logits, (offset * bits + bit) * 2, 1, 2, bitValue);
+    }
+    if (layout == 3) {
+        int n, c, h, w;
+        manta_unpack_offset4(offset, codeC, codeH, codeW, &n, &c, &h, &w);
+        int ch = c * bits * 2 + bit * 2;
+        int base = ((n * logitsC + ch) * logitsH + h) * logitsW + w;
+        return manta_softmax_probability_strided(logits, base, logitsH * logitsW, 2, bitValue);
+    }
+    float p = 1.0f / (1.0f + expf(-logits[(offset * bits + bit) % logitsLen]));
+    if (bitValue == 1) {
+        return p;
+    }
+    return 1.0f - p;
+}
+
+static __device__ float manta_normal_cdf(float x) {
+    return 0.5f * (1.0f + erff(x * 0.7071067811865475f));
+}
+
+static __device__ float manta_norm_sigma(float raw, int sigmaMode) {
+    if (sigmaMode == 1) {
+        if (raw > 32.0f) {
+            return raw + 1.0e-6f;
+        }
+        return log1pf(expf(raw)) + 1.0e-6f;
+    }
+    if (sigmaMode == 2) {
+        return expf(raw);
+    }
+    return raw;
+}
+
+static __device__ float manta_log_normal_loss(
+    const float* codes,
+    const float* params,
+    int offset,
+    int codeH,
+    int codeW,
+    int paramsC,
+    int paramsH,
+    int paramsW,
+    int sigmaMode
+) {
+    int x = offset % codeW;
+    int rem = offset / codeW;
+    int y = rem % codeH;
+    int n = rem / codeH;
+    float mu = params[((n * paramsC + 0) * paramsH + y) * paramsW + x];
+    float sigma = manta_norm_sigma(params[((n * paramsC + 1) * paramsH + y) * paramsW + x], sigmaMode);
+    int sym = manta_clamp_int((int)roundf(codes[offset]), 0, 255);
+    float span = 32.0f;
+    float p;
+    if (sym <= 0) {
+        float hi = -16.0f + (0.5f / 255.0f) * span;
+        p = manta_normal_cdf((hi - mu) / sigma);
+    } else if (sym >= 255) {
+        float lo = -16.0f + (254.5f / 255.0f) * span;
+        p = 1.0f - manta_normal_cdf((lo - mu) / sigma);
+    } else {
+        float lo = -16.0f + (((float)sym - 0.5f) / 255.0f) * span;
+        float hi = -16.0f + (((float)sym + 0.5f) / 255.0f) * span;
+        p = manta_normal_cdf((hi - mu) / sigma) - manta_normal_cdf((lo - mu) / sigma);
+    }
+    return manta_neg_log2(p);
+}
+
+extern "C" __global__ void manta_cross_entropy_partials(
+    const float* codes,
+    const float* logits,
+    float* partials,
+    int elements,
+    int mode,
+    int layout,
+    int levels,
+    int bits,
+    int codeRank,
+    int codeN,
+    int codeC,
+    int codeH,
+    int codeW,
+    int logitsLen,
+    int logitsN,
+    int logitsC,
+    int logitsH,
+    int logitsW,
+    int sigmaMode
+) {
+    __shared__ float shared[256];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+    int stride = gridDim.x * blockDim.x;
+    float sum = 0.0f;
+    for (int i = idx; i < elements; i += stride) {
+        if (mode == 2) {
+            sum += manta_log_normal_loss(codes, logits, i, codeH, codeW, logitsC, logitsH, logitsW, sigmaMode);
+        } else if (mode == 1) {
+            int maxSymbol = (1 << bits) - 1;
+            int symbol = manta_clamp_int((int)roundf(codes[i]), 0, maxSymbol);
+            for (int bit = 0; bit < bits; ++bit) {
+                int shift = bits - 1 - bit;
+                int bitValue = (symbol >> shift) & 1;
+                float p = manta_bit_probability(logits, layout, i, bit, bitValue, bits, codeC, codeH, codeW, logitsLen, logitsC, logitsH, logitsW);
+                sum += manta_neg_log2(p);
+            }
+        } else {
+            int symbol = manta_clamp_int((int)roundf(codes[i]), 0, levels - 1);
+            float p = manta_categorical_probability(logits, layout, i, symbol, levels, codeC, codeH, codeW, logitsLen, logitsC, logitsH, logitsW);
+            sum += manta_neg_log2(p);
+        }
+    }
+    shared[tid] = sum;
+    __syncthreads();
+    for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            shared[tid] += shared[tid + offset];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        partials[blockIdx.x] = shared[0];
+    }
+}
+`
+
 type deviceRuntime struct {
-	ptr              *C.MantaCudaRuntime
-	residentMatrices map[string]residentMatrix
-	matMulScratch    map[string]deviceScratchBuffer
-	quantizeKernel   *auxKernel
-	gdnKernel        *auxKernel
-	matMulStats      backend.MatMulAcceleratorStats
+	ptr                *C.MantaCudaRuntime
+	residentMatrices   map[string]residentMatrix
+	matMulScratch      map[string]deviceScratchBuffer
+	quantizeKernel     *auxKernel
+	gdnKernel          *auxKernel
+	mseLossKernel      *auxKernel
+	scalarAddKernel    *auxKernel
+	rdLossKernel       *auxKernel
+	crossEntropyKernel *auxKernel
+	matMulStats        backend.MatMulAcceleratorStats
 }
 
 type residentMatrix struct {
@@ -717,6 +1043,14 @@ func (rt *deviceRuntime) close() {
 	rt.quantizeKernel = nil
 	rt.destroyAuxKernel(rt.gdnKernel)
 	rt.gdnKernel = nil
+	rt.destroyAuxKernel(rt.mseLossKernel)
+	rt.mseLossKernel = nil
+	rt.destroyAuxKernel(rt.scalarAddKernel)
+	rt.scalarAddKernel = nil
+	rt.destroyAuxKernel(rt.rdLossKernel)
+	rt.rdLossKernel = nil
+	rt.destroyAuxKernel(rt.crossEntropyKernel)
+	rt.crossEntropyKernel = nil
 	C.mantaCudaRuntimeDestroy(rt.ptr)
 	rt.ptr = nil
 }
@@ -1151,6 +1485,66 @@ func (rt *deviceRuntime) ensureGDNKernel() (*auxKernel, error) {
 	return kernel, nil
 }
 
+func (rt *deviceRuntime) ensureMSELossKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.mseLossKernel != nil {
+		return rt.mseLossKernel, nil
+	}
+	kernel, err := rt.compileAuxKernel(mseLossKernelSource, "manta_mse_partials")
+	if err != nil {
+		return nil, err
+	}
+	rt.mseLossKernel = kernel
+	return kernel, nil
+}
+
+func (rt *deviceRuntime) ensureScalarAddKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.scalarAddKernel != nil {
+		return rt.scalarAddKernel, nil
+	}
+	kernel, err := rt.compileAuxKernel(scalarLossKernelSource, "manta_scalar_sum")
+	if err != nil {
+		return nil, err
+	}
+	rt.scalarAddKernel = kernel
+	return kernel, nil
+}
+
+func (rt *deviceRuntime) ensureRDLossKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.rdLossKernel != nil {
+		return rt.rdLossKernel, nil
+	}
+	kernel, err := rt.compileAuxKernel(scalarLossKernelSource, "manta_rd_loss")
+	if err != nil {
+		return nil, err
+	}
+	rt.rdLossKernel = kernel
+	return kernel, nil
+}
+
+func (rt *deviceRuntime) ensureCrossEntropyKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.crossEntropyKernel != nil {
+		return rt.crossEntropyKernel, nil
+	}
+	kernel, err := rt.compileAuxKernel(crossEntropyKernelSource, "manta_cross_entropy_partials")
+	if err != nil {
+		return nil, err
+	}
+	rt.crossEntropyKernel = kernel
+	return kernel, nil
+}
+
 func (rt *deviceRuntime) runGDNStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, inverse bool) (backend.StepDispatchResult, error) {
 	if rt == nil || rt.ptr == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
@@ -1222,6 +1616,202 @@ func (rt *deviceRuntime) runGDNStep(inputs []*backend.Tensor, outputType mantaar
 			"op":               op,
 		},
 	}, nil
+}
+
+func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+	if rt == nil || rt.ptr == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if len(inputs) != 2 || inputs[0] == nil || inputs[1] == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda mse_loss expects two inputs")
+	}
+	lhs, rhs := inputs[0], inputs[1]
+	if !lhs.EqualShape(rhs) || len(lhs.F32) != len(rhs.F32) {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda mse_loss shape mismatch")
+	}
+	elements := len(lhs.F32)
+	if elements == 0 {
+		return cudaScalarStepResult(outputType, "__builtin_cuda_mse_loss", "mse_loss", "cuda_reduction", 0), nil
+	}
+	kernel, err := rt.ensureMSELossKernel()
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	lhsBuf, err := rt.uploadFloat32(lhs.F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(lhsBuf)
+	rhsBuf, err := rt.uploadFloat32(rhs.F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(rhsBuf)
+	grid, block := reductionLaunchConfig(elements)
+	partialsBuf, err := rt.allocFloat32(int(grid))
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(partialsBuf)
+	if err := rt.launchMSEPartials(kernel, grid, block, lhsBuf, rhsBuf, partialsBuf, elements); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	partials := make([]float32, int(grid))
+	if err := rt.downloadFloat32(partials, partialsBuf); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	value := sumFloat32(partials) / float32(elements)
+	return cudaScalarStepResult(outputType, "__builtin_cuda_mse_loss", "mse_loss", "cuda_reduction", value), nil
+}
+
+func (rt *deviceRuntime) runScalarAddStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+	if rt == nil || rt.ptr == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if len(inputs) == 0 {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda scalar_add expects at least one input")
+	}
+	values := make([]float32, len(inputs))
+	for i, input := range inputs {
+		if input == nil || len(input.F32) != 1 {
+			return backend.StepDispatchResult{}, fmt.Errorf("cuda scalar_add input %d must be scalar", i)
+		}
+		values[i] = input.F32[0]
+	}
+	kernel, err := rt.ensureScalarAddKernel()
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	valuesBuf, err := rt.uploadFloat32(values)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(valuesBuf)
+	outBuf, err := rt.allocFloat32(1)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(outBuf)
+	if err := rt.launchScalarSum(kernel, 1, cudaReductionBlockSize, valuesBuf, outBuf, len(values)); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	out := []float32{0}
+	if err := rt.downloadFloat32(out, outBuf); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	return cudaScalarStepResult(outputType, "__builtin_cuda_scalar_add", "scalar_add", "cuda_scalar", out[0]), nil
+}
+
+func (rt *deviceRuntime) runRDLossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, lambda float32) (backend.StepDispatchResult, error) {
+	if rt == nil || rt.ptr == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if len(inputs) != 2 || inputs[0] == nil || inputs[1] == nil || len(inputs[0].F32) != 1 || len(inputs[1].F32) != 1 {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda rate_distortion_loss expects scalar distortion and rate")
+	}
+	if math.IsNaN(float64(lambda)) || math.IsInf(float64(lambda), 0) || lambda < 0 {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda rate_distortion_loss lambda must be finite and non-negative")
+	}
+	kernel, err := rt.ensureRDLossKernel()
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	distortionBuf, err := rt.uploadFloat32(inputs[0].F32[:1])
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(distortionBuf)
+	rateBuf, err := rt.uploadFloat32(inputs[1].F32[:1])
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(rateBuf)
+	outBuf, err := rt.allocFloat32(1)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(outBuf)
+	if err := rt.launchRDLoss(kernel, 1, 1, distortionBuf, rateBuf, outBuf, lambda); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	out := []float32{0}
+	if err := rt.downloadFloat32(out, outBuf); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	result := cudaScalarStepResult(outputType, "__builtin_cuda_rate_distortion_loss", "rate_distortion_loss", "cuda_scalar", out[0])
+	result.Metadata["lambda"] = lambda
+	return result, nil
+}
+
+func (rt *deviceRuntime) runCrossEntropyStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, plan cudaCrossEntropyPlan) (backend.StepDispatchResult, error) {
+	if rt == nil || rt.ptr == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if len(inputs) < 1 || inputs[0] == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda cross_entropy expects codes")
+	}
+	codes := inputs[0]
+	var logits *backend.Tensor
+	if len(inputs) > 1 {
+		logits = inputs[1]
+	}
+	if len(codes.F32) != codes.Elements() {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda cross_entropy codes must be dense")
+	}
+	if err := validateCrossEntropyPlanInputs(codes, logits, plan); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	elements := len(codes.F32)
+	if elements == 0 {
+		return cudaScalarStepResult(outputType, "__builtin_cuda_cross_entropy", "cross_entropy_factorized", "cuda_reduction", 0), nil
+	}
+	kernel, err := rt.ensureCrossEntropyKernel()
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	codesBuf, err := rt.uploadFloat32(codes.F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(codesBuf)
+	var logitsBuf C.CUdeviceptr
+	logitsLen := 0
+	if logits != nil && len(logits.F32) > 0 {
+		logitsLen = len(logits.F32)
+		logitsBuf, err = rt.uploadFloat32(logits.F32)
+		if err != nil {
+			return backend.StepDispatchResult{}, err
+		}
+		defer rt.freeBuffer(logitsBuf)
+	}
+	grid, block := reductionLaunchConfig(elements)
+	partialsBuf, err := rt.allocFloat32(int(grid))
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(partialsBuf)
+	codeRank, codeN, codeC, codeH, codeW := cudaTensorShapeArgs(codes)
+	logitsN, logitsC, logitsH, logitsW := 0, 0, 0, 0
+	if logits != nil {
+		_, logitsN, logitsC, logitsH, logitsW = cudaTensorShapeArgs(logits)
+	}
+	if err := rt.launchCrossEntropyPartials(kernel, grid, block, codesBuf, logitsBuf, partialsBuf, elements, int(plan.mode), int(plan.layout), plan.levels, plan.bits, codeRank, codeN, codeC, codeH, codeW, logitsLen, logitsN, logitsC, logitsH, logitsW, int(plan.sigmaMode)); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	partials := make([]float32, int(grid))
+	if err := rt.downloadFloat32(partials, partialsBuf); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	value := sumFloat32(partials)
+	result := cudaScalarStepResult(outputType, "__builtin_cuda_cross_entropy", "cross_entropy_factorized", "cuda_reduction", value)
+	result.Metadata["cross_entropy_mode"] = cudaCrossEntropyModeName(plan.mode)
+	result.Metadata["logits_layout"] = cudaCrossEntropyLayoutName(plan.layout)
+	result.Metadata["levels"] = plan.levels
+	result.Metadata["bits"] = plan.bits
+	if plan.mode == cudaCrossEntropyLogNormal {
+		result.Metadata["sigma_parameter"] = cudaSigmaModeName(plan.sigmaMode)
+	}
+	return result, nil
 }
 
 func (rt *deviceRuntime) quantizeBufferInPlace(ptr C.CUdeviceptr, elements, bits int) (bool, error) {
@@ -1311,6 +1901,75 @@ func (rt *deviceRuntime) launchGDN(kernel *auxKernel, grid, block uint, input, b
 	}
 	var errStr *C.char
 	if C.mantaCudaLaunchGDN(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), input, beta, gamma, out0, C.int(elements), C.int(channels), C.int(height), C.int(width), C.int(inverse), &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchMSEPartials(kernel *auxKernel, grid, block uint, lhs, rhs, partials C.CUdeviceptr, elements int) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda mse_loss kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchMSEPartials(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), lhs, rhs, partials, C.int(elements), &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchScalarSum(kernel *auxKernel, grid, block uint, values, out0 C.CUdeviceptr, count int) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda scalar_add kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchScalarSum(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), values, out0, C.int(count), &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchRDLoss(kernel *auxKernel, grid, block uint, distortion, rate, out0 C.CUdeviceptr, lambda float32) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda rate_distortion_loss kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchRDLoss(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), distortion, rate, out0, C.float(lambda), &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchCrossEntropyPartials(kernel *auxKernel, grid, block uint, codes, logits, partials C.CUdeviceptr, elements, mode, layout, levels, bits, codeRank, codeN, codeC, codeH, codeW, logitsLen, logitsN, logitsC, logitsH, logitsW, sigmaMode int) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda cross_entropy kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchCrossEntropyPartials(
+		rt.ptr,
+		kernel.ptr,
+		C.uint(grid),
+		C.uint(block),
+		codes,
+		logits,
+		partials,
+		C.int(elements),
+		C.int(mode),
+		C.int(layout),
+		C.int(levels),
+		C.int(bits),
+		C.int(codeRank),
+		C.int(codeN),
+		C.int(codeC),
+		C.int(codeH),
+		C.int(codeW),
+		C.int(logitsLen),
+		C.int(logitsN),
+		C.int(logitsC),
+		C.int(logitsH),
+		C.int(logitsW),
+		C.int(sigmaMode),
+		&errStr,
+	) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -2299,6 +2958,174 @@ func newStepOutputTensor(outputType mantaartifact.ValueType, shape []int, data [
 		return &backend.Tensor{DType: "f32", Shape: append([]int(nil), shape...), F32: data}
 	default:
 		return &backend.Tensor{DType: "f16", Shape: append([]int(nil), shape...), F32: data}
+	}
+}
+
+const (
+	cudaReductionBlockSize = 256
+	cudaMaxReductionBlocks = 1024
+)
+
+func reductionLaunchConfig(elements int) (grid, block uint) {
+	if elements <= 0 {
+		return 1, cudaReductionBlockSize
+	}
+	blocks := (elements + cudaReductionBlockSize - 1) / cudaReductionBlockSize
+	if blocks < 1 {
+		blocks = 1
+	}
+	if blocks > cudaMaxReductionBlocks {
+		blocks = cudaMaxReductionBlocks
+	}
+	return uint(blocks), cudaReductionBlockSize
+}
+
+func cudaScalarStepResult(outputType mantaartifact.ValueType, variant, op, launchAPI string, value float32) backend.StepDispatchResult {
+	return backend.StepDispatchResult{
+		Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, []int{1}, []float32{value})},
+		VariantEntry: variant,
+		Metadata: map[string]any{
+			"dispatch_mode":    "backend_step",
+			"device_execution": true,
+			"execution_mode":   "cuda_device",
+			"launch_api":       launchAPI,
+			"launch_compiler":  "nvrtc",
+			"op":               op,
+		},
+	}
+}
+
+func validateCrossEntropyPlanInputs(codes, logits *backend.Tensor, plan cudaCrossEntropyPlan) error {
+	if codes == nil {
+		return fmt.Errorf("cuda cross_entropy expects codes")
+	}
+	switch plan.mode {
+	case cudaCrossEntropyLogNormal:
+		if logits == nil {
+			return fmt.Errorf("cuda cross_entropy log_normal expects norm params")
+		}
+		if len(codes.Shape) != 3 || len(logits.Shape) != 4 {
+			return fmt.Errorf("cuda cross_entropy log_normal expects codes NHW and params N2HW")
+		}
+		if logits.Shape[0] != codes.Shape[0] || logits.Shape[1] < 2 || logits.Shape[2] != codes.Shape[1] || logits.Shape[3] != codes.Shape[2] {
+			return fmt.Errorf("cuda cross_entropy norm param shape %v does not match codes %v", logits.Shape, codes.Shape)
+		}
+		if len(logits.F32) < logits.Elements() {
+			return fmt.Errorf("cuda cross_entropy norm params must be dense")
+		}
+		if err := validateLogNormalParams(logits, plan.sigmaMode); err != nil {
+			return err
+		}
+	case cudaCrossEntropyBitPlane:
+		if plan.bits <= 0 {
+			return fmt.Errorf("cuda cross_entropy bit-plane mode requires bits")
+		}
+		if plan.layout == cudaCrossEntropyLayoutNCHW && !supportsNCHWBitPair(codes, logits, plan.bits) {
+			return fmt.Errorf("cuda cross_entropy bit-plane NCHW logits shape %v does not match codes %v", logitsShape(logits), codes.Shape)
+		}
+	case cudaCrossEntropyCategorical:
+		if plan.levels <= 0 {
+			return fmt.Errorf("cuda cross_entropy levels must be positive")
+		}
+		if plan.layout == cudaCrossEntropyLayoutNCHW && !supportsNCHWAlphabet(codes, logits, plan.levels) {
+			return fmt.Errorf("cuda cross_entropy NCHW logits shape %v does not match codes %v", logitsShape(logits), codes.Shape)
+		}
+	default:
+		return fmt.Errorf("cuda cross_entropy unsupported mode %d", plan.mode)
+	}
+	return nil
+}
+
+func validateLogNormalParams(params *backend.Tensor, sigmaMode cudaSigmaMode) error {
+	channels, height, width := params.Shape[1], params.Shape[2], params.Shape[3]
+	for n := 0; n < params.Shape[0]; n++ {
+		for y := 0; y < height; y++ {
+			for x := 0; x < width; x++ {
+				muOffset := ((n*channels+0)*height+y)*width + x
+				sigmaOffset := ((n*channels+1)*height+y)*width + x
+				mu := params.F32[muOffset]
+				rawSigma := params.F32[sigmaOffset]
+				if math.IsNaN(float64(mu)) || math.IsInf(float64(mu), 0) {
+					return fmt.Errorf("cuda cross_entropy invalid norm params at offset %d", muOffset)
+				}
+				if math.IsNaN(float64(rawSigma)) || math.IsInf(float64(rawSigma), 0) || (sigmaMode == cudaSigmaRaw && rawSigma <= 0) {
+					return fmt.Errorf("cuda cross_entropy invalid norm params at offset %d", sigmaOffset)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func cudaTensorShapeArgs(tensor *backend.Tensor) (rank, n, c, h, w int) {
+	if tensor == nil {
+		return 0, 0, 0, 0, 0
+	}
+	switch len(tensor.Shape) {
+	case 4:
+		return 4, tensor.Shape[0], tensor.Shape[1], tensor.Shape[2], tensor.Shape[3]
+	case 3:
+		return 3, tensor.Shape[0], 1, tensor.Shape[1], tensor.Shape[2]
+	case 2:
+		return 2, 1, tensor.Shape[0], 1, tensor.Shape[1]
+	case 1:
+		return 1, 1, 1, 1, tensor.Shape[0]
+	default:
+		width := tensor.Elements()
+		if width < 1 {
+			width = 1
+		}
+		return len(tensor.Shape), 1, 1, 1, width
+	}
+}
+
+func logitsShape(tensor *backend.Tensor) []int {
+	if tensor == nil {
+		return nil
+	}
+	return tensor.Shape
+}
+
+func cudaCrossEntropyModeName(mode cudaCrossEntropyMode) string {
+	switch mode {
+	case cudaCrossEntropyCategorical:
+		return "categorical"
+	case cudaCrossEntropyBitPlane:
+		return "bit-plane"
+	case cudaCrossEntropyLogNormal:
+		return "log_normal"
+	default:
+		return "unknown"
+	}
+}
+
+func cudaCrossEntropyLayoutName(layout cudaCrossEntropyLayout) string {
+	switch layout {
+	case cudaCrossEntropyLayoutUniform:
+		return "uniform"
+	case cudaCrossEntropyLayoutGlobal:
+		return "global"
+	case cudaCrossEntropyLayoutFlat:
+		return "flat"
+	case cudaCrossEntropyLayoutNCHW:
+		return "nchw"
+	case cudaCrossEntropyLayoutSigmoidFallback:
+		return "sigmoid_fallback"
+	default:
+		return "unknown"
+	}
+}
+
+func cudaSigmaModeName(mode cudaSigmaMode) string {
+	switch mode {
+	case cudaSigmaRaw:
+		return "raw"
+	case cudaSigmaSoftplus:
+		return "softplus"
+	case cudaSigmaExp:
+		return "exp"
+	default:
+		return "unknown"
 	}
 }
 

@@ -40,6 +40,22 @@ func (rt *deviceRuntime) runGDNStep(inputs []*backend.Tensor, outputType mantaar
 	return backend.StepDispatchResult{}, nil
 }
 
+func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+
+func (rt *deviceRuntime) runScalarAddStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+
+func (rt *deviceRuntime) runRDLossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, lambda float32) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+
+func (rt *deviceRuntime) runCrossEntropyStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, plan cudaCrossEntropyPlan) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+
 func (rt *deviceRuntime) bindMatMulRight(name string, tensor *backend.Tensor) error {
 	return nil
 }

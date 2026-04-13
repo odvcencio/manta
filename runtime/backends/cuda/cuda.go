@@ -3,6 +3,8 @@ package cuda
 import (
 	"context"
 	"fmt"
+	"math"
+	"strconv"
 	"sync"
 
 	mantaartifact "github.com/odvcencio/manta/artifact/manta"
@@ -185,6 +187,56 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
+	case mantaartifact.StepMSELoss:
+		if e.device == nil {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		if !supportsBuiltinMSELoss(inputs) {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		result, err := e.device.runMSELossStep(inputs, outputType)
+		if err != nil {
+			return backend.StepDispatchResult{}, false, err
+		}
+		return result, true, nil
+	case mantaartifact.StepScalarAdd:
+		if e.device == nil {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		if !supportsBuiltinScalarAdd(inputs) {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		result, err := e.device.runScalarAddStep(inputs, outputType)
+		if err != nil {
+			return backend.StepDispatchResult{}, false, err
+		}
+		return result, true, nil
+	case mantaartifact.StepRDLoss:
+		if e.device == nil {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		lambda := stepAttrFloat32(step.Attributes, "lambda", 1)
+		if !supportsBuiltinRDLoss(inputs, lambda) {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		result, err := e.device.runRDLossStep(inputs, outputType, lambda)
+		if err != nil {
+			return backend.StepDispatchResult{}, false, err
+		}
+		return result, true, nil
+	case mantaartifact.StepCrossEntropy:
+		if e.device == nil {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		plan, ok := planBuiltinCrossEntropy(step, inputs)
+		if !ok {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		result, err := e.device.runCrossEntropyStep(inputs, outputType, plan)
+		if err != nil {
+			return backend.StepDispatchResult{}, false, err
+		}
+		return result, true, nil
 	default:
 		return backend.StepDispatchResult{}, false, nil
 	}
@@ -229,6 +281,254 @@ func supportsBuiltinGDN(inputs []*backend.Tensor) bool {
 		return false
 	}
 	return true
+}
+
+func supportsBuiltinMSELoss(inputs []*backend.Tensor) bool {
+	if len(inputs) != 2 || inputs[0] == nil || inputs[1] == nil {
+		return false
+	}
+	lhs, rhs := inputs[0], inputs[1]
+	return lhs.EqualShape(rhs) && len(lhs.F32) == len(rhs.F32) && len(lhs.F32) == lhs.Elements()
+}
+
+func supportsBuiltinScalarAdd(inputs []*backend.Tensor) bool {
+	if len(inputs) == 0 {
+		return false
+	}
+	for _, input := range inputs {
+		if input == nil || len(input.F32) != 1 {
+			return false
+		}
+	}
+	return true
+}
+
+func supportsBuiltinRDLoss(inputs []*backend.Tensor, lambda float32) bool {
+	return supportsBuiltinScalarAdd(inputs) && len(inputs) == 2 && !math.IsNaN(float64(lambda)) && !math.IsInf(float64(lambda), 0) && lambda >= 0
+}
+
+type cudaCrossEntropyMode int
+
+const (
+	cudaCrossEntropyCategorical cudaCrossEntropyMode = iota
+	cudaCrossEntropyBitPlane
+	cudaCrossEntropyLogNormal
+)
+
+type cudaCrossEntropyLayout int
+
+const (
+	cudaCrossEntropyLayoutUniform cudaCrossEntropyLayout = iota
+	cudaCrossEntropyLayoutGlobal
+	cudaCrossEntropyLayoutFlat
+	cudaCrossEntropyLayoutNCHW
+	cudaCrossEntropyLayoutSigmoidFallback
+)
+
+type cudaSigmaMode int
+
+const (
+	cudaSigmaRaw cudaSigmaMode = iota
+	cudaSigmaSoftplus
+	cudaSigmaExp
+)
+
+type cudaCrossEntropyPlan struct {
+	mode      cudaCrossEntropyMode
+	layout    cudaCrossEntropyLayout
+	levels    int
+	bits      int
+	sigmaMode cudaSigmaMode
+}
+
+func planBuiltinCrossEntropy(step mantaartifact.Step, inputs []*backend.Tensor) (cudaCrossEntropyPlan, bool) {
+	if len(inputs) < 1 || inputs[0] == nil {
+		return cudaCrossEntropyPlan{}, false
+	}
+	codes := inputs[0]
+	if len(codes.F32) != codes.Elements() {
+		return cudaCrossEntropyPlan{}, false
+	}
+	var logits *backend.Tensor
+	if len(inputs) > 1 {
+		logits = inputs[1]
+	}
+	attrs := step.Attributes
+	if attrs != nil && attrs["distribution"] == "log_normal" {
+		sigmaMode, ok := cudaSigmaModeForAttrs(attrs)
+		if !ok || logits == nil || len(codes.Shape) != 3 || len(logits.Shape) != 4 {
+			return cudaCrossEntropyPlan{}, false
+		}
+		if logits.Shape[0] != codes.Shape[0] || logits.Shape[1] < 2 || logits.Shape[2] != codes.Shape[1] || logits.Shape[3] != codes.Shape[2] {
+			return cudaCrossEntropyPlan{}, false
+		}
+		if len(logits.F32) < logits.Elements() {
+			return cudaCrossEntropyPlan{}, false
+		}
+		return cudaCrossEntropyPlan{mode: cudaCrossEntropyLogNormal, layout: cudaCrossEntropyLayoutNCHW, levels: 256, bits: 8, sigmaMode: sigmaMode}, true
+	}
+
+	bits := stepAttrInt(attrs, "bits", cudaBitsForQTensor(codes))
+	levels := stepAttrInt(attrs, "levels", 0)
+	if levels <= 0 {
+		if bits > 0 {
+			levels = 1 << bits
+		} else {
+			levels = 256
+		}
+	}
+	if levels <= 0 {
+		return cudaCrossEntropyPlan{}, false
+	}
+	if cudaFactorizationAttr(attrs) == "bit-plane" {
+		if bits <= 0 || bits > 16 {
+			return cudaCrossEntropyPlan{}, false
+		}
+		layout, ok := cudaCrossEntropyBitLayout(codes, logits, bits)
+		if !ok {
+			return cudaCrossEntropyPlan{}, false
+		}
+		return cudaCrossEntropyPlan{mode: cudaCrossEntropyBitPlane, layout: layout, levels: levels, bits: bits}, true
+	}
+	layout, ok := cudaCrossEntropyCategoricalLayout(codes, logits, levels, attrs)
+	if !ok {
+		return cudaCrossEntropyPlan{}, false
+	}
+	return cudaCrossEntropyPlan{mode: cudaCrossEntropyCategorical, layout: layout, levels: levels, bits: bits}, true
+}
+
+func cudaCrossEntropyCategoricalLayout(codes, logits *backend.Tensor, levels int, attrs map[string]string) (cudaCrossEntropyLayout, bool) {
+	if logits == nil || len(logits.F32) == 0 {
+		return cudaCrossEntropyLayoutUniform, true
+	}
+	if len(logits.F32) == levels {
+		return cudaCrossEntropyLayoutGlobal, true
+	}
+	if attrs != nil && attrs["logits_layout"] == "nchw_alphabet" && supportsNCHWAlphabet(codes, logits, levels) {
+		return cudaCrossEntropyLayoutNCHW, true
+	}
+	if len(logits.F32) >= codes.Elements()*levels {
+		return cudaCrossEntropyLayoutFlat, true
+	}
+	if len(logits.F32) > 0 {
+		return cudaCrossEntropyLayoutSigmoidFallback, true
+	}
+	return cudaCrossEntropyLayoutUniform, true
+}
+
+func cudaCrossEntropyBitLayout(codes, logits *backend.Tensor, bits int) (cudaCrossEntropyLayout, bool) {
+	if logits == nil || len(logits.F32) == 0 {
+		return cudaCrossEntropyLayoutUniform, true
+	}
+	if supportsNCHWBitPair(codes, logits, bits) {
+		return cudaCrossEntropyLayoutNCHW, true
+	}
+	if len(logits.F32) == bits*2 {
+		return cudaCrossEntropyLayoutGlobal, true
+	}
+	if len(logits.F32) >= codes.Elements()*bits*2 {
+		return cudaCrossEntropyLayoutFlat, true
+	}
+	if len(logits.F32) > 0 {
+		return cudaCrossEntropyLayoutSigmoidFallback, true
+	}
+	return cudaCrossEntropyLayoutUniform, true
+}
+
+func supportsNCHWAlphabet(codes, logits *backend.Tensor, levels int) bool {
+	if codes == nil || logits == nil || len(codes.Shape) != 4 || len(logits.Shape) != 4 {
+		return false
+	}
+	return logits.Shape[0] == codes.Shape[0] &&
+		logits.Shape[1] >= codes.Shape[1]*levels &&
+		logits.Shape[2] == codes.Shape[2] &&
+		logits.Shape[3] == codes.Shape[3] &&
+		len(logits.F32) >= logits.Elements()
+}
+
+func supportsNCHWBitPair(codes, logits *backend.Tensor, bits int) bool {
+	if codes == nil || logits == nil || len(codes.Shape) != 4 || len(logits.Shape) != 4 {
+		return false
+	}
+	return logits.Shape[0] == codes.Shape[0] &&
+		logits.Shape[1] >= codes.Shape[1]*bits*2 &&
+		logits.Shape[2] == codes.Shape[2] &&
+		logits.Shape[3] == codes.Shape[3] &&
+		len(logits.F32) >= logits.Elements()
+}
+
+func cudaSigmaModeForAttrs(attrs map[string]string) (cudaSigmaMode, bool) {
+	if attrs == nil {
+		return cudaSigmaRaw, true
+	}
+	switch attrs["sigma_parameter"] {
+	case "":
+		return cudaSigmaRaw, true
+	case "softplus":
+		return cudaSigmaSoftplus, true
+	case "exp":
+		return cudaSigmaExp, true
+	default:
+		return cudaSigmaRaw, false
+	}
+}
+
+func cudaFactorizationAttr(attrs map[string]string) string {
+	if attrs == nil {
+		return "categorical"
+	}
+	switch attrs["factorization"] {
+	case "bit-plane", "bitplane", "bit_plane":
+		return "bit-plane"
+	default:
+		return "categorical"
+	}
+}
+
+func cudaBitsForQTensor(t *backend.Tensor) int {
+	if t == nil {
+		return 0
+	}
+	switch t.DType {
+	case "q2":
+		return 2
+	case "q4":
+		return 4
+	case "q8", "q_norm":
+		return 8
+	default:
+		return 0
+	}
+}
+
+func stepAttrInt(attrs map[string]string, key string, fallback int) int {
+	if attrs == nil {
+		return fallback
+	}
+	raw := attrs[key]
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func stepAttrFloat32(attrs map[string]string, key string, fallback float32) float32 {
+	if attrs == nil {
+		return fallback
+	}
+	raw := attrs[key]
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseFloat(raw, 32)
+	if err != nil {
+		return fallback
+	}
+	return float32(value)
 }
 
 func shouldFallbackScoreKernel(kernel mantaartifact.Kernel, inputs []*backend.Tensor) bool {
