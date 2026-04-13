@@ -456,6 +456,16 @@ static int mantaCudaLaunchConv2DTranspose(MantaCudaRuntime* rt, MantaCudaKernel*
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
+static int mantaCudaLaunchTurboQEncode(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr coords, CUdeviceptr norms, CUdeviceptr scratchWork, CUdeviceptr scratchRotated, CUdeviceptr perm, CUdeviceptr signs1, CUdeviceptr signs2, CUdeviceptr centroids, CUdeviceptr boundaries, int vectors, int channels, int height, int width, int levels, char** err) {
+	void* args[] = {&input, &coords, &norms, &scratchWork, &scratchRotated, &perm, &signs1, &signs2, &centroids, &boundaries, &vectors, &channels, &height, &width, &levels};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
+static int mantaCudaLaunchTurboQDecode(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr coords, CUdeviceptr norms, CUdeviceptr out0, CUdeviceptr scratchWork, CUdeviceptr scratchRotated, CUdeviceptr perm, CUdeviceptr signs1, CUdeviceptr signs2, CUdeviceptr centroids, int vectors, int channels, int height, int width, int levels, char** err) {
+	void* args[] = {&coords, &norms, &out0, &scratchWork, &scratchRotated, &perm, &signs1, &signs2, &centroids, &vectors, &channels, &height, &width, &levels};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
 static int mantaCudaLaunchMSEPartials(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr partials, int elements, char** err) {
 	void* args[] = {&lhs, &rhs, &partials, &elements};
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
@@ -625,6 +635,7 @@ import (
 
 	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
+	turboquant "github.com/odvcencio/turboquant"
 )
 
 const forwardQuantizeKernelSource = `
@@ -809,6 +820,200 @@ extern "C" __global__ void manta_conv2d_transpose_forward(
         }
     }
     out[idx] = sum;
+}
+`
+
+const turboQKernelSource = `
+static __device__ int manta_tq_highest_power_of_two_le(int value) {
+    int power = 1;
+    while ((power << 1) <= value) {
+        power <<= 1;
+    }
+    return power;
+}
+
+static __device__ void manta_tq_fwht_normalized(float* values, int size) {
+    if (size <= 1) {
+        return;
+    }
+    for (int step = 1; step < size; step <<= 1) {
+        int jump = step << 1;
+        for (int i = 0; i < size; i += jump) {
+            for (int j = i; j < i + step; ++j) {
+                float a = values[j];
+                float b = values[j + step];
+                values[j] = a + b;
+                values[j + step] = a - b;
+            }
+        }
+    }
+    float scale = rsqrtf((float)size);
+    for (int i = 0; i < size; ++i) {
+        values[i] *= scale;
+    }
+}
+
+static __device__ void manta_tq_apply_blocks(float* values, int channels) {
+    int offset = 0;
+    int remaining = channels;
+    while (remaining > 0) {
+        int size = manta_tq_highest_power_of_two_le(remaining);
+        manta_tq_fwht_normalized(values + offset, size);
+        offset += size;
+        remaining -= size;
+    }
+}
+
+static __device__ int manta_tq_vector_offset_to_nyx(int vector, int height, int width, int* n, int* y, int* x) {
+    *x = vector % width;
+    int rem = vector / width;
+    *y = rem % height;
+    *n = rem / height;
+    return (*n * height + *y) * width + *x;
+}
+
+static __device__ int manta_tq_nchw_offset(int n, int c, int y, int x, int channels, int height, int width) {
+    return ((n * channels + c) * height + y) * width + x;
+}
+
+static __device__ int manta_tq_nearest_centroid(float value, const float* boundaries, int levels) {
+    int lo = 0;
+    int hi = levels - 1;
+    while (lo < hi) {
+        int mid = (lo + hi) >> 1;
+        if (boundaries[mid] > value) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    return lo;
+}
+
+static __device__ int manta_tq_quantize_norm(float norm) {
+    if (norm <= 0.0f || isnan(norm)) {
+        return 0;
+    }
+    if (isinf(norm) && norm > 0.0f) {
+        return 255;
+    }
+    float t = (logf(norm) + 16.0f) / 32.0f;
+    if (t <= 0.0f) {
+        return 0;
+    }
+    if (t >= 1.0f) {
+        return 255;
+    }
+    return (int)roundf(t * 255.0f);
+}
+
+static __device__ float manta_tq_dequantize_norm(int encoded) {
+    if (encoded < 0) {
+        encoded = 0;
+    }
+    if (encoded > 255) {
+        encoded = 255;
+    }
+    return expf(-16.0f + ((float)encoded / 255.0f) * 32.0f);
+}
+
+extern "C" __global__ void manta_turboq_encode(
+    const float* input,
+    float* coords,
+    float* norms,
+    float* scratchWork,
+    float* scratchRotated,
+    const float* perm,
+    const float* signs1,
+    const float* signs2,
+    const float* centroids,
+    const float* boundaries,
+    int vectors,
+    int channels,
+    int height,
+    int width,
+    int levels
+) {
+    int vector = blockIdx.x * blockDim.x + threadIdx.x;
+    if (vector >= vectors) {
+        return;
+    }
+    int n, y, x;
+    int normOffset = manta_tq_vector_offset_to_nyx(vector, height, width, &n, &y, &x);
+    float* work = scratchWork + vector * channels;
+    float* rotated = scratchRotated + vector * channels;
+    float normSq = 0.0f;
+    for (int c = 0; c < channels; ++c) {
+        float value = input[manta_tq_nchw_offset(n, c, y, x, channels, height, width)];
+        normSq += value * value;
+    }
+    float norm = sqrtf(normSq);
+    float scale = 1.0f;
+    if (norm > 1.0e-12f) {
+        scale = 1.0f / norm;
+    }
+    for (int i = 0; i < channels; ++i) {
+        int p = (int)(perm[i] + 0.5f);
+        float value = input[manta_tq_nchw_offset(n, p, y, x, channels, height, width)];
+        work[i] = value * scale * signs1[i];
+    }
+    manta_tq_apply_blocks(work, channels);
+    for (int i = 0; i < channels; ++i) {
+        int p = (int)(perm[i] + 0.5f);
+        rotated[p] = work[i] * signs2[i];
+    }
+    for (int c = 0; c < channels; ++c) {
+        int idx = manta_tq_nearest_centroid(rotated[c], boundaries, levels);
+        coords[manta_tq_nchw_offset(n, c, y, x, channels, height, width)] = (float)idx;
+    }
+    norms[normOffset] = (float)manta_tq_quantize_norm(norm);
+}
+
+extern "C" __global__ void manta_turboq_decode(
+    const float* coords,
+    const float* norms,
+    float* out,
+    float* scratchWork,
+    float* scratchRotated,
+    const float* perm,
+    const float* signs1,
+    const float* signs2,
+    const float* centroids,
+    int vectors,
+    int channels,
+    int height,
+    int width,
+    int levels
+) {
+    int vector = blockIdx.x * blockDim.x + threadIdx.x;
+    if (vector >= vectors) {
+        return;
+    }
+    int n, y, x;
+    int normOffset = manta_tq_vector_offset_to_nyx(vector, height, width, &n, &y, &x);
+    float* work = scratchWork + vector * channels;
+    float* rotated = scratchRotated + vector * channels;
+    for (int c = 0; c < channels; ++c) {
+        int idx = (int)roundf(coords[manta_tq_nchw_offset(n, c, y, x, channels, height, width)]);
+        if (idx < 0) {
+            idx = 0;
+        }
+        if (idx >= levels) {
+            idx = levels - 1;
+        }
+        rotated[c] = centroids[idx];
+    }
+    for (int i = 0; i < channels; ++i) {
+        int p = (int)(perm[i] + 0.5f);
+        work[i] = rotated[p] * signs2[i];
+    }
+    manta_tq_apply_blocks(work, channels);
+    int normCode = (int)roundf(norms[normOffset]);
+    float norm = manta_tq_dequantize_norm(normCode);
+    for (int i = 0; i < channels; ++i) {
+        int p = (int)(perm[i] + 0.5f);
+        out[manta_tq_nchw_offset(n, p, y, x, channels, height, width)] = work[i] * signs1[i] * norm;
+    }
 }
 `
 
@@ -1178,6 +1383,8 @@ type deviceRuntime struct {
 	gdnKernel          *auxKernel
 	conv2DKernel       *auxKernel
 	conv2DTransKernel  *auxKernel
+	turboQEncodeKernel *auxKernel
+	turboQDecodeKernel *auxKernel
 	mseLossKernel      *auxKernel
 	msssimLossKernel   *auxKernel
 	scalarAddKernel    *auxKernel
@@ -1246,6 +1453,10 @@ func (rt *deviceRuntime) close() {
 	rt.conv2DKernel = nil
 	rt.destroyAuxKernel(rt.conv2DTransKernel)
 	rt.conv2DTransKernel = nil
+	rt.destroyAuxKernel(rt.turboQEncodeKernel)
+	rt.turboQEncodeKernel = nil
+	rt.destroyAuxKernel(rt.turboQDecodeKernel)
+	rt.turboQDecodeKernel = nil
 	rt.destroyAuxKernel(rt.mseLossKernel)
 	rt.mseLossKernel = nil
 	rt.destroyAuxKernel(rt.msssimLossKernel)
@@ -1720,6 +1931,36 @@ func (rt *deviceRuntime) ensureConv2DTransposeKernel() (*auxKernel, error) {
 	return kernel, nil
 }
 
+func (rt *deviceRuntime) ensureTurboQEncodeKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.turboQEncodeKernel != nil {
+		return rt.turboQEncodeKernel, nil
+	}
+	kernel, err := rt.compileAuxKernel(turboQKernelSource, "manta_turboq_encode")
+	if err != nil {
+		return nil, err
+	}
+	rt.turboQEncodeKernel = kernel
+	return kernel, nil
+}
+
+func (rt *deviceRuntime) ensureTurboQDecodeKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.turboQDecodeKernel != nil {
+		return rt.turboQDecodeKernel, nil
+	}
+	kernel, err := rt.compileAuxKernel(turboQKernelSource, "manta_turboq_decode")
+	if err != nil {
+		return nil, err
+	}
+	rt.turboQDecodeKernel = kernel
+	return kernel, nil
+}
+
 func (rt *deviceRuntime) ensureMSELossKernel() (*auxKernel, error) {
 	if rt == nil {
 		return nil, fmt.Errorf("cuda runtime is not initialized")
@@ -1968,6 +2209,130 @@ func (rt *deviceRuntime) runConv2DTransposeStep(inputs []*backend.Tensor, output
 		return backend.StepDispatchResult{}, err
 	}
 	return cudaConvStepResult(outputType, "__builtin_cuda_conv2d_transpose", "conv2d_transpose", outShape, outHost, cfgTransposeMetadata(cfg)), nil
+}
+
+func (rt *deviceRuntime) runTurboQEncodeStep(inputs []*backend.Tensor, _ mantaartifact.ValueType, cfg cudaTurboQConfig) (backend.StepDispatchResult, error) {
+	if rt == nil || rt.ptr == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if len(inputs) != 1 || inputs[0] == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda turboquant_encode expects input")
+	}
+	input := inputs[0]
+	kernel, err := rt.ensureTurboQEncodeKernel()
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	spec, err := rt.uploadTurboQSpec(cfg)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer spec.free(rt)
+	coordsShape := append([]int(nil), input.Shape...)
+	normShape := []int{cfg.batches, cfg.height, cfg.width}
+	outputElements := cfg.batches * cfg.channels * cfg.height * cfg.width
+	vectors := cfg.batches * cfg.height * cfg.width
+	if outputElements == 0 || vectors == 0 {
+		return turboQEncodeStepResult(cfg, coordsShape, nil, normShape, nil), nil
+	}
+	inputBuf, err := rt.uploadFloat32(input.F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(inputBuf)
+	coordsBuf, err := rt.allocFloat32(outputElements)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(coordsBuf)
+	normsBuf, err := rt.allocFloat32(vectors)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(normsBuf)
+	scratchWork, err := rt.allocFloat32(outputElements)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(scratchWork)
+	scratchRotated, err := rt.allocFloat32(outputElements)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(scratchRotated)
+	block := uint(128)
+	grid := uint((vectors + int(block) - 1) / int(block))
+	if err := rt.launchTurboQEncode(kernel, grid, block, inputBuf, coordsBuf, normsBuf, scratchWork, scratchRotated, spec, vectors, cfg); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	coordsHost := make([]float32, outputElements)
+	if err := rt.downloadFloat32(coordsHost, coordsBuf); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	normsHost := make([]float32, vectors)
+	if err := rt.downloadFloat32(normsHost, normsBuf); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	return turboQEncodeStepResult(cfg, coordsShape, coordsHost, normShape, normsHost), nil
+}
+
+func (rt *deviceRuntime) runTurboQDecodeStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaTurboQConfig) (backend.StepDispatchResult, error) {
+	if rt == nil || rt.ptr == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if len(inputs) != 2 || inputs[0] == nil || inputs[1] == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda turboquant_decode expects coords and norms")
+	}
+	kernel, err := rt.ensureTurboQDecodeKernel()
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	spec, err := rt.uploadTurboQSpec(cfg)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer spec.free(rt)
+	outShape := append([]int(nil), inputs[0].Shape...)
+	outputElements := cfg.batches * cfg.channels * cfg.height * cfg.width
+	vectors := cfg.batches * cfg.height * cfg.width
+	if outputElements == 0 || vectors == 0 {
+		return turboQDecodeStepResult(outputType, cfg, outShape, nil), nil
+	}
+	coordsBuf, err := rt.uploadFloat32(inputs[0].F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(coordsBuf)
+	normsBuf, err := rt.uploadFloat32(inputs[1].F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(normsBuf)
+	outBuf, err := rt.allocFloat32(outputElements)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(outBuf)
+	scratchWork, err := rt.allocFloat32(outputElements)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(scratchWork)
+	scratchRotated, err := rt.allocFloat32(outputElements)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(scratchRotated)
+	block := uint(128)
+	grid := uint((vectors + int(block) - 1) / int(block))
+	if err := rt.launchTurboQDecode(kernel, grid, block, coordsBuf, normsBuf, outBuf, scratchWork, scratchRotated, spec, vectors, cfg); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	outHost := make([]float32, outputElements)
+	if err := rt.downloadFloat32(outHost, outBuf); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	return turboQDecodeStepResult(outputType, cfg, outShape, outHost), nil
 }
 
 func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
@@ -2391,6 +2756,75 @@ func (rt *deviceRuntime) launchConv2DTranspose(kernel *auxKernel, grid, block ui
 		C.int(cfg.dilationH),
 		C.int(cfg.dilationW),
 		C.int(hasBias),
+		&errStr,
+	) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchTurboQEncode(kernel *auxKernel, grid, block uint, input, coords, norms, scratchWork, scratchRotated C.CUdeviceptr, spec *turboQDeviceSpec, vectors int, cfg cudaTurboQConfig) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda turboquant_encode kernel is not initialized")
+	}
+	if spec == nil {
+		return fmt.Errorf("cuda turboquant spec is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchTurboQEncode(
+		rt.ptr,
+		kernel.ptr,
+		C.uint(grid),
+		C.uint(block),
+		input,
+		coords,
+		norms,
+		scratchWork,
+		scratchRotated,
+		spec.perm,
+		spec.signs1,
+		spec.signs2,
+		spec.centroids,
+		spec.boundaries,
+		C.int(vectors),
+		C.int(cfg.channels),
+		C.int(cfg.height),
+		C.int(cfg.width),
+		C.int(1<<uint(cfg.bits)),
+		&errStr,
+	) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchTurboQDecode(kernel *auxKernel, grid, block uint, coords, norms, out0, scratchWork, scratchRotated C.CUdeviceptr, spec *turboQDeviceSpec, vectors int, cfg cudaTurboQConfig) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda turboquant_decode kernel is not initialized")
+	}
+	if spec == nil {
+		return fmt.Errorf("cuda turboquant spec is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchTurboQDecode(
+		rt.ptr,
+		kernel.ptr,
+		C.uint(grid),
+		C.uint(block),
+		coords,
+		norms,
+		out0,
+		scratchWork,
+		scratchRotated,
+		spec.perm,
+		spec.signs1,
+		spec.signs2,
+		spec.centroids,
+		C.int(vectors),
+		C.int(cfg.channels),
+		C.int(cfg.height),
+		C.int(cfg.width),
+		C.int(1<<uint(cfg.bits)),
 		&errStr,
 	) != 0 {
 		return cStringError(errStr)
@@ -3481,6 +3915,122 @@ func reductionLaunchConfig(elements int) (grid, block uint) {
 		blocks = cudaMaxReductionBlocks
 	}
 	return uint(blocks), cudaReductionBlockSize
+}
+
+type turboQDeviceSpec struct {
+	perm       C.CUdeviceptr
+	signs1     C.CUdeviceptr
+	signs2     C.CUdeviceptr
+	centroids  C.CUdeviceptr
+	boundaries C.CUdeviceptr
+}
+
+func (rt *deviceRuntime) uploadTurboQSpec(cfg cudaTurboQConfig) (*turboQDeviceSpec, error) {
+	q := turboquant.NewHadamardWithSeed(cfg.channels, cfg.bits, cfg.seed)
+	spec := q.Spec()
+	if spec.RotationKind != "hadamard" {
+		return nil, fmt.Errorf("cuda turboquant requires hadamard rotation spec")
+	}
+	levels := 1 << uint(cfg.bits)
+	if len(spec.Perm) != cfg.channels || len(spec.Signs1) != cfg.channels || len(spec.Signs2) != cfg.channels {
+		return nil, fmt.Errorf("cuda turboquant hadamard spec shape mismatch")
+	}
+	if len(spec.Centroids) != levels || len(spec.Boundaries) != levels-1 {
+		return nil, fmt.Errorf("cuda turboquant codebook shape mismatch")
+	}
+	deviceSpec := &turboQDeviceSpec{}
+	var err error
+	deviceSpec.perm, err = rt.uploadFloat32(intsToFloat32(spec.Perm))
+	if err != nil {
+		deviceSpec.free(rt)
+		return nil, err
+	}
+	deviceSpec.signs1, err = rt.uploadFloat32(spec.Signs1)
+	if err != nil {
+		deviceSpec.free(rt)
+		return nil, err
+	}
+	deviceSpec.signs2, err = rt.uploadFloat32(spec.Signs2)
+	if err != nil {
+		deviceSpec.free(rt)
+		return nil, err
+	}
+	deviceSpec.centroids, err = rt.uploadFloat32(spec.Centroids)
+	if err != nil {
+		deviceSpec.free(rt)
+		return nil, err
+	}
+	deviceSpec.boundaries, err = rt.uploadFloat32(spec.Boundaries)
+	if err != nil {
+		deviceSpec.free(rt)
+		return nil, err
+	}
+	return deviceSpec, nil
+}
+
+func (spec *turboQDeviceSpec) free(rt *deviceRuntime) {
+	if spec == nil || rt == nil {
+		return
+	}
+	_ = rt.freeBuffer(spec.perm)
+	_ = rt.freeBuffer(spec.signs1)
+	_ = rt.freeBuffer(spec.signs2)
+	_ = rt.freeBuffer(spec.centroids)
+	_ = rt.freeBuffer(spec.boundaries)
+}
+
+func intsToFloat32(values []int) []float32 {
+	out := make([]float32, len(values))
+	for i, value := range values {
+		out[i] = float32(value)
+	}
+	return out
+}
+
+func turboQEncodeStepResult(cfg cudaTurboQConfig, coordsShape []int, coords []float32, normShape []int, norms []float32) backend.StepDispatchResult {
+	return backend.StepDispatchResult{
+		Outputs: []*backend.Tensor{
+			newTurboQCoordsTensor(cfg.bits, coordsShape, coords),
+			backend.NewTensorQNorm(normShape, norms),
+		},
+		VariantEntry: "__builtin_cuda_turboquant_encode",
+		Metadata:     turboQStepMetadata("turboquant_encode", cfg),
+	}
+}
+
+func turboQDecodeStepResult(outputType mantaartifact.ValueType, cfg cudaTurboQConfig, shape []int, data []float32) backend.StepDispatchResult {
+	return backend.StepDispatchResult{
+		Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, shape, data)},
+		VariantEntry: "__builtin_cuda_turboquant_decode",
+		Metadata:     turboQStepMetadata("turboquant_decode", cfg),
+	}
+}
+
+func newTurboQCoordsTensor(bits int, shape []int, data []float32) *backend.Tensor {
+	switch bits {
+	case 2:
+		return backend.NewTensorQ2(shape, data)
+	case 4:
+		return backend.NewTensorQ4(shape, data)
+	case 8:
+		return backend.NewTensorQ8(shape, data)
+	default:
+		return backend.NewTensorF32(shape, data)
+	}
+}
+
+func turboQStepMetadata(op string, cfg cudaTurboQConfig) map[string]any {
+	return map[string]any{
+		"dispatch_mode":    "backend_step",
+		"device_execution": true,
+		"execution_mode":   "cuda_device",
+		"launch_api":       "cuda_driver",
+		"launch_compiler":  "nvrtc",
+		"op":               op,
+		"bits":             cfg.bits,
+		"seed":             cfg.seed,
+		"rotation_kind":    "hadamard",
+	}
 }
 
 func cudaConvStepResult(outputType mantaartifact.ValueType, variant, op string, shape []int, data []float32, extra map[string]any) backend.StepDispatchResult {

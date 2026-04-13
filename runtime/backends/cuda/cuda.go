@@ -201,6 +201,32 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
+	case mantaartifact.StepTurboQEncode:
+		if e.device == nil {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		cfg, ok := planBuiltinTurboQEncode(step, inputs)
+		if !ok {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		result, err := e.device.runTurboQEncodeStep(inputs, outputType, cfg)
+		if err != nil {
+			return backend.StepDispatchResult{}, false, err
+		}
+		return result, true, nil
+	case mantaartifact.StepTurboQDecode:
+		if e.device == nil {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		cfg, ok := planBuiltinTurboQDecode(step, inputs)
+		if !ok {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		result, err := e.device.runTurboQDecodeStep(inputs, outputType, cfg)
+		if err != nil {
+			return backend.StepDispatchResult{}, false, err
+		}
+		return result, true, nil
 	case mantaartifact.StepGDN, mantaartifact.StepIGDN:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
@@ -485,6 +511,68 @@ func planBuiltinConv2DTranspose(step mantaartifact.Step, inputs []*backend.Tenso
 	}, true
 }
 
+type cudaTurboQConfig struct {
+	bits     int
+	seed     int64
+	batches  int
+	channels int
+	height   int
+	width    int
+}
+
+func planBuiltinTurboQEncode(step mantaartifact.Step, inputs []*backend.Tensor) (cudaTurboQConfig, bool) {
+	if len(inputs) != 1 || inputs[0] == nil {
+		return cudaTurboQConfig{}, false
+	}
+	input := inputs[0]
+	if len(input.Shape) != 4 || len(input.F32) != input.Elements() {
+		return cudaTurboQConfig{}, false
+	}
+	bits := stepAttrInt(step.Attributes, "bits", 4)
+	if bits != 2 && bits != 4 && bits != 8 {
+		return cudaTurboQConfig{}, false
+	}
+	if input.Shape[1] < 2 {
+		return cudaTurboQConfig{}, false
+	}
+	return cudaTurboQConfig{
+		bits:     bits,
+		seed:     stepAttrInt64(step.Attributes, "seed", 0x4d697261),
+		batches:  input.Shape[0],
+		channels: input.Shape[1],
+		height:   input.Shape[2],
+		width:    input.Shape[3],
+	}, true
+}
+
+func planBuiltinTurboQDecode(step mantaartifact.Step, inputs []*backend.Tensor) (cudaTurboQConfig, bool) {
+	if len(inputs) != 2 || inputs[0] == nil || inputs[1] == nil {
+		return cudaTurboQConfig{}, false
+	}
+	coords, norms := inputs[0], inputs[1]
+	if len(coords.Shape) != 4 || len(norms.Shape) != 3 || len(coords.F32) != coords.Elements() || len(norms.F32) != norms.Elements() {
+		return cudaTurboQConfig{}, false
+	}
+	if norms.Shape[0] != coords.Shape[0] || norms.Shape[1] != coords.Shape[2] || norms.Shape[2] != coords.Shape[3] {
+		return cudaTurboQConfig{}, false
+	}
+	bits := stepAttrInt(step.Attributes, "bits", cudaBitsForQTensor(coords))
+	if bits != 2 && bits != 4 && bits != 8 {
+		return cudaTurboQConfig{}, false
+	}
+	if coords.Shape[1] < 2 {
+		return cudaTurboQConfig{}, false
+	}
+	return cudaTurboQConfig{
+		bits:     bits,
+		seed:     stepAttrInt64(step.Attributes, "seed", 0x4d697261),
+		batches:  coords.Shape[0],
+		channels: coords.Shape[1],
+		height:   coords.Shape[2],
+		width:    coords.Shape[3],
+	}, true
+}
+
 func supportsBuiltinMSELoss(inputs []*backend.Tensor) bool {
 	if len(inputs) != 2 || inputs[0] == nil || inputs[1] == nil {
 		return false
@@ -731,6 +819,21 @@ func stepAttrFloat32(attrs map[string]string, key string, fallback float32) floa
 		return fallback
 	}
 	return float32(value)
+}
+
+func stepAttrInt64(attrs map[string]string, key string, fallback int64) int64 {
+	if attrs == nil {
+		return fallback
+	}
+	raw := attrs[key]
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return value
 }
 
 func shouldFallbackScoreKernel(kernel mantaartifact.Kernel, inputs []*backend.Tensor) bool {

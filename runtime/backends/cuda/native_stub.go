@@ -48,6 +48,14 @@ func (rt *deviceRuntime) runConv2DTransposeStep(inputs []*backend.Tensor, output
 	return backend.StepDispatchResult{}, nil
 }
 
+func (rt *deviceRuntime) runTurboQEncodeStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaTurboQConfig) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+
+func (rt *deviceRuntime) runTurboQDecodeStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaTurboQConfig) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+
 func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }

@@ -210,7 +210,6 @@ func turboQuantEncodeTensor(input *Tensor, attrs map[string]string) (*Tensor, *T
 	coords := tensorForDType(fmt.Sprintf("q%d", bits), append([]int(nil), input.Shape...), input.Elements())
 	norms := NewTensorQNorm([]int{n, height, width}, make([]float32, n*height*width))
 	q := turboquant.NewHadamardWithSeed(channels, bits, seed)
-	packed := make([]byte, turboquant.PackedSize(channels, bits))
 	indices := make([]int, channels)
 	vec := make([]float32, channels)
 	for b := 0; b < n; b++ {
@@ -219,8 +218,7 @@ func turboQuantEncodeTensor(input *Tensor, attrs map[string]string) (*Tensor, *T
 				for c := 0; c < channels; c++ {
 					vec[c] = input.F32[offset4(input.Shape, b, c, y, x)]
 				}
-				norm := q.QuantizeTo(packed, vec)
-				unpackIndices(indices, packed, channels, bits)
+				norm := q.QuantizeIndicesTo(indices, vec)
 				for c := 0; c < channels; c++ {
 					coords.F32[offset4(coords.Shape, b, c, y, x)] = float32(indices[c])
 				}
@@ -249,7 +247,6 @@ func turboQuantDecodeTensor(coords, norms *Tensor, attrs map[string]string) (*Te
 	seed := int64(attrInt(attrs, "seed", 0x4d697261))
 	out := NewTensorF16(append([]int(nil), coords.Shape...), make([]float32, coords.Elements()))
 	q := turboquant.NewHadamardWithSeed(channels, bits, seed)
-	packed := make([]byte, turboquant.PackedSize(channels, bits))
 	indices := make([]int, channels)
 	vec := make([]float32, channels)
 	for b := 0; b < n; b++ {
@@ -258,8 +255,7 @@ func turboQuantDecodeTensor(coords, norms *Tensor, attrs map[string]string) (*Te
 				for c := 0; c < channels; c++ {
 					indices[c] = clampInt(int(math.Round(float64(coords.F32[offset4(coords.Shape, b, c, y, x)]))), 0, (1<<bits)-1)
 				}
-				packIndices(packed, indices, bits)
-				q.DequantizeTo(vec, packed)
+				q.DequantizeIndicesTo(vec, indices)
 				norm := dequantizeQNorm(byte(clampInt(int(math.Round(float64(norms.F32[(b*height+y)*width+x]))), 0, 255)))
 				for c := 0; c < channels; c++ {
 					out.F32[offset4(out.Shape, b, c, y, x)] = vec[c] * norm
@@ -733,43 +729,6 @@ func quantizeQNorm(norm float32) byte {
 func dequantizeQNorm(encoded byte) float32 {
 	t := float64(encoded) / 255
 	return float32(math.Exp(qNormLogMin + t*(qNormLogMax-qNormLogMin)))
-}
-
-func packIndices(dst []byte, indices []int, bitWidth int) {
-	for i := range dst {
-		dst[i] = 0
-	}
-	switch bitWidth {
-	case 2:
-		for i, idx := range indices {
-			dst[i/4] |= byte(idx&3) << uint((i%4)*2)
-		}
-	case 4:
-		for i, idx := range indices {
-			dst[i/2] |= byte(idx&15) << uint((i%2)*4)
-		}
-	case 8:
-		for i, idx := range indices {
-			dst[i] = byte(idx)
-		}
-	}
-}
-
-func unpackIndices(indices []int, src []byte, count, bitWidth int) {
-	switch bitWidth {
-	case 2:
-		for i := 0; i < count; i++ {
-			indices[i] = int((src[i/4] >> uint((i%4)*2)) & 3)
-		}
-	case 4:
-		for i := 0; i < count; i++ {
-			indices[i] = int((src[i/2] >> uint((i%2)*4)) & 15)
-		}
-	case 8:
-		for i := 0; i < count; i++ {
-			indices[i] = int(src[i])
-		}
-	}
 }
 
 func clampInt(v, lo, hi int) int {
