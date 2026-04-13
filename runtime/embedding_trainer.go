@@ -1329,6 +1329,43 @@ type embeddingBatchSequenceSlot struct {
 	sequence *embeddingBatchSequence
 }
 
+func embeddingBatchSequenceKey(tokens, mask []int32) string {
+	var b strings.Builder
+	b.Grow((len(tokens)+len(mask))*4 + 1)
+	writeInt32KeyPart(&b, tokens)
+	b.WriteByte('|')
+	writeInt32KeyPart(&b, mask)
+	return b.String()
+}
+
+func writeInt32KeyPart(b *strings.Builder, values []int32) {
+	for _, value := range values {
+		b.WriteByte(byte(value))
+		b.WriteByte(byte(value >> 8))
+		b.WriteByte(byte(value >> 16))
+		b.WriteByte(byte(value >> 24))
+	}
+}
+
+func (t *EmbeddingTrainer) cachedEmbeddingBatchSequence(cache map[string]*embeddingBatchSequence, sequences *[]*embeddingBatchSequence, groups map[int][]embeddingBatchSequenceSlot, lengths *[]int, tokens, mask []int32, tokenEmbed *backend.Tensor) (*embeddingBatchSequence, error) {
+	key := embeddingBatchSequenceKey(tokens, mask)
+	if sequence, ok := cache[key]; ok {
+		return sequence, nil
+	}
+	sequence, err := t.newEmbeddingBatchSequence(tokens, mask, tokenEmbed)
+	if err != nil {
+		return nil, err
+	}
+	cache[key] = sequence
+	*sequences = append(*sequences, sequence)
+	seqLen := len(sequence.tokens)
+	if _, ok := groups[seqLen]; !ok {
+		*lengths = append(*lengths, seqLen)
+	}
+	groups[seqLen] = append(groups[seqLen], embeddingBatchSequenceSlot{sequence: sequence})
+	return sequence, nil
+}
+
 func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []EmbeddingContrastiveExample, forward *embeddingForwardWeights, captureBindings bool) ([]*embeddingEncodedSequence, []*embeddingEncodedSequence, bool, error) {
 	if t == nil || t.forwardMatMul == nil || forward == nil || len(batch) == 0 || !batchedContrastiveForwardEnabled() {
 		return nil, nil, false, nil
@@ -1338,6 +1375,7 @@ func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []Embed
 	positives := make([]*embeddingEncodedSequence, len(batch))
 	groups := map[int][]embeddingBatchSequenceSlot{}
 	lengths := make([]int, 0)
+	sequenceCache := map[string]*embeddingBatchSequence{}
 	for i, example := range batch {
 		queryMask, err := t.prepareMask(example.QueryTokens, example.QueryMask)
 		if err != nil {
@@ -1347,27 +1385,18 @@ func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []Embed
 		if err != nil {
 			return nil, nil, true, fmt.Errorf("batch %d positive: %w", i, err)
 		}
-		query, err := t.newEmbeddingBatchSequence(example.QueryTokens, queryMask, forward.token)
+		query, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, example.QueryTokens, queryMask, forward.token)
 		if err != nil {
 			t.releaseBatchEncodedSequences(sequences)
 			return nil, nil, true, fmt.Errorf("batch %d query: %w", i, err)
 		}
-		sequences = append(sequences, query)
-		positive, err := t.newEmbeddingBatchSequence(example.PositiveTokens, positiveMask, forward.token)
+		positive, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, example.PositiveTokens, positiveMask, forward.token)
 		if err != nil {
 			t.releaseBatchEncodedSequences(sequences)
 			return nil, nil, true, fmt.Errorf("batch %d positive: %w", i, err)
 		}
 		queries[i] = query.encoded
 		positives[i] = positive.encoded
-		sequences = append(sequences, positive)
-		for _, sequence := range []*embeddingBatchSequence{query, positive} {
-			seqLen := len(sequence.tokens)
-			if _, ok := groups[seqLen]; !ok {
-				lengths = append(lengths, seqLen)
-			}
-			groups[seqLen] = append(groups[seqLen], embeddingBatchSequenceSlot{sequence: sequence})
-		}
 	}
 	if len(sequences) == 0 {
 		return nil, nil, false, nil
@@ -1388,6 +1417,7 @@ func (t *EmbeddingTrainer) tryEncodePairBatchBatchedForward(batch []EmbeddingPai
 	rights := make([]*embeddingEncodedSequence, len(batch))
 	groups := map[int][]embeddingBatchSequenceSlot{}
 	lengths := make([]int, 0)
+	sequenceCache := map[string]*embeddingBatchSequence{}
 	for i, example := range batch {
 		leftMask, err := t.prepareMask(example.LeftTokens, example.LeftMask)
 		if err != nil {
@@ -1397,27 +1427,18 @@ func (t *EmbeddingTrainer) tryEncodePairBatchBatchedForward(batch []EmbeddingPai
 		if err != nil {
 			return nil, nil, true, fmt.Errorf("batch %d right: %w", i, err)
 		}
-		left, err := t.newEmbeddingBatchSequence(example.LeftTokens, leftMask, forward.token)
+		left, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, example.LeftTokens, leftMask, forward.token)
 		if err != nil {
 			t.releaseBatchEncodedSequences(sequences)
 			return nil, nil, true, fmt.Errorf("batch %d left: %w", i, err)
 		}
-		sequences = append(sequences, left)
-		right, err := t.newEmbeddingBatchSequence(example.RightTokens, rightMask, forward.token)
+		right, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, example.RightTokens, rightMask, forward.token)
 		if err != nil {
 			t.releaseBatchEncodedSequences(sequences)
 			return nil, nil, true, fmt.Errorf("batch %d right: %w", i, err)
 		}
 		lefts[i] = left.encoded
 		rights[i] = right.encoded
-		sequences = append(sequences, right)
-		for _, sequence := range []*embeddingBatchSequence{left, right} {
-			seqLen := len(sequence.tokens)
-			if _, ok := groups[seqLen]; !ok {
-				lengths = append(lengths, seqLen)
-			}
-			groups[seqLen] = append(groups[seqLen], embeddingBatchSequenceSlot{sequence: sequence})
-		}
 	}
 	if len(sequences) == 0 {
 		return nil, nil, false, nil

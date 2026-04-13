@@ -2120,8 +2120,8 @@ func TestEmbeddingTrainerEvaluatePairsUsesBatchedForwardChunks(t *testing.T) {
 	trainer.forwardMatMul = fake
 
 	batch := []EmbeddingPairExample{
-		{LeftTokens: []int32{0, 2}, RightTokens: []int32{0, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 1},
-		{LeftTokens: []int32{1, 2}, RightTokens: []int32{1, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 1},
+		{LeftTokens: []int32{0, 2}, RightTokens: []int32{1, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 1},
+		{LeftTokens: []int32{2, 0}, RightTokens: []int32{2, 1}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 1},
 		{LeftTokens: []int32{0, 2}, RightTokens: []int32{1, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: -1},
 	}
 	metrics, err := trainer.EvaluatePairs(batch)
@@ -2191,6 +2191,41 @@ func TestEmbeddingTrainerTrainContrastiveStepEncodesEachSequenceOncePerBatch(t *
 	}
 	if fake.maxBoundRightRows < 6 {
 		t.Fatalf("max bound-right lhs rows = %d, want batched rows", fake.maxBoundRightRows)
+	}
+}
+
+func TestEmbeddingTrainerBatchedForwardReusesDuplicateSequences(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+	batch := []EmbeddingContrastiveExample{
+		{QueryTokens: []int32{0, 2}, PositiveTokens: []int32{1, 2}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}},
+		{QueryTokens: []int32{0, 2}, PositiveTokens: []int32{1, 2}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}},
+		{QueryTokens: []int32{0, 2}, PositiveTokens: []int32{2, 2}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}},
+	}
+
+	forward := trainer.prepareForwardWeights()
+	trainer.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	queries, positives, err := trainer.encodeContrastiveBatch(batch, forward, true)
+	if err != nil {
+		t.Fatalf("encode contrastive batch: %v", err)
+	}
+	defer trainer.releaseEncodedSequences(queries)
+	defer trainer.releaseEncodedSequences(positives)
+	if queries[0] != queries[1] || queries[1] != queries[2] {
+		t.Fatalf("duplicate query token sequences were not reused")
+	}
+	if positives[0] != positives[1] {
+		t.Fatalf("duplicate positive token sequences were not reused")
+	}
+	if positives[2] == positives[0] {
+		t.Fatalf("distinct positive token sequence reused duplicate encoding")
+	}
+	if fake.maxBoundRightRows != 6 {
+		t.Fatalf("max bound-right lhs rows = %d, want only 3 unique sequences of length 2", fake.maxBoundRightRows)
 	}
 }
 
