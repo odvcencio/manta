@@ -87,6 +87,7 @@ Common knobs:
   MANTA_TEMPERATURE=0.05
   MANTA_SELECT_METRIC=score_margin
   MANTA_EVAL_EVERY_STEPS=0
+  MANTA_PRETOKENIZE_JSONL=0
   MANTA_MIN_AUC=0.70
   MANTA_MIN_THRESHOLD_ACCURACY=0.65
   MANTA_MIN_TRAIN_PAIRS_PER_SEC=85000
@@ -728,7 +729,10 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	trainTokenizer := cfg.TokenizerPath
 	evalTokenizer := tokenizerForEval
 	tokenJSONLForRun := false
-	if cfg.TrainMode == "prepared_jsonl" && tokenizerForEval != "" {
+	if cfg.TrainMode == "prepared_jsonl" && trainTokenizer == "" && tokenizerForEval != "" {
+		trainTokenizer = tokenizerForEval
+	}
+	if cfg.TrainMode == "prepared_jsonl" && tokenizerForEval != "" && envEnabled("MANTA_PRETOKENIZE_JSONL") {
 		trainJSONLForRun = filepath.Join(cfg.RunDir, cfg.ModelName+".train.tokens.jsonl")
 		evalJSONLForRun = filepath.Join(cfg.RunDir, cfg.ModelName+".eval.tokens.jsonl")
 		err = runCmd(cfg, "Tokenize prepared train JSONL", "tokenize-train.log", cfg.MantaBin, []string{
