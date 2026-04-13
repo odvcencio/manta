@@ -3258,31 +3258,45 @@ func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightName
 
 	compiled := cudaBuiltinMatMulCompiledKernel()
 	runStart := time.Now()
-	runUploadedBytes := int64(len(lhs.F32) * 4)
+	firstRunUploadedBytes := int64(len(lhs.F32) * 4)
 	lhsBuf, err := rt.uploadMatMulScratchFloat32("matmul_lhs", lhs.F32)
 	if err != nil {
 		return nil, err
 	}
 	results := make([]backend.StepDispatchResult, len(plans))
+	outHosts := make([][]float32, len(plans))
+	outBufs := make([]C.CUdeviceptr, len(plans))
+	runStarts := make([]time.Time, len(plans))
+	runUploadedBytes := make([]int64, len(plans))
 	for i, plan := range plans {
-		if i > 0 {
-			runStart = time.Now()
-			runUploadedBytes = 0
-		}
 		outHost := make([]float32, plan.batches*plan.rows*plan.cols)
-		outBuf, err := rt.matMulScratchFloat32("matmul_out", len(outHost))
+		outBuf, err := rt.matMulScratchFloat32(fmt.Sprintf("matmul_out_bound_right_%d", i), len(outHost))
 		if err != nil {
 			return nil, err
 		}
-		if err := rt.matMulCublas(lhsBuf, plan.resident.ptr, outBuf, C.int(plan.lhsRows), C.int(plan.lhsCols), C.int(plan.rhsRows), C.int(plan.rhsCols), transposeLeft, transposeRight); err != nil {
+		uploadedBytes := firstRunUploadedBytes
+		if i > 0 {
+			runStart = time.Now()
+			uploadedBytes = 0
+		}
+		runStarts[i] = runStart
+		runUploadedBytes[i] = uploadedBytes
+		outHosts[i] = outHost
+		outBufs[i] = outBuf
+		if err := rt.matMulCublasWithBetaNoSync(lhsBuf, plan.resident.ptr, outBuf, C.int(plan.lhsRows), C.int(plan.lhsCols), C.int(plan.rhsRows), C.int(plan.rhsCols), transposeLeft, transposeRight, 0); err != nil {
 			return nil, err
 		}
-		if err := rt.downloadFloat32(outHost, outBuf); err != nil {
+	}
+	if err := rt.synchronize(); err != nil {
+		return nil, err
+	}
+	for i, plan := range plans {
+		if err := rt.downloadFloat32(outHosts[i], outBufs[i]); err != nil {
 			return nil, err
 		}
-		rt.recordMatMulRun(runStart, runUploadedBytes, plan.downloadedBytes, false, true)
+		rt.recordMatMulRun(runStarts[i], runUploadedBytes[i], plan.downloadedBytes, false, true)
 		results[i] = backend.StepDispatchResult{
-			Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, plan.outShape, outHost)},
+			Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, plan.outShape, outHosts[i])},
 			VariantEntry: compiled.Entry,
 			SourceHash:   compiled.SourceHash,
 			Metadata: map[string]any{
@@ -3503,18 +3517,30 @@ func (rt *deviceRuntime) runMatMulsWithSharedLeft(lhs *backend.Tensor, rhsInputs
 		return nil, err
 	}
 	results := make([]backend.StepDispatchResult, len(plans))
+	canDeferSync := true
+	for _, plan := range plans {
+		if plan.rhsBatched {
+			canDeferSync = false
+			break
+		}
+	}
+	outHosts := make([][]float32, len(plans))
+	outBufs := make([]C.CUdeviceptr, len(plans))
+	runStarts := make([]time.Time, len(plans))
+	runUploadedBytes := make([]int64, len(plans))
+	launchAPIs := make([]string, len(plans))
 	for i, plan := range plans {
 		runStart := time.Now()
-		runUploadedBytes := int64(len(plan.rhs.F32) * 4)
+		uploadedBytes := int64(len(plan.rhs.F32) * 4)
 		if i == 0 {
-			runUploadedBytes += int64(len(lhs.F32) * 4)
+			uploadedBytes += int64(len(lhs.F32) * 4)
 		}
-		rhsBuf, err := rt.uploadMatMulScratchFloat32("matmul_rhs", plan.rhs.F32)
+		rhsBuf, err := rt.uploadMatMulScratchFloat32(fmt.Sprintf("matmul_rhs_shared_left_%d", i), plan.rhs.F32)
 		if err != nil {
 			return nil, err
 		}
 		outHost := make([]float32, plan.batches*plan.rows*plan.cols)
-		outBuf, err := rt.matMulScratchFloat32("matmul_out", len(outHost))
+		outBuf, err := rt.matMulScratchFloat32(fmt.Sprintf("matmul_out_shared_left_%d", i), len(outHost))
 		if err != nil {
 			return nil, err
 		}
@@ -3524,22 +3550,50 @@ func (rt *deviceRuntime) runMatMulsWithSharedLeft(lhs *backend.Tensor, rhsInputs
 				return nil, err
 			}
 			launchAPI = "cublasSgemmStridedBatched"
-		} else if err := rt.matMulCublas(lhsBuf, rhsBuf, outBuf, C.int(plan.lhsRows), C.int(plan.lhsCols), C.int(plan.rhsRows), C.int(plan.rhsCols), transposeLeft, transposeRight); err != nil {
+			if err := rt.downloadFloat32(outHost, outBuf); err != nil {
+				return nil, err
+			}
+		} else {
+			if canDeferSync {
+				if err := rt.matMulCublasWithBetaNoSync(lhsBuf, rhsBuf, outBuf, C.int(plan.lhsRows), C.int(plan.lhsCols), C.int(plan.rhsRows), C.int(plan.rhsCols), transposeLeft, transposeRight, 0); err != nil {
+					return nil, err
+				}
+			} else if err := rt.matMulCublas(lhsBuf, rhsBuf, outBuf, C.int(plan.lhsRows), C.int(plan.lhsCols), C.int(plan.rhsRows), C.int(plan.rhsCols), transposeLeft, transposeRight); err != nil {
+				return nil, err
+			}
+			if !canDeferSync {
+				if err := rt.downloadFloat32(outHost, outBuf); err != nil {
+					return nil, err
+				}
+			}
+		}
+		outHosts[i] = outHost
+		outBufs[i] = outBuf
+		runStarts[i] = runStart
+		runUploadedBytes[i] = uploadedBytes
+		launchAPIs[i] = launchAPI
+	}
+	if canDeferSync {
+		if err := rt.synchronize(); err != nil {
 			return nil, err
 		}
-		if err := rt.downloadFloat32(outHost, outBuf); err != nil {
-			return nil, err
+		for i := range plans {
+			if err := rt.downloadFloat32(outHosts[i], outBufs[i]); err != nil {
+				return nil, err
+			}
 		}
-		rt.recordMatMulRun(runStart, runUploadedBytes, plan.downloadedBytes, false, false)
+	}
+	for i, plan := range plans {
+		rt.recordMatMulRun(runStarts[i], runUploadedBytes[i], plan.downloadedBytes, false, false)
 		results[i] = backend.StepDispatchResult{
-			Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, plan.outShape, outHost)},
+			Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, plan.outShape, outHosts[i])},
 			VariantEntry: compiled.Entry,
 			SourceHash:   compiled.SourceHash,
 			Metadata: map[string]any{
 				"dispatch_mode":    "backend_native",
 				"execution_mode":   "cuda_device",
 				"device_execution": true,
-				"launch_api":       launchAPI,
+				"launch_api":       launchAPIs[i],
 				"launch_compiler":  "cublas",
 				"backend_library":  "cublas",
 				"transpose_left":   transposeLeft,
