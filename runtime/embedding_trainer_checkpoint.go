@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"encoding/json"
@@ -6,7 +6,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 	mll "github.com/odvcencio/mll"
 )
@@ -53,8 +53,8 @@ type checkpointMLLMetadata struct {
 }
 
 // DefaultEmbeddingCheckpointPath returns the conventional sibling checkpoint path for an artifact.
-func DefaultEmbeddingCheckpointPath(barrPath string) string {
-	return defaultManifestPath(barrPath, ".embed-train.mll")
+func DefaultEmbeddingCheckpointPath(artifactPath string) string {
+	return defaultManifestPath(artifactPath, ".embed-train.mll")
 }
 
 // Checkpoint snapshots the current training state.
@@ -112,7 +112,7 @@ func ReadEmbeddingTrainCheckpointFile(path string) (EmbeddingTrainCheckpoint, er
 	if err != nil {
 		return EmbeddingTrainCheckpoint{}, err
 	}
-	if !barr.IsMLLBytes(data) {
+	if !mantaartifact.IsMLLBytes(data) {
 		return EmbeddingTrainCheckpoint{}, fmt.Errorf("checkpoint %q is not an MLL file", path)
 	}
 	return decodeEmbeddingCheckpointMLL(data)
@@ -184,7 +184,7 @@ func encodeEmbeddingCheckpointMLL(c EmbeddingTrainCheckpoint) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		typeIdx := typeBuilder.AddTensorType(strg.Intern("entry:"+name), mustBarrDTypeToMLL(tensor.DType), shape)
+		typeIdx := typeBuilder.AddTensorType(strg.Intern("entry:"+name), mustMantaDTypeToMLL(tensor.DType), shape)
 		outputs = append(outputs, mll.ValueBinding{
 			NameIdx: strg.Intern(name),
 			TypeRef: mll.Ref{Tag: mll.TagTYPE, Index: typeIdx},
@@ -434,8 +434,8 @@ func nonEmptyCheckpointName(name string) string {
 	return "manta-train-checkpoint"
 }
 
-func mustBarrDTypeToMLL(dtype string) mll.DType {
-	value, err := barrDTypeToMLL(dtype)
+func mustMantaDTypeToMLL(dtype string) mll.DType {
+	value, err := mantaDTypeToMLL(dtype)
 	if err != nil {
 		return mll.DTypeF32
 	}
@@ -527,7 +527,7 @@ func (c EmbeddingTrainCheckpoint) Validate() error {
 }
 
 // NewEmbeddingTrainerFromCheckpoint restores a trainer from a checkpoint and module contract.
-func NewEmbeddingTrainerFromCheckpoint(mod *barr.Module, checkpoint EmbeddingTrainCheckpoint) (*EmbeddingTrainer, error) {
+func NewEmbeddingTrainerFromCheckpoint(mod *mantaartifact.Module, checkpoint EmbeddingTrainCheckpoint) (*EmbeddingTrainer, error) {
 	if err := checkpoint.Validate(); err != nil {
 		return nil, err
 	}
@@ -668,14 +668,14 @@ func validateCheckpointAttention(c EmbeddingTrainCheckpoint) error {
 	return nil
 }
 
-func requireTrainableParamByName(mod *barr.Module, name string) (barr.Param, error) {
+func requireTrainableParamByName(mod *mantaartifact.Module, name string) (mantaartifact.Param, error) {
 	if mod == nil {
-		return barr.Param{}, fmt.Errorf("nil module")
+		return mantaartifact.Param{}, fmt.Errorf("nil module")
 	}
 	for _, param := range mod.Params {
 		if param.Name == name {
 			return param, nil
 		}
 	}
-	return barr.Param{}, fmt.Errorf("missing param %q", name)
+	return mantaartifact.Param{}, fmt.Errorf("missing param %q", name)
 }

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 )
 
 func TestBuildTinyEmbedSource(t *testing.T) {
@@ -63,7 +63,7 @@ func TestKernelVariantsFollowBackendEmitterTable(t *testing.T) {
 	if got := len(kernel.Variants); got != len(kernelBackendEmitters) {
 		t.Fatalf("variant count = %d, want backend emitter count %d", got, len(kernelBackendEmitters))
 	}
-	byBackend := map[barr.BackendKind]barr.KernelVariant{}
+	byBackend := map[mantaartifact.BackendKind]mantaartifact.KernelVariant{}
 	for _, variant := range kernel.Variants {
 		byBackend[variant.Backend] = variant
 	}
@@ -477,8 +477,8 @@ func TestBuildTinyScoreSource(t *testing.T) {
 	if got := len(kernel.Variants); got != len(kernelBackendEmitters) {
 		t.Fatalf("variant count = %d, want backend emitter count %d", got, len(kernelBackendEmitters))
 	}
-	cudaVariant := kernelVariantByBackend(t, kernel, barr.BackendCUDA)
-	metalVariant := kernelVariantByBackend(t, kernel, barr.BackendMetal)
+	cudaVariant := kernelVariantByBackend(t, kernel, mantaartifact.BackendCUDA)
+	metalVariant := kernelVariantByBackend(t, kernel, mantaartifact.BackendMetal)
 	if !strings.Contains(cudaVariant.Source, "const float* query") || !strings.Contains(metalVariant.Source, "const device float* query") {
 		t.Fatalf("expected emitted score kernel sources, got %+v", kernel.Variants)
 	}
@@ -531,8 +531,8 @@ pipeline ffn(x: f16[T, D], w: f16[D, E]) -> f16[T, E] {
 	if got := len(kernel.Variants); got != len(kernelBackendEmitters) {
 		t.Fatalf("variant count = %d, want backend emitter count %d", got, len(kernelBackendEmitters))
 	}
-	cudaVariant := kernelVariantByBackend(t, kernel, barr.BackendCUDA)
-	metalVariant := kernelVariantByBackend(t, kernel, barr.BackendMetal)
+	cudaVariant := kernelVariantByBackend(t, kernel, mantaartifact.BackendCUDA)
+	metalVariant := kernelVariantByBackend(t, kernel, mantaartifact.BackendMetal)
 	if !strings.Contains(cudaVariant.Source, "tanhf") || !strings.Contains(metalVariant.Source, "tanh(") {
 		t.Fatalf("expected emitted gelu backend sources, got %+v", kernel.Variants)
 	}
@@ -972,14 +972,14 @@ pipeline deq(x: q4[T, D]) -> f16[T, D] {
 	if got := len(kernel.Variants); got != len(kernelBackendEmitters) {
 		t.Fatalf("variant count = %d, want backend emitter count %d", got, len(kernelBackendEmitters))
 	}
-	cudaVariant := kernelVariantByBackend(t, kernel, barr.BackendCUDA)
-	metalVariant := kernelVariantByBackend(t, kernel, barr.BackendMetal)
+	cudaVariant := kernelVariantByBackend(t, kernel, mantaartifact.BackendCUDA)
+	metalVariant := kernelVariantByBackend(t, kernel, mantaartifact.BackendMetal)
 	if !strings.Contains(cudaVariant.Source, "_cuda(") || !strings.Contains(metalVariant.Source, "_metal(") {
 		t.Fatalf("expected emitted CUDA and Metal dequant sources, got %+v", kernel.Variants)
 	}
 }
 
-func kernelVariantByBackend(t *testing.T, kernel barr.Kernel, kind barr.BackendKind) barr.KernelVariant {
+func kernelVariantByBackend(t *testing.T, kernel mantaartifact.Kernel, kind mantaartifact.BackendKind) mantaartifact.KernelVariant {
 	t.Helper()
 	for _, variant := range kernel.Variants {
 		if variant.Backend == kind {
@@ -987,10 +987,10 @@ func kernelVariantByBackend(t *testing.T, kernel barr.Kernel, kind barr.BackendK
 		}
 	}
 	t.Fatalf("missing variant for backend %q in %+v", kind, kernel.Variants)
-	return barr.KernelVariant{}
+	return mantaartifact.KernelVariant{}
 }
 
-func assertAllKernelVariantSources(t *testing.T, kernel barr.Kernel) {
+func assertAllKernelVariantSources(t *testing.T, kernel mantaartifact.Kernel) {
 	t.Helper()
 	if len(kernel.Variants) != len(kernelBackendEmitters) {
 		t.Fatalf("variant count = %d, want backend emitter count %d", len(kernel.Variants), len(kernelBackendEmitters))

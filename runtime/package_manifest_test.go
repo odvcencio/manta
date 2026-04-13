@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/compiler"
 	"github.com/odvcencio/manta/runtime/backend"
 	"github.com/odvcencio/manta/runtime/backends/cuda"
@@ -33,7 +33,7 @@ func TestPackageManifestRoundTripAndVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if err := barr.WriteFile(artifactPath, bundle.Artifact); err != nil {
+	if err := mantaartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 	if err := tinyEmbeddingManifest().WriteFile(manifestPath); err != nil {
@@ -100,7 +100,7 @@ func TestPackageManifestRoundTripAndVerifyWithTokenizer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if err := barr.WriteFile(artifactPath, bundle.Artifact); err != nil {
+	if err := mantaartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 	if err := tinyEmbeddingManifest().WriteFile(manifestPath); err != nil {

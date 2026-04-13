@@ -3,7 +3,7 @@
 package metal
 
 import (
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -15,7 +15,7 @@ func newDeviceRuntime() (*deviceRuntime, error) {
 
 func (rt *deviceRuntime) close() {}
 
-func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram, kernel barr.Kernel) error {
+func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram, kernel mantaartifact.Kernel) error {
 	if prog.LaunchConfig == nil {
 		prog.LaunchConfig = map[string]any{}
 	}
@@ -24,10 +24,10 @@ func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram
 	return nil
 }
 
-func (rt *deviceRuntime) runMatMul(inputs []*backend.Tensor, outputType barr.ValueType) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMul(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }

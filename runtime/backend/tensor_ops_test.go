@@ -4,12 +4,12 @@ import (
 	"math"
 	"testing"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 )
 
 func TestMaterializeValueTensor(t *testing.T) {
 	value, err := MaterializeValue(
-		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
+		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
 		NewTensorF16([]int{2, 2}, []float32{1, 2, 3, 4}),
 	)
 	if err != nil {
@@ -26,7 +26,7 @@ func TestMaterializeValueTensor(t *testing.T) {
 
 func TestMaterializeValueTensorI64(t *testing.T) {
 	value, err := MaterializeValue(
-		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "i64", Shape: []string{"T"}}},
+		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "i64", Shape: []string{"T"}}},
 		NewTensorI64([]int{3}, []int64{101, 202, 303}),
 	)
 	if err != nil {
@@ -43,7 +43,7 @@ func TestMaterializeValueTensorI64(t *testing.T) {
 
 func TestMaterializeValueCandidatePack(t *testing.T) {
 	value, err := MaterializeValue(
-		barr.ValueType{Kind: barr.ValueCandidatePack, CandidatePack: &barr.CandidatePackType{Shape: []string{"K", "D"}}},
+		mantaartifact.ValueType{Kind: mantaartifact.ValueCandidatePack, CandidatePack: &mantaartifact.CandidatePackType{Shape: []string{"K", "D"}}},
 		NewCandidatePack(
 			NewTensorI64([]int{2}, []int64{1001, 3003}),
 			NewTensorF32([]int{2}, []float32{1, 0.70710677}),
@@ -65,7 +65,7 @@ func TestMaterializeValueCandidatePack(t *testing.T) {
 func TestMaterializeValueWithBindingsBindsSymbols(t *testing.T) {
 	bindings := map[string]int{}
 	_, concrete, err := MaterializeValueWithBindings(
-		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
+		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
 		NewTensorF16([]int{2, 4}, []float32{1, 2, 3, 4, 5, 6, 7, 8}),
 		bindings,
 	)
@@ -83,7 +83,7 @@ func TestMaterializeValueWithBindingsBindsSymbols(t *testing.T) {
 func TestMaterializeValueWithBindingsRejectsMismatch(t *testing.T) {
 	bindings := map[string]int{"D": 2}
 	_, _, err := MaterializeValueWithBindings(
-		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
+		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
 		NewTensorF16([]int{2, 3}, []float32{1, 2, 3, 4, 5, 6}),
 		bindings,
 	)
@@ -96,7 +96,7 @@ func TestPreviewValueWithBindingsReusesTensorPointer(t *testing.T) {
 	bindings := map[string]int{}
 	input := NewTensorF16([]int{2, 2}, []float32{1, 2, 3, 4})
 	value, concrete, err := PreviewValueWithBindings(
-		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
+		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
 		input,
 		bindings,
 	)
@@ -595,9 +595,9 @@ func TestGatherTensorRank2SharedWithRank2Indices(t *testing.T) {
 		0, 2,
 		1, 0,
 	})
-	out, err := gatherTensor(table, indices, barr.ValueType{
-		Kind: barr.ValueTensor,
-		Tensor: &barr.TensorType{
+	out, err := gatherTensor(table, indices, mantaartifact.ValueType{
+		Kind: mantaartifact.ValueTensor,
+		Tensor: &mantaartifact.TensorType{
 			DType: "f16",
 			Shape: []string{"B", "T", "D"},
 		},

@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/ir/hir"
 	"github.com/odvcencio/manta/ir/lir"
 	"github.com/odvcencio/manta/ir/mir"
@@ -42,7 +42,7 @@ type Bundle struct {
 	HIR      *hir.Module
 	MIR      *mir.Module
 	LIR      *lir.Plan
-	Artifact *barr.Module
+	Artifact *mantaartifact.Module
 }
 
 // Build runs the current stub pipeline and produces a minimal executable artifact.
@@ -189,16 +189,16 @@ func lowerLIR(file *syntax.File, h *hir.Module, m *mir.Module) (*lir.Plan, error
 	return plan, nil
 }
 
-func lowerArtifact(file *syntax.File, h *hir.Module, plan *lir.Plan) (*barr.Module, error) {
-	mod := barr.NewModule(plan.Name)
+func lowerArtifact(file *syntax.File, h *hir.Module, plan *lir.Plan) (*mantaartifact.Module, error) {
+	mod := mantaartifact.NewModule(plan.Name)
 	for _, param := range plan.Params {
-		mod.Params = append(mod.Params, barr.Param{
+		mod.Params = append(mod.Params, mantaartifact.Param{
 			Name:      param.Name,
 			Binding:   param.Binding,
 			Trainable: param.Trainable,
-			Type: barr.ValueType{
-				Kind:   barr.ValueTensor,
-				Tensor: &barr.TensorType{DType: param.DType, Shape: param.Shape},
+			Type: mantaartifact.ValueType{
+				Kind:   mantaartifact.ValueTensor,
+				Tensor: &mantaartifact.TensorType{DType: param.DType, Shape: param.Shape},
 			},
 		})
 	}
@@ -206,17 +206,17 @@ func lowerArtifact(file *syntax.File, h *hir.Module, plan *lir.Plan) (*barr.Modu
 		if entry.Kind != hir.EntryPointPipeline {
 			continue
 		}
-		out := barr.EntryPoint{Name: entry.Name, Kind: barr.EntryPointPipeline}
+		out := mantaartifact.EntryPoint{Name: entry.Name, Kind: mantaartifact.EntryPointPipeline}
 		for _, input := range entry.Inputs {
-			out.Inputs = append(out.Inputs, barr.ValueBinding{Name: input.Name, Type: lowerArtifactValueType(input.Type)})
+			out.Inputs = append(out.Inputs, mantaartifact.ValueBinding{Name: input.Name, Type: lowerArtifactValueType(input.Type)})
 		}
 		for _, output := range entry.Outputs {
-			out.Outputs = append(out.Outputs, barr.ValueBinding{Name: output.Name, Type: lowerArtifactValueType(output.Type)})
+			out.Outputs = append(out.Outputs, mantaartifact.ValueBinding{Name: output.Name, Type: lowerArtifactValueType(output.Type)})
 		}
 		mod.EntryPoints = append(mod.EntryPoints, out)
 	}
 	for _, buf := range plan.Buffers {
-		mod.Buffers = append(mod.Buffers, barr.Buffer{
+		mod.Buffers = append(mod.Buffers, mantaartifact.Buffer{
 			Name:         buf.Name,
 			DType:        buf.DType,
 			Shape:        buf.Shape,
@@ -224,9 +224,9 @@ func lowerArtifact(file *syntax.File, h *hir.Module, plan *lir.Plan) (*barr.Modu
 		})
 	}
 	for _, kernel := range plan.Kernels {
-		out := barr.Kernel{
+		out := mantaartifact.Kernel{
 			Name: kernel.Name,
-			Hints: barr.ScheduleHints{
+			Hints: mantaartifact.ScheduleHints{
 				Tile:        append([]int(nil), kernel.Hints.Tile...),
 				VectorWidth: kernel.Hints.VectorWidth,
 				Subgroup:    kernel.Hints.Subgroup,
@@ -253,7 +253,7 @@ func lowerArtifact(file *syntax.File, h *hir.Module, plan *lir.Plan) (*barr.Modu
 	return mod, nil
 }
 
-func inferModuleCapabilities(mod *barr.Module) []string {
+func inferModuleCapabilities(mod *mantaartifact.Module) []string {
 	if mod == nil {
 		return nil
 	}
@@ -281,35 +281,35 @@ func inferModuleCapabilities(mod *barr.Module) []string {
 	for _, buf := range mod.Buffers {
 		switch buf.DType {
 		case "kv_cache":
-			add(barr.CapabilityKVCache)
+			add(mantaartifact.CapabilityKVCache)
 		case "candidate_pack":
-			add(barr.CapabilityCandidatePack)
+			add(mantaartifact.CapabilityCandidatePack)
 		}
 	}
 	for _, kernel := range mod.Kernels {
 		for _, op := range kernel.Body {
 			if op.Op == "mean_pool" && len(op.Inputs) > 1 {
-				add(barr.CapabilityMaskedMeanPool)
+				add(mantaartifact.CapabilityMaskedMeanPool)
 			}
 		}
 	}
 	for _, step := range mod.Steps {
 		switch step.Kind {
-		case barr.StepKVRead, barr.StepKVWrite:
-			add(barr.CapabilityKVCache)
-		case barr.StepPack:
-			add(barr.CapabilityCandidatePack)
+		case mantaartifact.StepKVRead, mantaartifact.StepKVWrite:
+			add(mantaartifact.CapabilityKVCache)
+		case mantaartifact.StepPack:
+			add(mantaartifact.CapabilityCandidatePack)
 		}
 	}
 	return out
 }
 
-func addCapabilitiesFromValueType(add func(string), v barr.ValueType) {
+func addCapabilitiesFromValueType(add func(string), v mantaartifact.ValueType) {
 	switch v.Kind {
-	case barr.ValueKVCache:
-		add(barr.CapabilityKVCache)
-	case barr.ValueCandidatePack:
-		add(barr.CapabilityCandidatePack)
+	case mantaartifact.ValueKVCache:
+		add(mantaartifact.CapabilityKVCache)
+	case mantaartifact.ValueCandidatePack:
+		add(mantaartifact.CapabilityCandidatePack)
 	}
 }
 
@@ -582,41 +582,41 @@ func lowerType(t syntax.TypeRef) hir.Type {
 	return hir.Type{Kind: hir.TypeTensor, Tensor: &hir.TensorType{DType: t.Name, Shape: lowerDims(t.Shape)}}
 }
 
-func lowerArtifactValueType(t hir.Type) barr.ValueType {
+func lowerArtifactValueType(t hir.Type) mantaartifact.ValueType {
 	switch t.Kind {
 	case hir.TypeKVCache:
-		return barr.ValueType{Kind: barr.ValueKVCache}
+		return mantaartifact.ValueType{Kind: mantaartifact.ValueKVCache}
 	case hir.TypeCandidatePack:
-		return barr.ValueType{
-			Kind:          barr.ValueCandidatePack,
-			CandidatePack: &barr.CandidatePackType{Shape: dimTexts(t.CandidatePack.Shape)},
+		return mantaartifact.ValueType{
+			Kind:          mantaartifact.ValueCandidatePack,
+			CandidatePack: &mantaartifact.CandidatePackType{Shape: dimTexts(t.CandidatePack.Shape)},
 		}
 	default:
-		return barr.ValueType{
-			Kind:   barr.ValueTensor,
-			Tensor: &barr.TensorType{DType: t.Tensor.DType, Shape: dimTexts(t.Tensor.Shape)},
+		return mantaartifact.ValueType{
+			Kind:   mantaartifact.ValueTensor,
+			Tensor: &mantaartifact.TensorType{DType: t.Tensor.DType, Shape: dimTexts(t.Tensor.Shape)},
 		}
 	}
 }
 
-func lowerArtifactKernelValue(v lir.Value) barr.ValueBinding {
+func lowerArtifactKernelValue(v lir.Value) mantaartifact.ValueBinding {
 	switch v.Kind {
 	case lir.ValueKVCache:
-		return barr.ValueBinding{Name: v.Name, Type: barr.ValueType{Kind: barr.ValueKVCache}}
+		return mantaartifact.ValueBinding{Name: v.Name, Type: mantaartifact.ValueType{Kind: mantaartifact.ValueKVCache}}
 	default:
-		return barr.ValueBinding{
+		return mantaartifact.ValueBinding{
 			Name: v.Name,
-			Type: barr.ValueType{
-				Kind:   barr.ValueTensor,
-				Tensor: &barr.TensorType{DType: v.DType, Shape: append([]string(nil), v.Shape...)},
+			Type: mantaartifact.ValueType{
+				Kind:   mantaartifact.ValueTensor,
+				Tensor: &mantaartifact.TensorType{DType: v.DType, Shape: append([]string(nil), v.Shape...)},
 			},
 		}
 	}
 }
 
-func lowerArtifactKernelOp(op lir.KernelOp) barr.KernelOp {
-	kind := barr.KernelOpKind(op.Kind)
-	return barr.KernelOp{
+func lowerArtifactKernelOp(op lir.KernelOp) mantaartifact.KernelOp {
+	kind := mantaartifact.KernelOpKind(op.Kind)
+	return mantaartifact.KernelOp{
 		Kind:       kind,
 		Name:       op.Name,
 		Op:         op.Op,
@@ -627,7 +627,7 @@ func lowerArtifactKernelOp(op lir.KernelOp) barr.KernelOp {
 }
 
 type kernelBackendEmitter struct {
-	backend         barr.BackendKind
+	backend         mantaartifact.BackendKind
 	suffix          string
 	prelude         string
 	signaturePrefix string
@@ -662,7 +662,7 @@ func (emitter kernelBackendEmitter) source(kernel lir.Kernel) string {
 
 var kernelBackendEmitters = []kernelBackendEmitter{
 	{
-		backend:         barr.BackendCUDA,
+		backend:         mantaartifact.BackendCUDA,
 		suffix:          "cuda",
 		prelude:         "#include <cuda_fp16.h>\n\n",
 		signaturePrefix: "extern \"C\" __global__ void ",
@@ -670,7 +670,7 @@ var kernelBackendEmitters = []kernelBackendEmitter{
 		native:          cudaNativeEmitter,
 	},
 	{
-		backend:         barr.BackendMetal,
+		backend:         mantaartifact.BackendMetal,
 		suffix:          "metal",
 		prelude:         "#include <metal_stdlib>\nusing namespace metal;\n\n",
 		signaturePrefix: "kernel void ",
@@ -678,21 +678,21 @@ var kernelBackendEmitters = []kernelBackendEmitter{
 		native:          metalNativeEmitter,
 	},
 	{
-		backend:         barr.BackendVulkan,
+		backend:         mantaartifact.BackendVulkan,
 		suffix:          "vulkan",
 		prelude:         "#version 450\n",
 		signaturePrefix: "void ",
 		params:          noKernelParams,
 	},
 	{
-		backend:         barr.BackendDirectML,
+		backend:         mantaartifact.BackendDirectML,
 		suffix:          "directml",
 		prelude:         "manta_directml_module v0\n",
 		signaturePrefix: "manta_directml_graph ",
 		params:          noKernelParams,
 	},
 	{
-		backend:         barr.BackendWebGPU,
+		backend:         mantaartifact.BackendWebGPU,
 		suffix:          "webgpu",
 		prelude:         "/* wgsl */\n",
 		signaturePrefix: "@compute @workgroup_size(1)\nfn ",
@@ -935,16 +935,16 @@ var metalNativeEmitter = nativeKernelEmitter{
 	},
 }
 
-func emitKernelVariants(kernel lir.Kernel) []barr.KernelVariant {
+func emitKernelVariants(kernel lir.Kernel) []mantaartifact.KernelVariant {
 	meta := map[string]string{
 		"tile":         scheduleTileString(kernel.Hints.Tile),
 		"vector_width": strconv.Itoa(kernel.Hints.VectorWidth),
 		"subgroup":     strconv.FormatBool(kernel.Hints.Subgroup),
 		"memory":       kernel.Hints.Memory,
 	}
-	variants := make([]barr.KernelVariant, 0, len(kernelBackendEmitters))
+	variants := make([]mantaartifact.KernelVariant, 0, len(kernelBackendEmitters))
 	for _, emitter := range kernelBackendEmitters {
-		variants = append(variants, barr.KernelVariant{
+		variants = append(variants, mantaartifact.KernelVariant{
 			Backend: emitter.backend,
 			Entry:   emitter.entry(kernel),
 			Source:  emitter.source(kernel),
@@ -1509,7 +1509,7 @@ func (e moduleTypeEnv) forCallable(callable *syntax.CallableDecl) map[string]hir
 	return out
 }
 
-func lowerStmtToPlan(stmt syntax.Stmt, callable *syntax.CallableDecl, env map[string]hir.Type, kernels map[string]bool) ([]barr.Step, []lir.Buffer, []lir.Kernel, error) {
+func lowerStmtToPlan(stmt syntax.Stmt, callable *syntax.CallableDecl, env map[string]hir.Type, kernels map[string]bool) ([]mantaartifact.Step, []lir.Buffer, []lir.Kernel, error) {
 	switch s := stmt.(type) {
 	case *syntax.LetStmt:
 		typ, steps, buffers, kernelsAdded, err := inferExprPlan(s.Expr, s.Name, callable, env, kernels)
@@ -1522,7 +1522,7 @@ func lowerStmtToPlan(stmt syntax.Stmt, callable *syntax.CallableDecl, env map[st
 	case *syntax.ReturnStmt:
 		exprs := returnStmtExprs(s)
 		results := callableResultFields(callable)
-		steps := []barr.Step{}
+		steps := []mantaartifact.Step{}
 		buffers := []lir.Buffer{}
 		kernelsAdded := []lir.Kernel{}
 		outputs := make([]string, 0, len(results))
@@ -1541,7 +1541,7 @@ func lowerStmtToPlan(stmt syntax.Stmt, callable *syntax.CallableDecl, env map[st
 			kernelsAdded = appendKernelsIfMissing(kernelsAdded, exprKernels...)
 			outputs = append(outputs, name)
 		}
-		steps = append(steps, barr.Step{Kind: barr.StepReturn, Outputs: outputs})
+		steps = append(steps, mantaartifact.Step{Kind: mantaartifact.StepReturn, Outputs: outputs})
 		return withStepEntry(steps, callable.Name), buffers, kernelsAdded, nil
 	case *syntax.ExprStmt:
 		_, steps, buffers, kernelsAdded, err := inferExprPlan(s.Expr, "", callable, env, kernels)
@@ -1554,7 +1554,7 @@ func lowerStmtToPlan(stmt syntax.Stmt, callable *syntax.CallableDecl, env map[st
 	}
 }
 
-func inferExprPlan(expr syntax.Expr, output string, callable *syntax.CallableDecl, env map[string]hir.Type, kernels map[string]bool) (hir.Type, []barr.Step, []lir.Buffer, []lir.Kernel, error) {
+func inferExprPlan(expr syntax.Expr, output string, callable *syntax.CallableDecl, env map[string]hir.Type, kernels map[string]bool) (hir.Type, []mantaartifact.Step, []lir.Buffer, []lir.Kernel, error) {
 	switch e := expr.(type) {
 	case *syntax.IdentExpr:
 		typ, ok := env[e.Name]
@@ -1567,7 +1567,7 @@ func inferExprPlan(expr syntax.Expr, output string, callable *syntax.CallableDec
 		}
 		if output != "" && output != e.Name {
 			return typ,
-				[]barr.Step{{Kind: barr.StepAlias, Name: output, Inputs: []string{e.Name}, Outputs: []string{output}}},
+				[]mantaartifact.Step{{Kind: mantaartifact.StepAlias, Name: output, Inputs: []string{e.Name}, Outputs: []string{output}}},
 				[]lir.Buffer{bufferForValue(output, typ, false)},
 				nil,
 				nil
@@ -1583,7 +1583,7 @@ func inferExprPlan(expr syntax.Expr, output string, callable *syntax.CallableDec
 		}
 		name := binaryKernelName(e.Op)
 		return leftType,
-			[]barr.Step{{Kind: barr.StepLaunchKernel, Name: name, Kernel: name, Inputs: []string{exprName(e.Left), exprName(e.Right)}, Outputs: []string{output}}},
+			[]mantaartifact.Step{{Kind: mantaartifact.StepLaunchKernel, Name: name, Kernel: name, Inputs: []string{exprName(e.Left), exprName(e.Right)}, Outputs: []string{output}}},
 			[]lir.Buffer{bufferForValue(output, leftType, false)},
 			[]lir.Kernel{synthesizeBinaryKernel(e, leftType, env)},
 			nil
@@ -1594,7 +1594,7 @@ func inferExprPlan(expr syntax.Expr, output string, callable *syntax.CallableDec
 	}
 }
 
-func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type, kernels map[string]bool) (hir.Type, []barr.Step, []lir.Buffer, []lir.Kernel, error) {
+func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type, kernels map[string]bool) (hir.Type, []mantaartifact.Step, []lir.Buffer, []lir.Kernel, error) {
 	if !call.Intrinsic && call.Callee == "topk" {
 		if len(call.Args) != 2 {
 			return hir.Type{}, nil, nil, nil, fmt.Errorf("topk expects 2 args")
@@ -1619,8 +1619,8 @@ func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type
 		default:
 			return hir.Type{}, nil, nil, nil, fmt.Errorf("topk expects rank-1 or rank-2 score input")
 		}
-		steps = append(steps, barr.Step{
-			Kind:       barr.StepTopK,
+		steps = append(steps, mantaartifact.Step{
+			Kind:       mantaartifact.StepTopK,
 			Name:       call.Callee,
 			Inputs:     []string{scoreName},
 			Outputs:    maybeOutput(output),
@@ -1632,7 +1632,7 @@ func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type
 
 	inputs := make([]string, 0, len(call.Args))
 	argTypes := make([]hir.Type, 0, len(call.Args))
-	steps := []barr.Step{}
+	steps := []mantaartifact.Step{}
 	buffers := []lir.Buffer{}
 	newKernels := []lir.Kernel{}
 	for _, arg := range call.Args {
@@ -1671,7 +1671,7 @@ func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type
 		if lhs.Tensor != nil && rhs.Tensor != nil && len(lhs.Tensor.Shape) == 3 && len(rhs.Tensor.Shape) == 3 {
 			out.Tensor.Shape = []hir.DimExpr{{Name: lhs.Tensor.Shape[0].Name}, {Name: lhs.Tensor.Shape[1].Name}, {Name: rhs.Tensor.Shape[2].Name}}
 		}
-		steps = append(steps, barr.Step{Kind: barr.StepMatMul, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
+		steps = append(steps, mantaartifact.Step{Kind: mantaartifact.StepMatMul, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
 		buffers = appendOutputBuffer(buffers, output, out)
 		return out, steps, buffers, newKernels, nil
 	case call.Callee == "transpose":
@@ -1686,7 +1686,7 @@ func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type
 		if isRank3HIRTensor(in) {
 			out.Tensor.Shape = []hir.DimExpr{{Name: in.Tensor.Shape[0].Name}, {Name: in.Tensor.Shape[2].Name}, {Name: in.Tensor.Shape[1].Name}}
 		}
-		steps = append(steps, barr.Step{Kind: barr.StepTranspose, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
+		steps = append(steps, mantaartifact.Step{Kind: mantaartifact.StepTranspose, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
 		buffers = appendOutputBuffer(buffers, output, out)
 		return out, steps, buffers, newKernels, nil
 	case call.Callee == "gather":
@@ -1712,7 +1712,7 @@ func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type
 		if table.Tensor != nil && index.Tensor != nil && len(table.Tensor.Shape) == 3 && len(index.Tensor.Shape) == 2 {
 			out.Tensor.Shape = []hir.DimExpr{{Name: index.Tensor.Shape[0].Name}, {Name: index.Tensor.Shape[1].Name}, {Name: table.Tensor.Shape[2].Name}}
 		}
-		steps = append(steps, barr.Step{Kind: barr.StepGather, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
+		steps = append(steps, mantaartifact.Step{Kind: mantaartifact.StepGather, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
 		buffers = appendOutputBuffer(buffers, output, out)
 		return out, steps, buffers, newKernels, nil
 	case call.Callee == "pack_candidates":
@@ -1729,21 +1729,21 @@ func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type
 		if isRank2HIRTensor(ids) && isRank2HIRTensor(scores) && isRank3HIRTensor(docs) {
 			out.CandidatePack.Shape = []hir.DimExpr{{Name: docs.Tensor.Shape[0].Name}, {Name: docs.Tensor.Shape[1].Name}, {Name: docs.Tensor.Shape[2].Name}}
 		}
-		steps = append(steps, barr.Step{Kind: barr.StepPack, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
+		steps = append(steps, mantaartifact.Step{Kind: mantaartifact.StepPack, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
 		buffers = appendOutputBuffer(buffers, output, out)
 		return out, steps, buffers, newKernels, nil
 	case call.Callee == "kv_read":
 		out := hir.Type{Kind: hir.TypeTensor, Tensor: &hir.TensorType{DType: "f16", Shape: []hir.DimExpr{{Name: "T"}, {Name: "D"}}}}
-		steps = append(steps, barr.Step{Kind: barr.StepKVRead, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
+		steps = append(steps, mantaartifact.Step{Kind: mantaartifact.StepKVRead, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
 		buffers = appendOutputBuffer(buffers, output, out)
 		return out, steps, buffers, newKernels, nil
 	case call.Callee == "kv_write":
-		steps = append(steps, barr.Step{Kind: barr.StepKVWrite, Name: call.Callee, Inputs: inputs})
+		steps = append(steps, mantaartifact.Step{Kind: mantaartifact.StepKVWrite, Name: call.Callee, Inputs: inputs})
 		return hir.Type{Kind: hir.TypeKVCache}, steps, buffers, newKernels, nil
 	case call.Callee == "dequant":
 		in := argTypes[0]
 		out := hir.Type{Kind: hir.TypeTensor, Tensor: &hir.TensorType{DType: "f16", Shape: dimClone(in.Tensor.Shape)}}
-		steps = append(steps, barr.Step{Kind: barr.StepDequant, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
+		steps = append(steps, mantaartifact.Step{Kind: mantaartifact.StepDequant, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
 		buffers = appendOutputBuffer(buffers, output, out)
 		return out, steps, buffers, newKernels, nil
 	case call.Callee == "mean_pool":
@@ -1755,7 +1755,7 @@ func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type
 		if isRank3HIRTensor(in) {
 			out.Tensor.Shape = []hir.DimExpr{{Name: in.Tensor.Shape[0].Name}, {Name: in.Tensor.Shape[2].Name}}
 		}
-		steps = append(steps, barr.Step{Kind: barr.StepLaunchKernel, Name: call.Callee, Kernel: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
+		steps = append(steps, mantaartifact.Step{Kind: mantaartifact.StepLaunchKernel, Name: call.Callee, Kernel: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
 		buffers = appendOutputBuffer(buffers, output, out)
 		newKernels = appendKernelsIfMissing(newKernels, synthesizeBuiltinKernel(call, argTypes, out))
 		return out, steps, buffers, newKernels, nil
@@ -1767,7 +1767,7 @@ func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type
 		if len(argTypes) == 2 && isRank2HIRTensor(argTypes[0]) && isRank3HIRTensor(argTypes[1]) {
 			out.Tensor.Shape = []hir.DimExpr{{Name: argTypes[0].Tensor.Shape[0].Name}, {Name: argTypes[1].Tensor.Shape[1].Name}}
 		}
-		steps = append(steps, barr.Step{Kind: barr.StepLaunchKernel, Name: call.Callee, Kernel: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
+		steps = append(steps, mantaartifact.Step{Kind: mantaartifact.StepLaunchKernel, Name: call.Callee, Kernel: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
 		buffers = appendOutputBuffer(buffers, output, out)
 		newKernels = appendKernelsIfMissing(newKernels, synthesizeBuiltinKernel(call, argTypes, out))
 		return out, steps, buffers, newKernels, nil
@@ -1777,11 +1777,11 @@ func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type
 			out = argTypes[0]
 		}
 		if kernels[call.Callee] {
-			steps = append(steps, barr.Step{Kind: barr.StepLaunchKernel, Name: call.Callee, Kernel: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
+			steps = append(steps, mantaartifact.Step{Kind: mantaartifact.StepLaunchKernel, Name: call.Callee, Kernel: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
 			buffers = appendOutputBuffer(buffers, output, out)
 			return out, steps, buffers, newKernels, nil
 		}
-		steps = append(steps, barr.Step{Kind: barr.StepLaunchKernel, Name: call.Callee, Kernel: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
+		steps = append(steps, mantaartifact.Step{Kind: mantaartifact.StepLaunchKernel, Name: call.Callee, Kernel: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
 		buffers = appendOutputBuffer(buffers, output, out)
 		newKernels = appendKernelsIfMissing(newKernels, synthesizeBuiltinKernel(call, argTypes, out))
 		return out, steps, buffers, newKernels, nil
@@ -2036,7 +2036,7 @@ func maybeOutput(name string) []string {
 	return []string{name}
 }
 
-func materializeCallArg(arg syntax.Expr, output, callee string, index int, env map[string]hir.Type, kernels map[string]bool) (hir.Type, string, []barr.Step, []lir.Buffer, []lir.Kernel, error) {
+func materializeCallArg(arg syntax.Expr, output, callee string, index int, env map[string]hir.Type, kernels map[string]bool) (hir.Type, string, []mantaartifact.Step, []lir.Buffer, []lir.Kernel, error) {
 	switch arg.(type) {
 	case *syntax.IdentExpr, *syntax.NumberExpr, *syntax.StringExpr:
 		typ, err := inferExprType(arg, env)
@@ -2107,7 +2107,7 @@ func appendOutputBuffer(buffers []lir.Buffer, name string, typ hir.Type) []lir.B
 	return appendIfMissingBuffer(buffers, bufferForValue(name, typ, false))
 }
 
-func withStepEntry(steps []barr.Step, entry string) []barr.Step {
+func withStepEntry(steps []mantaartifact.Step, entry string) []mantaartifact.Step {
 	for i := range steps {
 		steps[i].Entry = entry
 	}

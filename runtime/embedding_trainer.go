@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"fmt"
@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -74,18 +74,18 @@ type embeddingEvalScore struct {
 
 // EmbeddingTrainer trains a pooled embedding model with quantization-aware forward passes.
 type EmbeddingTrainer struct {
-	module               *barr.Module
+	module               *mantaartifact.Module
 	manifest             EmbeddingManifest
 	config               EmbeddingTrainConfig
 	memoryPlan           *MemoryPlan
 	step                 int
-	tokenParam           barr.Param
-	attnQParam           barr.Param
-	attnKParam           barr.Param
-	attnVParam           barr.Param
-	attnOParam           barr.Param
-	hiddenParam          barr.Param
-	projParam            barr.Param
+	tokenParam           mantaartifact.Param
+	attnQParam           mantaartifact.Param
+	attnKParam           mantaartifact.Param
+	attnVParam           mantaartifact.Param
+	attnOParam           mantaartifact.Param
+	hiddenParam          mantaartifact.Param
+	projParam            mantaartifact.Param
 	tokenEmbed           *backend.Tensor
 	attentionQuery       *backend.Tensor
 	attentionKey         *backend.Tensor
@@ -108,15 +108,15 @@ type EmbeddingTrainer struct {
 	projMom1             *backend.Tensor
 	projMom2             *backend.Tensor
 	forwardMatMul        backend.MatMulAccelerator
-	forwardBackend       barr.BackendKind
+	forwardBackend       mantaartifact.BackendKind
 	optimizerAccel       backend.OptimizerAccelerator
-	optimizerBackend     barr.BackendKind
+	optimizerBackend     mantaartifact.BackendKind
 	activationAccel      backend.ActivationAccelerator
-	activationBackend    barr.BackendKind
+	activationBackend    mantaartifact.BackendKind
 	activationAccelFull  bool
 	softmaxBackwardAccel bool
 	contrastiveAccel     backend.ContrastiveAccelerator
-	contrastiveBackend   barr.BackendKind
+	contrastiveBackend   mantaartifact.BackendKind
 	sequenceBindingID    int
 	momentsDirty         bool
 	forwardCache         *embeddingForwardWeights
@@ -187,7 +187,7 @@ type embeddingForwardWeights struct {
 }
 
 // NewEmbeddingTrainer constructs the first native pooled-embedder trainer.
-func NewEmbeddingTrainer(mod *barr.Module, manifest EmbeddingManifest, weights map[string]*backend.Tensor, cfg EmbeddingTrainConfig) (*EmbeddingTrainer, error) {
+func NewEmbeddingTrainer(mod *mantaartifact.Module, manifest EmbeddingManifest, weights map[string]*backend.Tensor, cfg EmbeddingTrainConfig) (*EmbeddingTrainer, error) {
 	manifest = manifest.normalized()
 	if err := manifest.ValidateModule(mod); err != nil {
 		return nil, err
@@ -1069,14 +1069,14 @@ func (t *EmbeddingTrainer) RenameEmbeddingModel(name string) error {
 }
 
 // WriteEmbeddingPackage writes a packaged embedding model to sibling artifact, manifest, and weight files.
-func (t *EmbeddingTrainer) WriteEmbeddingPackage(barrPath string) (EmbeddingPackagePaths, error) {
+func (t *EmbeddingTrainer) WriteEmbeddingPackage(artifactPath string) (EmbeddingPackagePaths, error) {
 	if t == nil {
 		return EmbeddingPackagePaths{}, fmt.Errorf("embedding trainer is not initialized")
 	}
-	if err := barr.WriteFile(barrPath, t.module); err != nil {
+	if err := mantaartifact.WriteFile(artifactPath, t.module); err != nil {
 		return EmbeddingPackagePaths{}, err
 	}
-	manifestPath := DefaultEmbeddingManifestPath(barrPath)
+	manifestPath := DefaultEmbeddingManifestPath(artifactPath)
 	if err := t.manifest.WriteFile(manifestPath); err != nil {
 		return EmbeddingPackagePaths{}, err
 	}
@@ -1084,23 +1084,23 @@ func (t *EmbeddingTrainer) WriteEmbeddingPackage(barrPath string) (EmbeddingPack
 	if err != nil {
 		return EmbeddingPackagePaths{}, err
 	}
-	weightPath := DefaultWeightFilePath(barrPath)
+	weightPath := DefaultWeightFilePath(artifactPath)
 	if err := weightFile.WriteFile(weightPath); err != nil {
 		return EmbeddingPackagePaths{}, err
 	}
 	memoryPlan := NewMemoryPlan(t.module, weightFile.Weights, MemoryPlanOptions{})
-	memoryPlanPath := DefaultMemoryPlanPath(barrPath)
+	memoryPlanPath := DefaultMemoryPlanPath(artifactPath)
 	if err := memoryPlan.WriteFile(memoryPlanPath); err != nil {
 		return EmbeddingPackagePaths{}, err
 	}
 	t.memoryPlan = cloneMemoryPlan(&memoryPlan)
 	packageFiles := map[string]string{
-		"artifact":           barrPath,
+		"artifact":           artifactPath,
 		"embedding_manifest": manifestPath,
 		"weights":            weightPath,
 		"memory_plan":        memoryPlanPath,
 	}
-	tokenizerPath := DefaultTokenizerPath(barrPath)
+	tokenizerPath := DefaultTokenizerPath(artifactPath)
 	if _, err := os.Stat(tokenizerPath); err == nil {
 		packageFiles["tokenizer"] = tokenizerPath
 	}
@@ -1108,12 +1108,12 @@ func (t *EmbeddingTrainer) WriteEmbeddingPackage(barrPath string) (EmbeddingPack
 	if err != nil {
 		return EmbeddingPackagePaths{}, err
 	}
-	packageManifestPath := DefaultPackageManifestPath(barrPath)
+	packageManifestPath := DefaultPackageManifestPath(artifactPath)
 	if err := packageManifest.WriteFile(packageManifestPath); err != nil {
 		return EmbeddingPackagePaths{}, err
 	}
 	return EmbeddingPackagePaths{
-		ArtifactPath:        barrPath,
+		ArtifactPath:        artifactPath,
 		ManifestPath:        manifestPath,
 		TokenizerPath:       tokenizerPath,
 		WeightFilePath:      weightPath,
@@ -1123,14 +1123,14 @@ func (t *EmbeddingTrainer) WriteEmbeddingPackage(barrPath string) (EmbeddingPack
 }
 
 // WriteTrainingPackage writes a packaged native-training embedder including trainer config and checkpoint state.
-func (t *EmbeddingTrainer) WriteTrainingPackage(barrPath string) (EmbeddingTrainPackagePaths, error) {
+func (t *EmbeddingTrainer) WriteTrainingPackage(artifactPath string) (EmbeddingTrainPackagePaths, error) {
 	if t == nil {
 		return EmbeddingTrainPackagePaths{}, fmt.Errorf("embedding trainer is not initialized")
 	}
-	if err := barr.WriteFile(barrPath, t.module); err != nil {
+	if err := mantaartifact.WriteFile(artifactPath, t.module); err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
-	embeddingManifestPath := DefaultEmbeddingManifestPath(barrPath)
+	embeddingManifestPath := DefaultEmbeddingManifestPath(artifactPath)
 	if err := t.manifest.WriteFile(embeddingManifestPath); err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
@@ -1138,12 +1138,12 @@ func (t *EmbeddingTrainer) WriteTrainingPackage(barrPath string) (EmbeddingTrain
 	if err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
-	weightPath := DefaultWeightFilePath(barrPath)
+	weightPath := DefaultWeightFilePath(artifactPath)
 	if err := weightFile.WriteFile(weightPath); err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
 	memoryPlan := NewMemoryPlan(t.module, weightFile.Weights, MemoryPlanOptions{})
-	memoryPlanPath := DefaultMemoryPlanPath(barrPath)
+	memoryPlanPath := DefaultMemoryPlanPath(artifactPath)
 	if err := memoryPlan.WriteFile(memoryPlanPath); err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
@@ -1153,7 +1153,7 @@ func (t *EmbeddingTrainer) WriteTrainingPackage(barrPath string) (EmbeddingTrain
 		Embedding: t.manifest,
 		Config:    t.config,
 	}
-	trainManifestPath := DefaultEmbeddingTrainManifestPath(barrPath)
+	trainManifestPath := DefaultEmbeddingTrainManifestPath(artifactPath)
 	if err := trainManifest.WriteFile(trainManifestPath); err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
@@ -1161,17 +1161,17 @@ func (t *EmbeddingTrainer) WriteTrainingPackage(barrPath string) (EmbeddingTrain
 	if err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
-	checkpointPath := DefaultEmbeddingCheckpointPath(barrPath)
+	checkpointPath := DefaultEmbeddingCheckpointPath(artifactPath)
 	if err := checkpoint.WriteFile(checkpointPath); err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
 	trainProfile := t.TrainProfile()
-	trainProfilePath := DefaultEmbeddingTrainProfilePath(barrPath)
+	trainProfilePath := DefaultEmbeddingTrainProfilePath(artifactPath)
 	if err := trainProfile.WriteFile(trainProfilePath); err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
 	packageFiles := map[string]string{
-		"artifact":           barrPath,
+		"artifact":           artifactPath,
 		"embedding_manifest": embeddingManifestPath,
 		"weights":            weightPath,
 		"memory_plan":        memoryPlanPath,
@@ -1179,7 +1179,7 @@ func (t *EmbeddingTrainer) WriteTrainingPackage(barrPath string) (EmbeddingTrain
 		"checkpoint":         checkpointPath,
 		"train_profile":      trainProfilePath,
 	}
-	tokenizerPath := DefaultTokenizerPath(barrPath)
+	tokenizerPath := DefaultTokenizerPath(artifactPath)
 	if _, err := os.Stat(tokenizerPath); err == nil {
 		packageFiles["tokenizer"] = tokenizerPath
 	}
@@ -1187,12 +1187,12 @@ func (t *EmbeddingTrainer) WriteTrainingPackage(barrPath string) (EmbeddingTrain
 	if err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
-	packageManifestPath := DefaultPackageManifestPath(barrPath)
+	packageManifestPath := DefaultPackageManifestPath(artifactPath)
 	if err := packageManifest.WriteFile(packageManifestPath); err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
 	return EmbeddingTrainPackagePaths{
-		ArtifactPath:          barrPath,
+		ArtifactPath:          artifactPath,
 		EmbeddingManifestPath: embeddingManifestPath,
 		TokenizerPath:         tokenizerPath,
 		WeightFilePath:        weightPath,
@@ -1891,10 +1891,10 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 	return nil
 }
 
-func trainerF32TensorValueType() barr.ValueType {
-	return barr.ValueType{
-		Kind: barr.ValueTensor,
-		Tensor: &barr.TensorType{
+func trainerF32TensorValueType() mantaartifact.ValueType {
+	return mantaartifact.ValueType{
+		Kind: mantaartifact.ValueTensor,
+		Tensor: &mantaartifact.TensorType{
 			DType: "f32",
 		},
 	}
@@ -2868,9 +2868,9 @@ func (t *EmbeddingTrainer) tryTrainerMatMul(lhsData []float32, lhsRows, lhsCols 
 			tensorF32View([]int{lhsRows, lhsCols}, lhsData),
 			tensorF32View([]int{rhsRows, rhsCols}, rhsData),
 		},
-		barr.ValueType{
-			Kind: barr.ValueTensor,
-			Tensor: &barr.TensorType{
+		mantaartifact.ValueType{
+			Kind: mantaartifact.ValueTensor,
+			Tensor: &mantaartifact.TensorType{
 				DType: "f32",
 			},
 		},
@@ -2913,9 +2913,9 @@ func (t *EmbeddingTrainer) tryTrainerBatchedMatMulTranspose(lhsMatrices [][]floa
 			tensorF32View([]int{batches, lhsRows, lhsCols}, lhsBatch),
 			tensorF32View([]int{batches, rhsRows, rhsCols}, rhsBatch),
 		},
-		barr.ValueType{
-			Kind: barr.ValueTensor,
-			Tensor: &barr.TensorType{
+		mantaartifact.ValueType{
+			Kind: mantaartifact.ValueTensor,
+			Tensor: &mantaartifact.TensorType{
 				DType: "f32",
 			},
 		},
@@ -2943,9 +2943,9 @@ func (t *EmbeddingTrainer) tryTrainerMatMulBoundLeft(lhsName string, lhs, rhs *b
 			result, err := t.forwardMatMul.RunMatMulWithBoundLeft(
 				lhsName,
 				rhs,
-				barr.ValueType{
-					Kind: barr.ValueTensor,
-					Tensor: &barr.TensorType{
+				mantaartifact.ValueType{
+					Kind: mantaartifact.ValueTensor,
+					Tensor: &mantaartifact.TensorType{
 						DType: "f32",
 					},
 				},
@@ -2973,9 +2973,9 @@ func (t *EmbeddingTrainer) tryTrainerMatMulBoundRight(lhsData []float32, lhsRows
 			result, err := t.forwardMatMul.RunMatMulWithBoundRight(
 				tensorF32View([]int{lhsRows, lhsCols}, lhsData),
 				rhsName,
-				barr.ValueType{
-					Kind: barr.ValueTensor,
-					Tensor: &barr.TensorType{
+				mantaartifact.ValueType{
+					Kind: mantaartifact.ValueTensor,
+					Tensor: &mantaartifact.TensorType{
 						DType: "f32",
 					},
 				},
@@ -3056,37 +3056,37 @@ func trainerMatMulAt(data []float32, rows, cols, row, col int, transpose bool) f
 	return data[row*cols+col]
 }
 
-func requireTrainableEmbeddingParam(mod *barr.Module, name string) (barr.Param, error) {
+func requireTrainableEmbeddingParam(mod *mantaartifact.Module, name string) (mantaartifact.Param, error) {
 	for _, param := range mod.Params {
 		if param.Name != name {
 			continue
 		}
-		if param.Type.Kind != barr.ValueTensor || param.Type.Tensor == nil {
-			return barr.Param{}, fmt.Errorf("param %q is not a tensor", name)
+		if param.Type.Kind != mantaartifact.ValueTensor || param.Type.Tensor == nil {
+			return mantaartifact.Param{}, fmt.Errorf("param %q is not a tensor", name)
 		}
 		if len(param.Type.Tensor.Shape) != 2 {
-			return barr.Param{}, fmt.Errorf("param %q rank = %d, want 2", name, len(param.Type.Tensor.Shape))
+			return mantaartifact.Param{}, fmt.Errorf("param %q rank = %d, want 2", name, len(param.Type.Tensor.Shape))
 		}
 		if !param.Trainable {
-			return barr.Param{}, fmt.Errorf("param %q is not marked @trainable", name)
+			return mantaartifact.Param{}, fmt.Errorf("param %q is not marked @trainable", name)
 		}
 		return param, nil
 	}
-	return barr.Param{}, fmt.Errorf("missing param %q", name)
+	return mantaartifact.Param{}, fmt.Errorf("missing param %q", name)
 }
 
-func optionalTrainableEmbeddingParam(mod *barr.Module, name string) (barr.Param, bool, error) {
+func optionalTrainableEmbeddingParam(mod *mantaartifact.Module, name string) (mantaartifact.Param, bool, error) {
 	if name == "" {
-		return barr.Param{}, false, nil
+		return mantaartifact.Param{}, false, nil
 	}
 	param, err := requireTrainableEmbeddingParam(mod, name)
 	if err != nil {
-		return barr.Param{}, false, err
+		return mantaartifact.Param{}, false, err
 	}
 	return param, true, nil
 }
 
-func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...barr.Param) EmbeddingTrainConfig {
+func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...mantaartifact.Param) EmbeddingTrainConfig {
 	if cfg.LearningRate == 0 {
 		cfg.LearningRate = 0.05
 	}
@@ -3128,7 +3128,7 @@ func validateTrainConfig(cfg EmbeddingTrainConfig) error {
 	return nil
 }
 
-func paramQuantBits(param barr.Param) int {
+func paramQuantBits(param mantaartifact.Param) int {
 	if param.Type.Tensor == nil {
 		return 0
 	}
@@ -3156,11 +3156,11 @@ func zeroLikeMaster(t *backend.Tensor) *backend.Tensor {
 	return backend.NewTensorF32(t.Shape, make([]float32, len(t.F32)))
 }
 
-func forwardTensorForParam(param barr.Param, master *backend.Tensor, bits int) *backend.Tensor {
+func forwardTensorForParam(param mantaartifact.Param, master *backend.Tensor, bits int) *backend.Tensor {
 	return refreshForwardTensorForParam(param, master, bits, nil)
 }
 
-func refreshForwardMatMulTensorForParam(param barr.Param, master *backend.Tensor, dst *backend.Tensor) *backend.Tensor {
+func refreshForwardMatMulTensorForParam(param mantaartifact.Param, master *backend.Tensor, dst *backend.Tensor) *backend.Tensor {
 	if master == nil {
 		return nil
 	}
@@ -3183,7 +3183,7 @@ func refreshForwardMatMulTensorForParam(param barr.Param, master *backend.Tensor
 	return dst
 }
 
-func refreshForwardTensorForParam(param barr.Param, master *backend.Tensor, bits int, dst *backend.Tensor) *backend.Tensor {
+func refreshForwardTensorForParam(param mantaartifact.Param, master *backend.Tensor, bits int, dst *backend.Tensor) *backend.Tensor {
 	if master == nil {
 		return nil
 	}
@@ -3225,7 +3225,7 @@ func forwardMatMulHostData(rhs *backend.Tensor) []float32 {
 	}
 }
 
-func exportTensorForParam(param barr.Param, master *backend.Tensor) (*backend.Tensor, error) {
+func exportTensorForParam(param mantaartifact.Param, master *backend.Tensor) (*backend.Tensor, error) {
 	if master == nil {
 		return nil, fmt.Errorf("missing master tensor for %q", param.Name)
 	}

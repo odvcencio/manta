@@ -1,9 +1,9 @@
-package barruntime
+package mantaruntime
 
 import (
 	"os"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 )
 
 // EmbeddingTrainPackagePaths names the files that make up a packaged native-training embedder.
@@ -20,17 +20,17 @@ type EmbeddingTrainPackagePaths struct {
 }
 
 // LoadEmbeddingTrainerPackage restores a trainer from a persisted training package.
-func LoadEmbeddingTrainerPackage(barrPath string) (*EmbeddingTrainer, error) {
+func LoadEmbeddingTrainerPackage(artifactPath string) (*EmbeddingTrainer, error) {
 	return LoadEmbeddingTrainerPackageWithPaths(EmbeddingTrainPackagePaths{
-		ArtifactPath:          barrPath,
-		EmbeddingManifestPath: ResolveEmbeddingManifestPath(barrPath),
-		TokenizerPath:         DefaultTokenizerPath(barrPath),
-		WeightFilePath:        DefaultWeightFilePath(barrPath),
-		MemoryPlanPath:        DefaultMemoryPlanPath(barrPath),
-		TrainManifestPath:     ResolveEmbeddingTrainManifestPath(barrPath),
-		CheckpointPath:        DefaultEmbeddingCheckpointPath(barrPath),
-		TrainProfilePath:      DefaultEmbeddingTrainProfilePath(barrPath),
-		PackageManifestPath:   ResolvePackageManifestPath(barrPath),
+		ArtifactPath:          artifactPath,
+		EmbeddingManifestPath: ResolveEmbeddingManifestPath(artifactPath),
+		TokenizerPath:         DefaultTokenizerPath(artifactPath),
+		WeightFilePath:        DefaultWeightFilePath(artifactPath),
+		MemoryPlanPath:        DefaultMemoryPlanPath(artifactPath),
+		TrainManifestPath:     ResolveEmbeddingTrainManifestPath(artifactPath),
+		CheckpointPath:        DefaultEmbeddingCheckpointPath(artifactPath),
+		TrainProfilePath:      DefaultEmbeddingTrainProfilePath(artifactPath),
+		PackageManifestPath:   ResolvePackageManifestPath(artifactPath),
 	})
 }
 
@@ -56,7 +56,7 @@ func LoadEmbeddingTrainerPackageWithPaths(paths EmbeddingTrainPackagePaths) (*Em
 			}
 		}
 	}
-	mod, err := barr.ReadFile(paths.ArtifactPath)
+	mod, err := mantaartifact.ReadFile(paths.ArtifactPath)
 	if err != nil {
 		return nil, err
 	}

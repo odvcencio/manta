@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"encoding/json"
@@ -6,7 +6,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 	mll "github.com/odvcencio/mll"
 )
@@ -25,9 +25,9 @@ const (
 )
 
 type MemoryPlanOptions struct {
-	Backend           barr.BackendKind `json:"backend,omitempty"`
-	DeviceBudgetBytes int64            `json:"device_budget_bytes,omitempty"`
-	SharedHostWeights bool             `json:"shared_host_weights,omitempty"`
+	Backend           mantaartifact.BackendKind `json:"backend,omitempty"`
+	DeviceBudgetBytes int64                     `json:"device_budget_bytes,omitempty"`
+	SharedHostWeights bool                      `json:"shared_host_weights,omitempty"`
 }
 
 type WeightMemoryPlan struct {
@@ -41,22 +41,22 @@ type WeightMemoryPlan struct {
 }
 
 type MemoryPlan struct {
-	Version             string             `json:"version"`
-	ModuleName          string             `json:"module_name"`
-	Backend             barr.BackendKind   `json:"backend,omitempty"`
-	DeviceBudgetBytes   int64              `json:"device_budget_bytes,omitempty"`
-	TotalWeightBytes    int64              `json:"total_weight_bytes"`
-	DeviceResidentBytes int64              `json:"device_resident_bytes,omitempty"`
-	HostResidentBytes   int64              `json:"host_resident_bytes,omitempty"`
-	LazyStagedBytes     int64              `json:"lazy_staged_bytes,omitempty"`
-	Weights             []WeightMemoryPlan `json:"weights"`
+	Version             string                    `json:"version"`
+	ModuleName          string                    `json:"module_name"`
+	Backend             mantaartifact.BackendKind `json:"backend,omitempty"`
+	DeviceBudgetBytes   int64                     `json:"device_budget_bytes,omitempty"`
+	TotalWeightBytes    int64                     `json:"total_weight_bytes"`
+	DeviceResidentBytes int64                     `json:"device_resident_bytes,omitempty"`
+	HostResidentBytes   int64                     `json:"host_resident_bytes,omitempty"`
+	LazyStagedBytes     int64                     `json:"lazy_staged_bytes,omitempty"`
+	Weights             []WeightMemoryPlan        `json:"weights"`
 }
 
-func DefaultMemoryPlanPath(barrPath string) string {
-	return defaultManifestPath(barrPath, ".memory.mll")
+func DefaultMemoryPlanPath(artifactPath string) string {
+	return defaultManifestPath(artifactPath, ".memory.mll")
 }
 
-func NewMemoryPlan(mod *barr.Module, weights map[string]*backend.Tensor, opts MemoryPlanOptions) MemoryPlan {
+func NewMemoryPlan(mod *mantaartifact.Module, weights map[string]*backend.Tensor, opts MemoryPlanOptions) MemoryPlan {
 	plan := MemoryPlan{
 		Version:           MemoryPlanVersion,
 		Backend:           opts.Backend,
@@ -70,7 +70,7 @@ func NewMemoryPlan(mod *barr.Module, weights map[string]*backend.Tensor, opts Me
 	}
 
 	accessCounts := countParamAccesses(mod)
-	params := map[string]barr.Param{}
+	params := map[string]mantaartifact.Param{}
 	for _, param := range mod.Params {
 		params[param.Name] = param
 	}
@@ -209,7 +209,7 @@ func ReadMemoryPlanFile(path string) (MemoryPlan, error) {
 	if err != nil {
 		return MemoryPlan{}, err
 	}
-	if !barr.IsMLLBytes(data) {
+	if !mantaartifact.IsMLLBytes(data) {
 		return MemoryPlan{}, fmt.Errorf("memory plan %q is not an MLL file", path)
 	}
 	return decodeMemoryPlanMLL(data)
@@ -359,7 +359,7 @@ func cloneMemoryPlan(plan *MemoryPlan) *MemoryPlan {
 	return &cp
 }
 
-func countParamAccesses(mod *barr.Module) map[string]int {
+func countParamAccesses(mod *mantaartifact.Module) map[string]int {
 	counts := map[string]int{}
 	if mod == nil {
 		return counts

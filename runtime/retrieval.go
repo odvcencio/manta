@@ -1,10 +1,10 @@
-package barruntime
+package mantaruntime
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -115,7 +115,7 @@ func decodeCandidateResult(raw backend.Result, lookup map[int64]map[string]strin
 	outputName := ""
 	var output backend.Value
 	for name, value := range raw.Outputs {
-		if value.Type.Kind != barr.ValueCandidatePack {
+		if value.Type.Kind != mantaartifact.ValueCandidatePack {
 			continue
 		}
 		if outputName != "" {
@@ -142,33 +142,33 @@ func decodeCandidateResult(raw backend.Result, lookup map[int64]map[string]strin
 	}, nil
 }
 
-func (p *Program) requireCandidateEntry(name string, batched bool) (barr.EntryPoint, error) {
+func (p *Program) requireCandidateEntry(name string, batched bool) (mantaartifact.EntryPoint, error) {
 	if p == nil || p.module == nil {
-		return barr.EntryPoint{}, fmt.Errorf("program is not loaded")
+		return mantaartifact.EntryPoint{}, fmt.Errorf("program is not loaded")
 	}
 	for _, entry := range p.module.EntryPoints {
 		if entry.Name != name {
 			continue
 		}
 		if len(entry.Inputs) < 3 {
-			return barr.EntryPoint{}, fmt.Errorf("entrypoint %q does not declare query/docs/candidate_ids inputs", name)
+			return mantaartifact.EntryPoint{}, fmt.Errorf("entrypoint %q does not declare query/docs/candidate_ids inputs", name)
 		}
 		queryName, _, _, err := candidateEntryInputNames(entry)
 		if err != nil {
-			return barr.EntryPoint{}, err
+			return mantaartifact.EntryPoint{}, err
 		}
 		if batched && queryName != "queries" {
-			return barr.EntryPoint{}, fmt.Errorf("entrypoint %q is not batched", name)
+			return mantaartifact.EntryPoint{}, fmt.Errorf("entrypoint %q is not batched", name)
 		}
 		if !batched && queryName != "query" {
-			return barr.EntryPoint{}, fmt.Errorf("entrypoint %q is not unbatched", name)
+			return mantaartifact.EntryPoint{}, fmt.Errorf("entrypoint %q is not unbatched", name)
 		}
 		return entry, nil
 	}
-	return barr.EntryPoint{}, fmt.Errorf("unknown entrypoint %q", name)
+	return mantaartifact.EntryPoint{}, fmt.Errorf("unknown entrypoint %q", name)
 }
 
-func candidateEntryInputNames(entry barr.EntryPoint) (queryName, docsName, idsName string, err error) {
+func candidateEntryInputNames(entry mantaartifact.EntryPoint) (queryName, docsName, idsName string, err error) {
 	for _, input := range entry.Inputs {
 		switch input.Name {
 		case "query", "queries":

@@ -1,11 +1,11 @@
-package barruntime
+package mantaruntime
 
 import (
 	"fmt"
 	"os"
 	"sort"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	mll "github.com/odvcencio/mll"
 )
 
@@ -199,7 +199,7 @@ func readAuthoredManifestMLL(path, expectedKind, expectedVersion string) (author
 	if err != nil {
 		return authoredManifestDoc{}, err
 	}
-	if !barr.IsMLLBytes(data) {
+	if !mantaartifact.IsMLLBytes(data) {
 		return authoredManifestDoc{}, fmt.Errorf("not an MLL manifest")
 	}
 	reader, err := mll.ReadBytes(data, mll.WithDigestVerification())

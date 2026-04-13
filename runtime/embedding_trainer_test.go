@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/compiler"
 	"github.com/odvcencio/manta/runtime/backend"
 	"github.com/odvcencio/manta/runtime/backends/cuda"
@@ -75,8 +75,10 @@ type countingMatMulAccelerator struct {
 	bound             map[string]*backend.Tensor
 }
 
-func (a *countingMatMulAccelerator) Backend() barr.BackendKind { return barr.BackendCUDA }
-func (a *countingMatMulAccelerator) RunMatMul(inputs []*backend.Tensor, outputType barr.ValueType) (backend.StepDispatchResult, error) {
+func (a *countingMatMulAccelerator) Backend() mantaartifact.BackendKind {
+	return mantaartifact.BackendCUDA
+}
+func (a *countingMatMulAccelerator) RunMatMul(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
 	a.runCalls++
 	if len(inputs) == 2 && len(inputs[0].Shape) == 3 && len(inputs[1].Shape) == 3 {
 		lhs := inputs[0]
@@ -109,7 +111,7 @@ func (a *countingMatMulAccelerator) RunMatMul(inputs []*backend.Tensor, outputTy
 	}
 	return backend.StepDispatchResult{}, nil
 }
-func (a *countingMatMulAccelerator) RunMatMulWithTranspose(inputs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (a *countingMatMulAccelerator) RunMatMulWithTranspose(inputs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	a.runCalls++
 	if len(inputs) == 2 && len(inputs[0].Shape) == 3 && len(inputs[1].Shape) == 3 {
 		lhs := inputs[0]
@@ -177,17 +179,17 @@ func (a *countingMatMulAccelerator) UnbindMatrix(name string) error {
 	delete(a.bound, name)
 	return nil
 }
-func (a *countingMatMulAccelerator) RunMatMulWithBoundLeft(leftName string, rhs *backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (a *countingMatMulAccelerator) RunMatMulWithBoundLeft(leftName string, rhs *backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
-func (a *countingMatMulAccelerator) RunMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (a *countingMatMulAccelerator) RunMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	a.boundRightRuns++
 	if lhs != nil && len(lhs.Shape) > 0 && lhs.Shape[0] > a.maxBoundRightRows {
 		a.maxBoundRightRows = lhs.Shape[0]
 	}
 	return backend.StepDispatchResult{}, nil
 }
-func (a *countingMatMulAccelerator) RunMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+func (a *countingMatMulAccelerator) RunMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
 	a.multiBoundRuns++
 	a.boundRightRuns += len(rightNames)
 	if lhs != nil && len(lhs.Shape) > 0 && lhs.Shape[0] > a.maxBoundRightRows {
@@ -213,7 +215,7 @@ func (a *countingMatMulAccelerator) RunMatMulWithBoundRights(lhs *backend.Tensor
 	}
 	return results, nil
 }
-func (a *countingMatMulAccelerator) RunAccumulatedMatMulsWithBoundRights(lhsInputs []*backend.Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (a *countingMatMulAccelerator) RunAccumulatedMatMulsWithBoundRights(lhsInputs []*backend.Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	a.accumulatedRuns++
 	a.boundRightRuns += len(rightNames)
 	if len(rightNames) > a.maxAccumTerms {
@@ -256,7 +258,7 @@ func (a *countingMatMulAccelerator) RunAccumulatedMatMulsWithBoundRights(lhsInpu
 		backend.NewTensorF32(outShape, out),
 	}}, nil
 }
-func (a *countingMatMulAccelerator) RunMatMulsWithSharedLeft(lhs *backend.Tensor, rhs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+func (a *countingMatMulAccelerator) RunMatMulsWithSharedLeft(lhs *backend.Tensor, rhs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
 	a.sharedLeftRuns++
 	if len(rhs) > a.maxSharedLeftRHS {
 		a.maxSharedLeftRHS = len(rhs)
@@ -304,7 +306,9 @@ type countingActivationAccelerator struct {
 	bound                  map[string]*backend.Tensor
 }
 
-func (a *countingActivationAccelerator) Backend() barr.BackendKind { return barr.BackendCUDA }
+func (a *countingActivationAccelerator) Backend() mantaartifact.BackendKind {
+	return mantaartifact.BackendCUDA
+}
 
 func (a *countingActivationAccelerator) BindTensor(name string, tensor *backend.Tensor) error {
 	if a.bound == nil {
@@ -1143,7 +1147,7 @@ func TestEmbeddingTrainerForwardMatMulAcceleratorMatchesHost(t *testing.T) {
 	if trainer.forwardMatMul == nil {
 		t.Skip("no trainer matmul accelerator available")
 	}
-	if trainer.forwardBackend != barr.BackendCUDA && trainer.forwardBackend != barr.BackendMetal {
+	if trainer.forwardBackend != mantaartifact.BackendCUDA && trainer.forwardBackend != mantaartifact.BackendMetal {
 		t.Fatalf("forward backend = %q, want cuda or metal", trainer.forwardBackend)
 	}
 	rhs := backend.NewTensorF32([]int{2, 3}, []float32{
@@ -1203,9 +1207,9 @@ func TestEmbeddingTrainerBoundRightMatMulMatchesHostAndRefreshes(t *testing.T) {
 	if err := trainer.forwardMatMul.BindMatrix(trainer.projParam.Name, rhsA); err != nil {
 		t.Fatalf("bind rhsA: %v", err)
 	}
-	resultA, err := trainer.forwardMatMul.RunMatMulWithBoundRight(lhs, trainer.projParam.Name, barr.ValueType{
-		Kind: barr.ValueTensor,
-		Tensor: &barr.TensorType{
+	resultA, err := trainer.forwardMatMul.RunMatMulWithBoundRight(lhs, trainer.projParam.Name, mantaartifact.ValueType{
+		Kind: mantaartifact.ValueTensor,
+		Tensor: &mantaartifact.TensorType{
 			DType: "f32",
 		},
 	}, false, false)
@@ -1229,9 +1233,9 @@ func TestEmbeddingTrainerBoundRightMatMulMatchesHostAndRefreshes(t *testing.T) {
 	if err := trainer.forwardMatMul.BindMatrix(trainer.projParam.Name, rhsB); err != nil {
 		t.Fatalf("bind rhsB: %v", err)
 	}
-	resultB, err := trainer.forwardMatMul.RunMatMulWithBoundRight(lhs, trainer.projParam.Name, barr.ValueType{
-		Kind: barr.ValueTensor,
-		Tensor: &barr.TensorType{
+	resultB, err := trainer.forwardMatMul.RunMatMulWithBoundRight(lhs, trainer.projParam.Name, mantaartifact.ValueType{
+		Kind: mantaartifact.ValueTensor,
+		Tensor: &mantaartifact.TensorType{
 			DType: "f32",
 		},
 	}, false, false)
@@ -1262,9 +1266,9 @@ func TestEmbeddingTrainerBoundLeftMatMulMatchesHostAndRefreshes(t *testing.T) {
 	if err := trainer.forwardMatMul.BindMatrix(trainer.hiddenParam.Name, lhsA); err != nil {
 		t.Fatalf("bind lhsA: %v", err)
 	}
-	resultA, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(trainer.hiddenParam.Name, rhs, barr.ValueType{
-		Kind: barr.ValueTensor,
-		Tensor: &barr.TensorType{
+	resultA, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(trainer.hiddenParam.Name, rhs, mantaartifact.ValueType{
+		Kind: mantaartifact.ValueTensor,
+		Tensor: &mantaartifact.TensorType{
 			DType: "f32",
 		},
 	}, true, false)
@@ -1285,9 +1289,9 @@ func TestEmbeddingTrainerBoundLeftMatMulMatchesHostAndRefreshes(t *testing.T) {
 	if err := trainer.forwardMatMul.BindMatrix(trainer.hiddenParam.Name, lhsB); err != nil {
 		t.Fatalf("bind lhsB: %v", err)
 	}
-	resultB, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(trainer.hiddenParam.Name, rhs, barr.ValueType{
-		Kind: barr.ValueTensor,
-		Tensor: &barr.TensorType{
+	resultB, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(trainer.hiddenParam.Name, rhs, mantaartifact.ValueType{
+		Kind: mantaartifact.ValueTensor,
+		Tensor: &mantaartifact.TensorType{
 			DType: "f32",
 		},
 	}, true, false)
@@ -1915,7 +1919,7 @@ func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
 	result, err := trainer.forwardMatMul.RunMatMulWithBoundRight(
 		backend.NewTensorF32([]int{2, 2}, layer.attnQ),
 		layer.attnKBinding,
-		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "f32"}},
+		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f32"}},
 		false,
 		true,
 	)
@@ -1928,7 +1932,7 @@ func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
 	leftResult, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(
 		layer.inputBinding,
 		backend.NewTensorF32([]int{2, 2}, layer.attnQ),
-		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "f32"}},
+		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f32"}},
 		true,
 		false,
 	)
@@ -1945,7 +1949,7 @@ func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
 	if _, err := trainer.forwardMatMul.RunMatMulWithBoundRight(
 		backend.NewTensorF32([]int{2, 2}, layer.attnQ),
 		"seq_missing_k",
-		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "f32"}},
+		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f32"}},
 		false,
 		true,
 	); err == nil {
@@ -1954,7 +1958,7 @@ func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
 	if _, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(
 		"seq_missing_input",
 		backend.NewTensorF32([]int{2, 2}, layer.attnQ),
-		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "f32"}},
+		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f32"}},
 		true,
 		false,
 	); err == nil {
@@ -1994,7 +1998,7 @@ func TestEmbeddingTrainerFFNActivationsBindAndRelease(t *testing.T) {
 			1, 0,
 			0, 1,
 		}),
-		barr.ValueType{Kind: barr.ValueTensor, Tensor: &barr.TensorType{DType: "f32"}},
+		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f32"}},
 		true,
 		false,
 	)

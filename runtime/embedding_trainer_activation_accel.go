@@ -1,7 +1,7 @@
-package barruntime
+package mantaruntime
 
 import (
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -25,12 +25,12 @@ func trainerActivationAccelModeFromEnv() trainerActivationAccelMode {
 	}
 }
 
-func newTrainerActivationAccelerator() (backend.ActivationAccelerator, barr.BackendKind, trainerActivationAccelMode, error) {
+func newTrainerActivationAccelerator() (backend.ActivationAccelerator, mantaartifact.BackendKind, trainerActivationAccelMode, error) {
 	mode := trainerActivationAccelModeFromEnv()
 	if !mode.fullBackward && !mode.softmaxBackward {
 		return nil, "", mode, nil
 	}
-	accel, backendKind, err := backend.NewPreferredActivationAccelerator(barr.BackendCUDA, barr.BackendMetal)
+	accel, backendKind, err := backend.NewPreferredActivationAccelerator(mantaartifact.BackendCUDA, mantaartifact.BackendMetal)
 	return accel, backendKind, mode, err
 }
 

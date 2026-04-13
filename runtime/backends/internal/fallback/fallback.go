@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -17,7 +17,7 @@ type cachedLoad struct {
 // Backend is a backend-owned host fallback executor for newly added GPU APIs
 // while their device runtimes are still being implemented.
 type Backend struct {
-	kind        barr.BackendKind
+	kind        mantaartifact.BackendKind
 	label       string
 	mu          sync.Mutex
 	loadCache   map[string]cachedLoad
@@ -25,11 +25,11 @@ type Backend struct {
 	cacheMisses int
 }
 
-func New(kind barr.BackendKind, label string) *Backend {
+func New(kind mantaartifact.BackendKind, label string) *Backend {
 	return &Backend{kind: kind, label: label, loadCache: map[string]cachedLoad{}}
 }
 
-func (b *Backend) Kind() barr.BackendKind {
+func (b *Backend) Kind() mantaartifact.BackendKind {
 	if b == nil {
 		return ""
 	}
@@ -38,26 +38,26 @@ func (b *Backend) Kind() barr.BackendKind {
 
 func (b *Backend) Capabilities() []string {
 	return []string{
-		barr.CapabilityCandidatePack,
-		barr.CapabilityKVCache,
-		barr.CapabilityMaskedMeanPool,
-		barr.CapabilityHostFallback,
+		mantaartifact.CapabilityCandidatePack,
+		mantaartifact.CapabilityKVCache,
+		mantaartifact.CapabilityMaskedMeanPool,
+		mantaartifact.CapabilityHostFallback,
 	}
 }
 
-func (b *Backend) CanLoad(mod *barr.Module) bool {
+func (b *Backend) CanLoad(mod *mantaartifact.Module) bool {
 	return b != nil && mod != nil && mod.SupportsBackend(b.kind)
 }
 
-func (b *Backend) Load(ctx context.Context, mod *barr.Module, weights map[string]backend.WeightBinding) (backend.Executor, error) {
+func (b *Backend) Load(ctx context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding) (backend.Executor, error) {
 	return b.load(ctx, mod, weights, "")
 }
 
-func (b *Backend) LoadWithCacheKey(ctx context.Context, mod *barr.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *Backend) LoadWithCacheKey(ctx context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	return b.load(ctx, mod, weights, cacheKey)
 }
 
-func (b *Backend) load(_ context.Context, mod *barr.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *Backend) load(_ context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	if b == nil {
 		return nil, fmt.Errorf("nil fallback backend")
 	}
@@ -109,15 +109,15 @@ func (b *Backend) storeCachedLoad(cacheKey string, cached cachedLoad) {
 }
 
 type executor struct {
-	kind     barr.BackendKind
+	kind     mantaartifact.BackendKind
 	label    string
-	module   *barr.Module
+	module   *mantaartifact.Module
 	weights  map[string]backend.WeightBinding
 	compiled map[string]backend.CompiledKernel
 	native   map[string]backend.NativeKernelProgram
 }
 
-func (e *executor) Backend() barr.BackendKind {
+func (e *executor) Backend() mantaartifact.BackendKind {
 	return e.kind
 }
 
@@ -125,7 +125,7 @@ func (e *executor) Run(ctx context.Context, req backend.Request) (backend.Result
 	return backend.ExecuteSymbolic(ctx, e.module, e.weights, e.compiled, e.dispatchKernel, e.dispatchStep, e.kind, req)
 }
 
-func (e *executor) dispatchKernel(_ context.Context, kernel barr.Kernel, inputs []*backend.Tensor) (backend.KernelDispatchResult, error) {
+func (e *executor) dispatchKernel(_ context.Context, kernel mantaartifact.Kernel, inputs []*backend.Tensor) (backend.KernelDispatchResult, error) {
 	prog, ok := e.native[kernel.Name]
 	if !ok {
 		return backend.KernelDispatchResult{}, fmt.Errorf("%s kernel %q is not compiled", e.label, kernel.Name)
@@ -146,7 +146,7 @@ func (e *executor) dispatchKernel(_ context.Context, kernel barr.Kernel, inputs 
 	}, nil
 }
 
-func (e *executor) dispatchStep(context.Context, barr.Step, barr.ValueType, []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
+func (e *executor) dispatchStep(context.Context, mantaartifact.Step, mantaartifact.ValueType, []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
 	return backend.StepDispatchResult{}, false, nil
 }
 

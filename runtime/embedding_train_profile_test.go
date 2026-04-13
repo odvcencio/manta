@@ -1,10 +1,10 @@
-package barruntime
+package mantaruntime
 
 import (
 	"path/filepath"
 	"testing"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -107,7 +107,7 @@ func TestEmbeddingTrainerFitCapturesProfileDelta(t *testing.T) {
 	}
 	fake := &countingMatMulAccelerator{}
 	trainer.forwardMatMul = fake
-	trainer.forwardBackend = barr.BackendCUDA
+	trainer.forwardBackend = mantaartifact.BackendCUDA
 
 	summary, err := trainer.FitContrastive(tinyEmbeddingContrastiveDataset(), tinyEmbeddingContrastiveDataset(), EmbeddingTrainRunConfig{
 		Epochs:      2,

@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"fmt"
@@ -23,8 +23,8 @@ type EmbeddingCorpusTrainPaths struct {
 }
 
 // TrainEmbeddingPackageFromContrastiveFiles reloads a packaged trainer, fits it on a JSONL contrastive dataset, and writes the updated package back.
-func TrainEmbeddingPackageFromContrastiveFiles(barrPath, trainPath, evalPath string, cfg EmbeddingTrainRunConfig) (EmbeddingTrainRunSummary, EmbeddingTrainPackagePaths, error) {
-	trainer, err := LoadEmbeddingTrainerPackage(barrPath)
+func TrainEmbeddingPackageFromContrastiveFiles(artifactPath, trainPath, evalPath string, cfg EmbeddingTrainRunConfig) (EmbeddingTrainRunSummary, EmbeddingTrainPackagePaths, error) {
+	trainer, err := LoadEmbeddingTrainerPackage(artifactPath)
 	if err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 	}
@@ -75,7 +75,7 @@ func TrainEmbeddingPackageFromContrastiveFiles(barrPath, trainPath, evalPath str
 			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 		}
 	}
-	paths, err := trainer.WriteTrainingPackage(barrPath)
+	paths, err := trainer.WriteTrainingPackage(artifactPath)
 	if err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 	}
@@ -84,8 +84,8 @@ func TrainEmbeddingPackageFromContrastiveFiles(barrPath, trainPath, evalPath str
 
 // TrainEmbeddingPackageFromTextContrastiveFiles reloads a packaged trainer, tokenizes text-pair JSONL with a Manta tokenizer file,
 // fits it, and writes the updated package back.
-func TrainEmbeddingPackageFromTextContrastiveFiles(barrPath, tokenizerPath, trainPath, evalPath string, cfg EmbeddingTrainRunConfig) (EmbeddingTrainRunSummary, EmbeddingTrainPackagePaths, error) {
-	trainer, err := LoadEmbeddingTrainerPackage(barrPath)
+func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, trainPath, evalPath string, cfg EmbeddingTrainRunConfig) (EmbeddingTrainRunSummary, EmbeddingTrainPackagePaths, error) {
+	trainer, err := LoadEmbeddingTrainerPackage(artifactPath)
 	if err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 	}
@@ -165,7 +165,7 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(barrPath, tokenizerPath, trai
 			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 		}
 	}
-	paths, err := trainer.WriteTrainingPackage(barrPath)
+	paths, err := trainer.WriteTrainingPackage(artifactPath)
 	if err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 	}
@@ -200,8 +200,8 @@ func applyPairwiseEvalSummary(summary *EmbeddingTrainRunSummary, finalEval Embed
 	}
 }
 
-func TrainEmbeddingPackageFromCorpusFile(barrPath, corpusPath string, cfg EmbeddingCorpusTrainConfig) (EmbeddingTrainRunSummary, EmbeddingCorpusTrainPaths, error) {
-	trainer, err := LoadEmbeddingTrainerPackage(barrPath)
+func TrainEmbeddingPackageFromCorpusFile(artifactPath, corpusPath string, cfg EmbeddingCorpusTrainConfig) (EmbeddingTrainRunSummary, EmbeddingCorpusTrainPaths, error) {
+	trainer, err := LoadEmbeddingTrainerPackage(artifactPath)
 	if err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingCorpusTrainPaths{}, err
 	}
@@ -209,7 +209,7 @@ func TrainEmbeddingPackageFromCorpusFile(barrPath, corpusPath string, cfg Embedd
 
 	tokenizerPath := cfg.TokenizerPath
 	if tokenizerPath == "" {
-		tokenizerPath = DefaultTokenizerPath(barrPath)
+		tokenizerPath = DefaultTokenizerPath(artifactPath)
 	}
 	vocabSize := cfg.TokenizerVocabSize
 	if vocabSize == 0 {
@@ -240,7 +240,7 @@ func TrainEmbeddingPackageFromCorpusFile(barrPath, corpusPath string, cfg Embedd
 	if err := tokenizer.WriteFile(tokenizerPath); err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingCorpusTrainPaths{}, err
 	}
-	if err := SyncEmbeddingTokenizerVocab(barrPath, len(tokenizer.Tokens)); err != nil {
+	if err := SyncEmbeddingTokenizerVocab(artifactPath, len(tokenizer.Tokens)); err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingCorpusTrainPaths{}, err
 	}
 	trainPairs, evalPairs, err := MineEmbeddingTextDatasetsFromCorpusFile(corpusPath, cfg.Mining)
@@ -249,11 +249,11 @@ func TrainEmbeddingPackageFromCorpusFile(barrPath, corpusPath string, cfg Embedd
 	}
 	trainPairsPath := cfg.TrainPairsPath
 	if trainPairsPath == "" {
-		trainPairsPath = DefaultMinedTrainPairsPath(barrPath)
+		trainPairsPath = DefaultMinedTrainPairsPath(artifactPath)
 	}
 	evalPairsPath := cfg.EvalPairsPath
 	if evalPairsPath == "" {
-		evalPairsPath = DefaultMinedEvalPairsPath(barrPath)
+		evalPairsPath = DefaultMinedEvalPairsPath(artifactPath)
 	}
 	if err := WriteEmbeddingTextContrastiveExamplesFile(trainPairsPath, trainPairs); err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingCorpusTrainPaths{}, err
@@ -265,7 +265,7 @@ func TrainEmbeddingPackageFromCorpusFile(barrPath, corpusPath string, cfg Embedd
 		}
 		effectiveEvalPath = evalPairsPath
 	}
-	summary, paths, err := TrainEmbeddingPackageFromTextContrastiveFiles(barrPath, tokenizerPath, trainPairsPath, effectiveEvalPath, cfg.Run)
+	summary, paths, err := TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, trainPairsPath, effectiveEvalPath, cfg.Run)
 	if err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingCorpusTrainPaths{}, err
 	}

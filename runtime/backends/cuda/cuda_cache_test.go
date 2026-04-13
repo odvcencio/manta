@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/odvcencio/manta/compiler"
-	barruntime "github.com/odvcencio/manta/runtime"
+	mantaruntime "github.com/odvcencio/manta/runtime"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -67,29 +67,29 @@ func TestRuntimeLoadUsesPackageManifestCacheKey(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	manifest := barruntime.PackageManifest{
-		Version:         barruntime.PackageManifestVersion,
-		Kind:            barruntime.PackageEmbedding,
+	manifest := mantaruntime.PackageManifest{
+		Version:         mantaruntime.PackageManifestVersion,
+		Kind:            mantaruntime.PackageEmbedding,
 		ModuleName:      bundle.Artifact.Name,
 		ArtifactVersion: bundle.Artifact.Version,
-		Files: []barruntime.PackageManifestFile{
+		Files: []mantaruntime.PackageManifestFile{
 			{Role: "artifact", Path: "tiny_embed.mll", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Bytes: 1},
 		},
 	}
 
 	b := New()
-	rt := barruntime.New(b)
+	rt := mantaruntime.New(b)
 	loadOnce := func() error {
 		_, err := rt.Load(
 			context.Background(),
 			bundle.Artifact,
-			barruntime.WithPackageManifest(manifest),
-			barruntime.WithWeight("token_embedding", backend.NewTensorF16([]int{3, 2}, []float32{
+			mantaruntime.WithPackageManifest(manifest),
+			mantaruntime.WithWeight("token_embedding", backend.NewTensorF16([]int{3, 2}, []float32{
 				1, 0,
 				0, 1,
 				1, 1,
 			})),
-			barruntime.WithWeight("projection", backend.NewTensorF16([]int{2, 2}, []float32{
+			mantaruntime.WithWeight("projection", backend.NewTensorF16([]int{2, 2}, []float32{
 				1, 0,
 				0, 1,
 			})),

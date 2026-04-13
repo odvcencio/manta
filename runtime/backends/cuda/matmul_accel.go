@@ -3,7 +3,7 @@ package cuda
 import (
 	"fmt"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -12,7 +12,7 @@ type matMulAccelerator struct {
 }
 
 func init() {
-	backend.RegisterMatMulAccelerator(barr.BackendCUDA, NewMatMulAccelerator)
+	backend.RegisterMatMulAccelerator(mantaartifact.BackendCUDA, NewMatMulAccelerator)
 }
 
 // NewMatMulAccelerator exposes the CUDA backend's library-backed matmul fast path.
@@ -27,18 +27,18 @@ func NewMatMulAccelerator() (backend.MatMulAccelerator, error) {
 	return &matMulAccelerator{device: device}, nil
 }
 
-func (a *matMulAccelerator) Backend() barr.BackendKind {
-	return barr.BackendCUDA
+func (a *matMulAccelerator) Backend() mantaartifact.BackendKind {
+	return mantaartifact.BackendCUDA
 }
 
-func (a *matMulAccelerator) RunMatMul(inputs []*backend.Tensor, outputType barr.ValueType) (backend.StepDispatchResult, error) {
+func (a *matMulAccelerator) RunMatMul(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
 	if a == nil || a.device == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda matmul accelerator is not initialized")
 	}
 	return a.device.runMatMul(inputs, outputType)
 }
 
-func (a *matMulAccelerator) RunMatMulWithTranspose(inputs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (a *matMulAccelerator) RunMatMulWithTranspose(inputs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if a == nil || a.device == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda matmul accelerator is not initialized")
 	}
@@ -59,35 +59,35 @@ func (a *matMulAccelerator) UnbindMatrix(name string) error {
 	return a.device.unbindMatMulRight(name)
 }
 
-func (a *matMulAccelerator) RunMatMulWithBoundLeft(leftName string, rhs *backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (a *matMulAccelerator) RunMatMulWithBoundLeft(leftName string, rhs *backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if a == nil || a.device == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda matmul accelerator is not initialized")
 	}
 	return a.device.runMatMulWithBoundLeft(leftName, rhs, outputType, transposeLeft, transposeRight)
 }
 
-func (a *matMulAccelerator) RunMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (a *matMulAccelerator) RunMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if a == nil || a.device == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda matmul accelerator is not initialized")
 	}
 	return a.device.runMatMulWithBoundRight(lhs, rightName, outputType, transposeLeft, transposeRight)
 }
 
-func (a *matMulAccelerator) RunMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+func (a *matMulAccelerator) RunMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
 	if a == nil || a.device == nil {
 		return nil, fmt.Errorf("cuda matmul accelerator is not initialized")
 	}
 	return a.device.runMatMulWithBoundRights(lhs, rightNames, outputType, transposeLeft, transposeRight)
 }
 
-func (a *matMulAccelerator) RunMatMulsWithSharedLeft(lhs *backend.Tensor, rhs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+func (a *matMulAccelerator) RunMatMulsWithSharedLeft(lhs *backend.Tensor, rhs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
 	if a == nil || a.device == nil {
 		return nil, fmt.Errorf("cuda matmul accelerator is not initialized")
 	}
 	return a.device.runMatMulsWithSharedLeft(lhs, rhs, outputType, transposeLeft, transposeRight)
 }
 
-func (a *matMulAccelerator) RunAccumulatedMatMulsWithBoundRights(lhs []*backend.Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (a *matMulAccelerator) RunAccumulatedMatMulsWithBoundRights(lhs []*backend.Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if a == nil || a.device == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda matmul accelerator is not initialized")
 	}

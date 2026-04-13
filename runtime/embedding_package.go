@@ -1,10 +1,10 @@
-package barruntime
+package mantaruntime
 
 import (
 	"context"
 	"os"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 )
 
 // EmbeddingPackagePaths names the files that make up a packaged embedding model.
@@ -18,8 +18,8 @@ type EmbeddingPackagePaths struct {
 }
 
 // LoadEmbeddingPackage loads a packaged embedding model from sibling artifact, manifest, and weight files.
-func (rt *Runtime) LoadEmbeddingPackage(ctx context.Context, barrPath string) (*EmbeddingModel, error) {
-	if model, ok, err := rt.tryLoadSealedEmbeddingPackage(ctx, barrPath); err != nil {
+func (rt *Runtime) LoadEmbeddingPackage(ctx context.Context, artifactPath string) (*EmbeddingModel, error) {
+	if model, ok, err := rt.tryLoadSealedEmbeddingPackage(ctx, artifactPath); err != nil {
 		return nil, err
 	} else if ok {
 		return model, nil
@@ -27,12 +27,12 @@ func (rt *Runtime) LoadEmbeddingPackage(ctx context.Context, barrPath string) (*
 	return rt.LoadEmbeddingPackageWithPaths(
 		ctx,
 		EmbeddingPackagePaths{
-			ArtifactPath:        barrPath,
-			ManifestPath:        ResolveEmbeddingManifestPath(barrPath),
-			TokenizerPath:       DefaultTokenizerPath(barrPath),
-			WeightFilePath:      DefaultWeightFilePath(barrPath),
-			MemoryPlanPath:      DefaultMemoryPlanPath(barrPath),
-			PackageManifestPath: ResolvePackageManifestPath(barrPath),
+			ArtifactPath:        artifactPath,
+			ManifestPath:        ResolveEmbeddingManifestPath(artifactPath),
+			TokenizerPath:       DefaultTokenizerPath(artifactPath),
+			WeightFilePath:      DefaultWeightFilePath(artifactPath),
+			MemoryPlanPath:      DefaultMemoryPlanPath(artifactPath),
+			PackageManifestPath: ResolvePackageManifestPath(artifactPath),
 		},
 	)
 }
@@ -98,7 +98,7 @@ func (rt *Runtime) LoadEmbeddingPackageWithPaths(ctx context.Context, paths Embe
 	if err != nil {
 		return nil, err
 	}
-	mod, err := barr.ReadFile(paths.ArtifactPath)
+	mod, err := mantaartifact.ReadFile(paths.ArtifactPath)
 	if err != nil {
 		return nil, err
 	}

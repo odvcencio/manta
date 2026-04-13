@@ -1,10 +1,10 @@
-package barruntime
+package mantaruntime
 
 import (
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
-func newTrainerContrastiveAccelerator() (backend.ContrastiveAccelerator, barr.BackendKind, error) {
-	return backend.NewPreferredContrastiveAccelerator(barr.BackendCUDA, barr.BackendMetal)
+func newTrainerContrastiveAccelerator() (backend.ContrastiveAccelerator, mantaartifact.BackendKind, error) {
+	return backend.NewPreferredContrastiveAccelerator(mantaartifact.BackendCUDA, mantaartifact.BackendMetal)
 }

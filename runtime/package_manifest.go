@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"bytes"
@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	mll "github.com/odvcencio/mll"
 )
 
@@ -41,12 +41,12 @@ type PackageManifest struct {
 	Files           []PackageManifestFile `json:"files"`
 }
 
-func DefaultPackageManifestPath(barrPath string) string {
-	return defaultManifestPath(barrPath, ".package.mll")
+func DefaultPackageManifestPath(artifactPath string) string {
+	return defaultManifestPath(artifactPath, ".package.mll")
 }
 
-func ResolvePackageManifestPath(barrPath string) string {
-	return DefaultPackageManifestPath(barrPath)
+func ResolvePackageManifestPath(artifactPath string) string {
+	return DefaultPackageManifestPath(artifactPath)
 }
 
 func (m PackageManifest) Validate() error {
@@ -112,7 +112,7 @@ func ReadPackageManifestFile(path string) (PackageManifest, error) {
 	if err != nil {
 		return PackageManifest{}, err
 	}
-	if !barr.IsMLLBytes(data) {
+	if !mantaartifact.IsMLLBytes(data) {
 		return PackageManifest{}, fmt.Errorf("package manifest %q is not an MLL file", path)
 	}
 	return decodePackageManifestMLL(data)
@@ -393,7 +393,7 @@ func decodePackageManifestMLL(data []byte) (PackageManifest, error) {
 	return manifest, nil
 }
 
-func BuildPackageManifest(kind PackageKind, mod *barr.Module, files map[string]string) (PackageManifest, error) {
+func BuildPackageManifest(kind PackageKind, mod *mantaartifact.Module, files map[string]string) (PackageManifest, error) {
 	if mod == nil {
 		return PackageManifest{}, fmt.Errorf("nil module")
 	}
@@ -429,17 +429,17 @@ func BuildPackageManifest(kind PackageKind, mod *barr.Module, files map[string]s
 	return manifest, manifest.Validate()
 }
 
-func RebuildSiblingPackageManifest(barrPath string) (PackageManifest, string, error) {
-	manifestPath := ResolvePackageManifestPath(barrPath)
+func RebuildSiblingPackageManifest(artifactPath string) (PackageManifest, string, error) {
+	manifestPath := ResolvePackageManifestPath(artifactPath)
 	current, err := ReadPackageManifestFile(manifestPath)
 	if err != nil {
 		return PackageManifest{}, "", err
 	}
-	mod, err := barr.ReadFile(barrPath)
+	mod, err := mantaartifact.ReadFile(artifactPath)
 	if err != nil {
 		return PackageManifest{}, "", err
 	}
-	files, err := siblingPackageFilesForKind(barrPath, current.Kind)
+	files, err := siblingPackageFilesForKind(artifactPath, current.Kind)
 	if err != nil {
 		return PackageManifest{}, "", err
 	}
@@ -447,16 +447,16 @@ func RebuildSiblingPackageManifest(barrPath string) (PackageManifest, string, er
 	if err != nil {
 		return PackageManifest{}, "", err
 	}
-	outPath := DefaultPackageManifestPath(barrPath)
+	outPath := DefaultPackageManifestPath(artifactPath)
 	if err := rebuilt.WriteFile(outPath); err != nil {
 		return PackageManifest{}, "", err
 	}
 	return rebuilt, outPath, nil
 }
 
-func siblingPackageFilesForKind(barrPath string, kind PackageKind) (map[string]string, error) {
+func siblingPackageFilesForKind(artifactPath string, kind PackageKind) (map[string]string, error) {
 	paths := map[string]string{
-		"artifact": barrPath,
+		"artifact": artifactPath,
 	}
 	addRequired := func(role, path string) error {
 		if path == "" {
@@ -476,27 +476,27 @@ func siblingPackageFilesForKind(barrPath string, kind PackageKind) (map[string]s
 			paths[role] = path
 		}
 	}
-	if err := addRequired("embedding_manifest", ResolveEmbeddingManifestPath(barrPath)); err != nil {
+	if err := addRequired("embedding_manifest", ResolveEmbeddingManifestPath(artifactPath)); err != nil {
 		return nil, err
 	}
-	if err := addRequired("weights", DefaultWeightFilePath(barrPath)); err != nil {
+	if err := addRequired("weights", DefaultWeightFilePath(artifactPath)); err != nil {
 		return nil, err
 	}
-	if err := addRequired("memory_plan", DefaultMemoryPlanPath(barrPath)); err != nil {
+	if err := addRequired("memory_plan", DefaultMemoryPlanPath(artifactPath)); err != nil {
 		return nil, err
 	}
-	addOptional("tokenizer", DefaultTokenizerPath(barrPath))
+	addOptional("tokenizer", DefaultTokenizerPath(artifactPath))
 	switch kind {
 	case PackageEmbedding:
 		return paths, nil
 	case PackageTraining:
-		if err := addRequired("train_manifest", ResolveEmbeddingTrainManifestPath(barrPath)); err != nil {
+		if err := addRequired("train_manifest", ResolveEmbeddingTrainManifestPath(artifactPath)); err != nil {
 			return nil, err
 		}
-		if err := addRequired("checkpoint", DefaultEmbeddingCheckpointPath(barrPath)); err != nil {
+		if err := addRequired("checkpoint", DefaultEmbeddingCheckpointPath(artifactPath)); err != nil {
 			return nil, err
 		}
-		if err := addRequired("train_profile", DefaultEmbeddingTrainProfilePath(barrPath)); err != nil {
+		if err := addRequired("train_profile", DefaultEmbeddingTrainProfilePath(artifactPath)); err != nil {
 			return nil, err
 		}
 		return paths, nil

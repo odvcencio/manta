@@ -11,6 +11,16 @@ Use `scripts/train_manta_embed_v1_candidate.fw` to create a release-grade `manta
 - exports and verifies a sealed MLL
 - supports metric gates through environment variables
 
+## Preflight
+
+Run the local preflight before spending trainer time on a candidate:
+
+```bash
+MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/verify_manta_production.fw
+```
+
+This uses generated tiny fixtures to verify the public Manta surface, build `cmd/manta`, initialize and train a `.mll` package, run eval-only checks with `optimizer_updates=0`, export a sealed `.mll`, and inspect both packages. It is a production path check, not a model quality result.
+
 ## Acquire Datasets
 
 The default acquisition workflow downloads public BEIR retrieval datasets (`scifact`, `nfcorpus`, and `fiqa`), converts qrels to Manta text-pair JSONL, writes a tokenizer corpus, and emits initial threshold gates:

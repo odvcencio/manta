@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"context"
@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	mll "github.com/odvcencio/mll"
 )
 
 // SealedEmbeddingPackage is a monolithic exported embedding package.
 type SealedEmbeddingPackage struct {
-	Module     *barr.Module
+	Module     *mantaartifact.Module
 	Manifest   EmbeddingManifest
 	Weights    WeightFile
 	MemoryPlan *MemoryPlan
@@ -49,33 +49,33 @@ func ReadSealedEmbeddingPackage(path string) (SealedEmbeddingPackage, error) {
 	return pkg, nil
 }
 
-func readSealedMantaMLL(path string) (*mll.Reader, barr.MLLMetadata, error) {
+func readSealedMantaMLL(path string) (*mll.Reader, mantaartifact.MLLMetadata, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, barr.MLLMetadata{}, err
+		return nil, mantaartifact.MLLMetadata{}, err
 	}
-	if !barr.IsMLLBytes(data) {
-		return nil, barr.MLLMetadata{}, fmt.Errorf("%q is not an MLL file", path)
+	if !mantaartifact.IsMLLBytes(data) {
+		return nil, mantaartifact.MLLMetadata{}, fmt.Errorf("%q is not an MLL file", path)
 	}
 	reader, err := mll.ReadBytes(data, mll.WithDigestVerification())
 	if err != nil {
-		return nil, barr.MLLMetadata{}, err
+		return nil, mantaartifact.MLLMetadata{}, err
 	}
 	if reader.Profile() != mll.ProfileSealed {
-		return nil, barr.MLLMetadata{}, fmt.Errorf("sealed package profile = %d, want %d", reader.Profile(), mll.ProfileSealed)
+		return nil, mantaartifact.MLLMetadata{}, fmt.Errorf("sealed package profile = %d, want %d", reader.Profile(), mll.ProfileSealed)
 	}
-	body, ok := reader.Section(barr.MLLTagXMTA)
+	body, ok := reader.Section(mantaartifact.MLLTagXMTA)
 	if !ok {
-		return nil, barr.MLLMetadata{}, fmt.Errorf("sealed package missing XMTA metadata")
+		return nil, mantaartifact.MLLMetadata{}, fmt.Errorf("sealed package missing XMTA metadata")
 	}
-	meta, err := barr.DecodeMLLMetadata(body)
+	meta, err := mantaartifact.DecodeMLLMetadata(body)
 	if err != nil {
-		return nil, barr.MLLMetadata{}, err
+		return nil, mantaartifact.MLLMetadata{}, err
 	}
 	return reader, meta, nil
 }
 
-func sealedEmbeddingPackageFromReader(reader *mll.Reader, meta barr.MLLMetadata) (SealedEmbeddingPackage, bool, error) {
+func sealedEmbeddingPackageFromReader(reader *mll.Reader, meta mantaartifact.MLLMetadata) (SealedEmbeddingPackage, bool, error) {
 	body, ok := meta.JSONFiles["embedding_manifest"]
 	if !ok {
 		return SealedEmbeddingPackage{}, false, nil
@@ -84,7 +84,7 @@ func sealedEmbeddingPackageFromReader(reader *mll.Reader, meta barr.MLLMetadata)
 	if err := json.Unmarshal(body, &manifest); err != nil {
 		return SealedEmbeddingPackage{}, false, fmt.Errorf("decode embedded embedding_manifest: %w", err)
 	}
-	mod, err := barr.DecodeJSON(meta.Artifact)
+	mod, err := mantaartifact.DecodeJSON(meta.Artifact)
 	if err != nil {
 		return SealedEmbeddingPackage{}, false, err
 	}

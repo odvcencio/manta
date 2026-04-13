@@ -1,11 +1,11 @@
-package barruntime
+package mantaruntime
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 	mll "github.com/odvcencio/mll"
 )
@@ -19,10 +19,10 @@ var tagXTPR = [4]byte{'X', 'T', 'P', 'R'}
 type EmbeddingTrainProfile struct {
 	Version            string                              `json:"version"`
 	Step               int                                 `json:"step"`
-	ForwardBackend     barr.BackendKind                    `json:"forward_backend,omitempty"`
-	OptimizerBackend   barr.BackendKind                    `json:"optimizer_backend,omitempty"`
-	ActivationBackend  barr.BackendKind                    `json:"activation_backend,omitempty"`
-	ContrastiveBackend barr.BackendKind                    `json:"contrastive_backend,omitempty"`
+	ForwardBackend     mantaartifact.BackendKind           `json:"forward_backend,omitempty"`
+	OptimizerBackend   mantaartifact.BackendKind           `json:"optimizer_backend,omitempty"`
+	ActivationBackend  mantaartifact.BackendKind           `json:"activation_backend,omitempty"`
+	ContrastiveBackend mantaartifact.BackendKind           `json:"contrastive_backend,omitempty"`
 	ForwardResidency   EmbeddingForwardResidencyStats      `json:"forward_residency"`
 	Optimizer          backend.OptimizerAcceleratorStats   `json:"optimizer"`
 	Activation         backend.ActivationAcceleratorStats  `json:"activation"`
@@ -30,8 +30,8 @@ type EmbeddingTrainProfile struct {
 }
 
 // DefaultEmbeddingTrainProfilePath returns the conventional sibling training-profile path for a .mll artifact.
-func DefaultEmbeddingTrainProfilePath(barrPath string) string {
-	return defaultManifestPath(barrPath, ".train-profile.mll")
+func DefaultEmbeddingTrainProfilePath(artifactPath string) string {
+	return defaultManifestPath(artifactPath, ".train-profile.mll")
 }
 
 // Validate checks the serialized training-profile contract.
@@ -66,7 +66,7 @@ func ReadEmbeddingTrainProfileFile(path string) (EmbeddingTrainProfile, error) {
 	if err != nil {
 		return EmbeddingTrainProfile{}, err
 	}
-	if !barr.IsMLLBytes(data) {
+	if !mantaartifact.IsMLLBytes(data) {
 		return EmbeddingTrainProfile{}, fmt.Errorf("training profile %q is not an MLL file", path)
 	}
 	return decodeEmbeddingTrainProfileMLL(data)

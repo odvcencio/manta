@@ -1,10 +1,10 @@
-package barruntime
+package mantaruntime
 
 import (
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
-func newTrainerOptimizerAccelerator() (backend.OptimizerAccelerator, barr.BackendKind, error) {
-	return backend.NewPreferredOptimizerAccelerator(barr.BackendCUDA, barr.BackendMetal)
+func newTrainerOptimizerAccelerator() (backend.OptimizerAccelerator, mantaartifact.BackendKind, error) {
+	return backend.NewPreferredOptimizerAccelerator(mantaartifact.BackendCUDA, mantaartifact.BackendMetal)
 }

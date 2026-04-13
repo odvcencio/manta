@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"bytes"
@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	mll "github.com/odvcencio/mll"
 )
 
@@ -32,8 +32,8 @@ type TokenizerFile struct {
 	EOSToken     string           `json:"eos_token,omitempty"`
 }
 
-func DefaultTokenizerPath(barrPath string) string {
-	return defaultManifestPath(barrPath, ".tokenizer.mll")
+func DefaultTokenizerPath(artifactPath string) string {
+	return defaultManifestPath(artifactPath, ".tokenizer.mll")
 }
 
 func (f TokenizerFile) Validate() error {
@@ -75,7 +75,7 @@ func ReadTokenizerFile(path string) (TokenizerFile, error) {
 	if err != nil {
 		return TokenizerFile{}, err
 	}
-	if !barr.IsMLLBytes(data) {
+	if !mantaartifact.IsMLLBytes(data) {
 		return TokenizerFile{}, fmt.Errorf("tokenizer %q is not an MLL file", path)
 	}
 	return decodeTokenizerMLL(data)

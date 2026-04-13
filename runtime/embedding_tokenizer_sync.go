@@ -1,20 +1,20 @@
-package barruntime
+package mantaruntime
 
 import (
 	"fmt"
 	"math/rand"
 	"os"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
-func SyncEmbeddingTokenizerVocab(barrPath string, vocabSize int) error {
+func SyncEmbeddingTokenizerVocab(artifactPath string, vocabSize int) error {
 	if vocabSize <= 0 {
 		return fmt.Errorf("tokenizer vocab size must be positive")
 	}
 	var tokenParam string
-	if manifestPath := ResolveEmbeddingManifestPath(barrPath); fileExists(manifestPath) {
+	if manifestPath := ResolveEmbeddingManifestPath(artifactPath); fileExists(manifestPath) {
 		manifest, err := ReadEmbeddingManifestFile(manifestPath)
 		if err != nil {
 			return err
@@ -25,7 +25,7 @@ func SyncEmbeddingTokenizerVocab(barrPath string, vocabSize int) error {
 			return err
 		}
 	}
-	if trainManifestPath := ResolveEmbeddingTrainManifestPath(barrPath); fileExists(trainManifestPath) {
+	if trainManifestPath := ResolveEmbeddingTrainManifestPath(artifactPath); fileExists(trainManifestPath) {
 		manifest, err := ReadEmbeddingTrainManifestFile(trainManifestPath)
 		if err != nil {
 			return err
@@ -41,7 +41,7 @@ func SyncEmbeddingTokenizerVocab(barrPath string, vocabSize int) error {
 	if tokenParam == "" {
 		return fmt.Errorf("token embedding param is not available for tokenizer sync")
 	}
-	if weightPath := DefaultWeightFilePath(barrPath); fileExists(weightPath) {
+	if weightPath := DefaultWeightFilePath(artifactPath); fileExists(weightPath) {
 		weights, err := ReadWeightFile(weightPath)
 		if err != nil {
 			return err
@@ -54,8 +54,8 @@ func SyncEmbeddingTokenizerVocab(barrPath string, vocabSize int) error {
 		if err := weights.WriteFile(weightPath); err != nil {
 			return err
 		}
-		if memoryPlanPath := DefaultMemoryPlanPath(barrPath); fileExists(memoryPlanPath) {
-			mod, err := barr.ReadFile(barrPath)
+		if memoryPlanPath := DefaultMemoryPlanPath(artifactPath); fileExists(memoryPlanPath) {
+			mod, err := mantaartifact.ReadFile(artifactPath)
 			if err != nil {
 				return err
 			}
@@ -65,7 +65,7 @@ func SyncEmbeddingTokenizerVocab(barrPath string, vocabSize int) error {
 			}
 		}
 	}
-	if checkpointPath := DefaultEmbeddingCheckpointPath(barrPath); fileExists(checkpointPath) {
+	if checkpointPath := DefaultEmbeddingCheckpointPath(artifactPath); fileExists(checkpointPath) {
 		checkpoint, err := ReadEmbeddingTrainCheckpointFile(checkpointPath)
 		if err != nil {
 			return err
@@ -78,8 +78,8 @@ func SyncEmbeddingTokenizerVocab(barrPath string, vocabSize int) error {
 			return err
 		}
 	}
-	if packageManifestPath := ResolvePackageManifestPath(barrPath); fileExists(packageManifestPath) {
-		if _, _, err := RebuildSiblingPackageManifest(barrPath); err != nil {
+	if packageManifestPath := ResolvePackageManifestPath(artifactPath); fileExists(packageManifestPath) {
+		if _, _, err := RebuildSiblingPackageManifest(artifactPath); err != nil {
 			return err
 		}
 	}

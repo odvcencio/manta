@@ -1,10 +1,10 @@
-package barruntime
+package mantaruntime
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -42,12 +42,12 @@ func ReadRetrievalManifestFile(path string) (RetrievalManifest, error) {
 }
 
 // DefaultRetrievalManifestPath returns the conventional sibling manifest path for an .mll artifact.
-func DefaultRetrievalManifestPath(barrPath string) string {
-	return defaultManifestPath(barrPath, ".retrieval.mll")
+func DefaultRetrievalManifestPath(artifactPath string) string {
+	return defaultManifestPath(artifactPath, ".retrieval.mll")
 }
 
-func ResolveRetrievalManifestPath(barrPath string) string {
-	return DefaultRetrievalManifestPath(barrPath)
+func ResolveRetrievalManifestPath(artifactPath string) string {
+	return DefaultRetrievalManifestPath(artifactPath)
 }
 
 // WriteFile writes the retrieval manifest as an authored MLL container.
@@ -56,7 +56,7 @@ func (m RetrievalManifest) WriteFile(path string) error {
 }
 
 // LoadRetrieval loads a retrieval module with a validated serving manifest.
-func (rt *Runtime) LoadRetrieval(ctx context.Context, mod *barr.Module, manifest RetrievalManifest, opts ...LoadOption) (*RetrievalModel, error) {
+func (rt *Runtime) LoadRetrieval(ctx context.Context, mod *mantaartifact.Module, manifest RetrievalManifest, opts ...LoadOption) (*RetrievalModel, error) {
 	manifest = manifest.normalized()
 	if err := manifest.ValidateModule(mod); err != nil {
 		return nil, err
@@ -69,8 +69,8 @@ func (rt *Runtime) LoadRetrieval(ctx context.Context, mod *barr.Module, manifest
 }
 
 // LoadRetrievalFile reads a .mll artifact and loads it as a retrieval model.
-func (rt *Runtime) LoadRetrievalFile(ctx context.Context, barrPath string, manifest RetrievalManifest, opts ...LoadOption) (*RetrievalModel, error) {
-	mod, err := barr.ReadFile(barrPath)
+func (rt *Runtime) LoadRetrievalFile(ctx context.Context, artifactPath string, manifest RetrievalManifest, opts ...LoadOption) (*RetrievalModel, error) {
+	mod, err := mantaartifact.ReadFile(artifactPath)
 	if err != nil {
 		return nil, err
 	}
@@ -78,17 +78,17 @@ func (rt *Runtime) LoadRetrievalFile(ctx context.Context, barrPath string, manif
 }
 
 // LoadRetrievalBundle reads a .mll artifact plus its sibling retrieval manifest.
-func (rt *Runtime) LoadRetrievalBundle(ctx context.Context, barrPath string, opts ...LoadOption) (*RetrievalModel, error) {
-	return rt.LoadRetrievalBundleWithManifest(ctx, barrPath, ResolveRetrievalManifestPath(barrPath), opts...)
+func (rt *Runtime) LoadRetrievalBundle(ctx context.Context, artifactPath string, opts ...LoadOption) (*RetrievalModel, error) {
+	return rt.LoadRetrievalBundleWithManifest(ctx, artifactPath, ResolveRetrievalManifestPath(artifactPath), opts...)
 }
 
 // LoadRetrievalBundleWithManifest reads a .mll artifact plus an explicit retrieval manifest path.
-func (rt *Runtime) LoadRetrievalBundleWithManifest(ctx context.Context, barrPath, manifestPath string, opts ...LoadOption) (*RetrievalModel, error) {
+func (rt *Runtime) LoadRetrievalBundleWithManifest(ctx context.Context, artifactPath, manifestPath string, opts ...LoadOption) (*RetrievalModel, error) {
 	manifest, err := ReadRetrievalManifestFile(manifestPath)
 	if err != nil {
 		return nil, err
 	}
-	return rt.LoadRetrievalFile(ctx, barrPath, manifest, opts...)
+	return rt.LoadRetrievalFile(ctx, artifactPath, manifest, opts...)
 }
 
 func (m RetrievalManifest) nameOrDefault() string {
@@ -166,7 +166,7 @@ func (m *RetrievalModel) Manifest() RetrievalManifest {
 }
 
 // Backend reports the selected backend.
-func (m *RetrievalModel) Backend() barr.BackendKind {
+func (m *RetrievalModel) Backend() mantaartifact.BackendKind {
 	if m == nil || m.program == nil {
 		return ""
 	}
@@ -243,7 +243,7 @@ func (m RetrievalManifest) normalized() RetrievalManifest {
 }
 
 // ValidateModule checks that a module satisfies the retrieval serving contract.
-func (m RetrievalManifest) ValidateModule(mod *barr.Module) error {
+func (m RetrievalManifest) ValidateModule(mod *mantaartifact.Module) error {
 	if mod == nil {
 		return fmt.Errorf("nil module")
 	}
@@ -271,7 +271,7 @@ func (m *RetrievalModel) validateCandidateResult(result CandidateResult, batched
 	return nil
 }
 
-func validateRetrievalEntry(mod *barr.Module, entryName, queryInput string, queryRank int, docsInput string, docsRank int, idsInput string, idsRank int, queryDType, docsDType, idsDType, outputName string, outputRank int) error {
+func validateRetrievalEntry(mod *mantaartifact.Module, entryName, queryInput string, queryRank int, docsInput string, docsRank int, idsInput string, idsRank int, queryDType, docsDType, idsDType, outputName string, outputRank int) error {
 	entry, err := findEntryPoint(mod, entryName)
 	if err != nil {
 		return err
@@ -280,7 +280,7 @@ func validateRetrievalEntry(mod *barr.Module, entryName, queryInput string, quer
 	if err != nil {
 		return err
 	}
-	if query.Type.Kind != barr.ValueTensor || query.Type.Tensor == nil {
+	if query.Type.Kind != mantaartifact.ValueTensor || query.Type.Tensor == nil {
 		return fmt.Errorf("entrypoint %q input %q is not a tensor", entryName, queryInput)
 	}
 	if queryDType != "" && query.Type.Tensor.DType != queryDType {
@@ -293,7 +293,7 @@ func validateRetrievalEntry(mod *barr.Module, entryName, queryInput string, quer
 	if err != nil {
 		return err
 	}
-	if docs.Type.Kind != barr.ValueTensor || docs.Type.Tensor == nil {
+	if docs.Type.Kind != mantaartifact.ValueTensor || docs.Type.Tensor == nil {
 		return fmt.Errorf("entrypoint %q input %q is not a tensor", entryName, docsInput)
 	}
 	if docsDType != "" && docs.Type.Tensor.DType != docsDType {
@@ -306,7 +306,7 @@ func validateRetrievalEntry(mod *barr.Module, entryName, queryInput string, quer
 	if err != nil {
 		return err
 	}
-	if ids.Type.Kind != barr.ValueTensor || ids.Type.Tensor == nil {
+	if ids.Type.Kind != mantaartifact.ValueTensor || ids.Type.Tensor == nil {
 		return fmt.Errorf("entrypoint %q input %q is not a tensor", entryName, idsInput)
 	}
 	if idsDType != "" && ids.Type.Tensor.DType != idsDType {
@@ -322,7 +322,7 @@ func validateRetrievalEntry(mod *barr.Module, entryName, queryInput string, quer
 	if outputName != "" && output.Name != outputName {
 		return fmt.Errorf("entrypoint %q output %q does not match manifest %q", entryName, output.Name, outputName)
 	}
-	if output.Type.Kind != barr.ValueCandidatePack || output.Type.CandidatePack == nil {
+	if output.Type.Kind != mantaartifact.ValueCandidatePack || output.Type.CandidatePack == nil {
 		return fmt.Errorf("entrypoint %q output %q is not a candidate_pack", entryName, output.Name)
 	}
 	if got := len(output.Type.CandidatePack.Shape); got != outputRank {

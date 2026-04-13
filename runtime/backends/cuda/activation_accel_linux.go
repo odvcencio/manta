@@ -12,12 +12,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
 const geluBackwardMulKernelSource = `
-extern "C" __global__ void barr_gelu_backward_mul(
+extern "C" __global__ void manta_gelu_backward_mul(
     const float* grad_out,
     const float* pre_act,
     float* out0,
@@ -39,7 +39,7 @@ extern "C" __global__ void barr_gelu_backward_mul(
 `
 
 const softmaxBackwardRowsKernelSource = `
-extern "C" __global__ void barr_softmax_backward_rows(
+extern "C" __global__ void manta_softmax_backward_rows(
     const float* grad_out,
     const float* probs,
     float* out0,
@@ -62,7 +62,7 @@ extern "C" __global__ void barr_softmax_backward_rows(
 `
 
 const layerNormBackwardRowsKernelSource = `
-extern "C" __global__ void barr_layernorm_backward_rows(
+extern "C" __global__ void manta_layernorm_backward_rows(
     const float* grad_out,
     const float* normalized,
     const float* pre,
@@ -118,7 +118,7 @@ type residentActivationTensor struct {
 }
 
 func init() {
-	backend.RegisterActivationAccelerator(barr.BackendCUDA, NewActivationAccelerator)
+	backend.RegisterActivationAccelerator(mantaartifact.BackendCUDA, NewActivationAccelerator)
 }
 
 func NewActivationAccelerator() (backend.ActivationAccelerator, error) {
@@ -129,18 +129,18 @@ func NewActivationAccelerator() (backend.ActivationAccelerator, error) {
 	if device == nil {
 		return nil, nil
 	}
-	kernel, err := device.compileAuxKernel(geluBackwardMulKernelSource, "barr_gelu_backward_mul")
+	kernel, err := device.compileAuxKernel(geluBackwardMulKernelSource, "manta_gelu_backward_mul")
 	if err != nil {
 		device.close()
 		return nil, err
 	}
-	softmaxKernel, err := device.compileAuxKernel(softmaxBackwardRowsKernelSource, "barr_softmax_backward_rows")
+	softmaxKernel, err := device.compileAuxKernel(softmaxBackwardRowsKernelSource, "manta_softmax_backward_rows")
 	if err != nil {
 		device.destroyAuxKernel(kernel)
 		device.close()
 		return nil, err
 	}
-	layerNormKernel, err := device.compileAuxKernel(layerNormBackwardRowsKernelSource, "barr_layernorm_backward_rows")
+	layerNormKernel, err := device.compileAuxKernel(layerNormBackwardRowsKernelSource, "manta_layernorm_backward_rows")
 	if err != nil {
 		device.destroyAuxKernel(kernel)
 		device.destroyAuxKernel(softmaxKernel)
@@ -150,8 +150,8 @@ func NewActivationAccelerator() (backend.ActivationAccelerator, error) {
 	return &activationAccelerator{device: device, geluKernel: kernel, softmaxKernel: softmaxKernel, layerNormKernel: layerNormKernel, bound: map[string]residentActivationTensor{}}, nil
 }
 
-func (a *activationAccelerator) Backend() barr.BackendKind {
-	return barr.BackendCUDA
+func (a *activationAccelerator) Backend() mantaartifact.BackendKind {
+	return mantaartifact.BackendCUDA
 }
 
 func (a *activationAccelerator) Stats() backend.ActivationAcceleratorStats {

@@ -7,12 +7,12 @@ import (
 	"slices"
 	"strconv"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 )
 
-func executeStep(ctx context.Context, mod *barr.Module, entry barr.EntryPoint, step barr.Step, env map[string]Value, compiled map[string]CompiledKernel, dispatch KernelDispatcher, dispatchStep StepDispatcher, bindings map[string]int, kind barr.BackendKind) ([]Value, string, error) {
+func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaartifact.EntryPoint, step mantaartifact.Step, env map[string]Value, compiled map[string]CompiledKernel, dispatch KernelDispatcher, dispatchStep StepDispatcher, bindings map[string]int, kind mantaartifact.BackendKind) ([]Value, string, error) {
 	switch step.Kind {
-	case barr.StepAlias:
+	case mantaartifact.StepAlias:
 		if len(step.Inputs) != 1 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("alias step %q expects 1 input and 1 output", step.Name)
 		}
@@ -28,7 +28,7 @@ func executeStep(ctx context.Context, mod *barr.Module, entry barr.EntryPoint, s
 			out.Metadata = map[string]any{"aliased_from": step.Inputs[0]}
 		}
 		return []Value{out}, "", nil
-	case barr.StepGather:
+	case mantaartifact.StepGather:
 		if len(step.Inputs) != 2 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("gather step %q expects 2 inputs and 1 output", step.Name)
 		}
@@ -45,7 +45,7 @@ func executeStep(ctx context.Context, mod *barr.Module, entry barr.EntryPoint, s
 			return nil, "", err
 		}
 		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", nil)}, "", nil
-	case barr.StepTranspose:
+	case mantaartifact.StepTranspose:
 		if len(step.Inputs) != 1 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("transpose step %q expects 1 input and 1 output", step.Name)
 		}
@@ -63,7 +63,7 @@ func executeStep(ctx context.Context, mod *barr.Module, entry barr.EntryPoint, s
 			"launch_api":     "host_reference",
 		}
 		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", meta)}, "", nil
-	case barr.StepPack:
+	case mantaartifact.StepPack:
 		if len(step.Inputs) != 3 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("pack_candidates step %q expects 3 inputs and 1 output", step.Name)
 		}
@@ -80,7 +80,7 @@ func executeStep(ctx context.Context, mod *barr.Module, entry barr.EntryPoint, s
 			return nil, "", err
 		}
 		return []Value{makeCandidatePackValue(mod, entry, step, NewCandidatePack(ids, scores, docs), bindings, kind)}, "", nil
-	case barr.StepMatMul:
+	case mantaartifact.StepMatMul:
 		if len(step.Inputs) != 2 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("matmul step %q expects 2 inputs and 1 output", step.Name)
 		}
@@ -116,7 +116,7 @@ func executeStep(ctx context.Context, mod *barr.Module, entry barr.EntryPoint, s
 			"launch_api":     "host_reference",
 		}
 		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", meta)}, "", nil
-	case barr.StepTopK:
+	case mantaartifact.StepTopK:
 		if len(step.Inputs) != 1 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("topk step %q expects 1 input and 1 output", step.Name)
 		}
@@ -133,7 +133,7 @@ func executeStep(ctx context.Context, mod *barr.Module, entry barr.EntryPoint, s
 			return nil, "", err
 		}
 		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", nil)}, "", nil
-	case barr.StepDequant:
+	case mantaartifact.StepDequant:
 		if len(step.Inputs) != 1 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("dequant step %q expects 1 input and 1 output", step.Name)
 		}
@@ -146,7 +146,7 @@ func executeStep(ctx context.Context, mod *barr.Module, entry barr.EntryPoint, s
 			out.DType = "f16"
 		}
 		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", nil)}, "", nil
-	case barr.StepKVRead:
+	case mantaartifact.StepKVRead:
 		if len(step.Inputs) != 1 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("kv_read step %q expects 1 input and 1 output", step.Name)
 		}
@@ -161,7 +161,7 @@ func executeStep(ctx context.Context, mod *barr.Module, entry barr.EntryPoint, s
 			out = zeroTensorForType(resolveStepOutputType(mod, entry, step, 0, env), bindings)
 		}
 		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", nil)}, "", nil
-	case barr.StepKVWrite:
+	case mantaartifact.StepKVWrite:
 		if len(step.Inputs) != 2 {
 			return nil, "", fmt.Errorf("kv_write step %q expects 2 inputs", step.Name)
 		}
@@ -175,7 +175,7 @@ func executeStep(ctx context.Context, mod *barr.Module, entry barr.EntryPoint, s
 		}
 		cache.Value = value.Clone()
 		return nil, "", nil
-	case barr.StepLaunchKernel:
+	case mantaartifact.StepLaunchKernel:
 		kernel, ok := kernelByName(mod, step.Kernel)
 		if !ok {
 			return nil, "", fmt.Errorf("entrypoint %q step %q references unknown kernel %q", entry.Name, step.Name, step.Kernel)
@@ -208,7 +208,7 @@ func executeStep(ctx context.Context, mod *barr.Module, entry barr.EntryPoint, s
 	}
 }
 
-func executeKernel(kernel barr.Kernel, inputs []*Tensor) ([]*Tensor, error) {
+func executeKernel(kernel mantaartifact.Kernel, inputs []*Tensor) ([]*Tensor, error) {
 	locals := map[string]*Tensor{}
 	for i, input := range kernel.Inputs {
 		if i >= len(inputs) {
@@ -219,7 +219,7 @@ func executeKernel(kernel barr.Kernel, inputs []*Tensor) ([]*Tensor, error) {
 	returnNames := []string{}
 	for _, op := range kernel.Body {
 		switch op.Kind {
-		case barr.KernelOpReturn:
+		case mantaartifact.KernelOpReturn:
 			returnNames = append([]string(nil), op.Outputs...)
 		default:
 			out, err := executeKernelOp(op, locals)
@@ -248,7 +248,7 @@ func executeKernel(kernel barr.Kernel, inputs []*Tensor) ([]*Tensor, error) {
 	return results, nil
 }
 
-func executeKernelOp(op barr.KernelOp, locals map[string]*Tensor) (*Tensor, error) {
+func executeKernelOp(op mantaartifact.KernelOp, locals map[string]*Tensor) (*Tensor, error) {
 	switch op.Op {
 	case "normalize", "rmsnorm":
 		in, err := tensorByName(locals, op.Inputs, 0)
@@ -378,7 +378,7 @@ func binaryTensorOp(locals map[string]*Tensor, names []string, fn func(float32, 
 	return out, nil
 }
 
-func gatherTensor(table, indices *Tensor, outTypes ...barr.ValueType) (*Tensor, error) {
+func gatherTensor(table, indices *Tensor, outTypes ...mantaartifact.ValueType) (*Tensor, error) {
 	if table == nil || indices == nil {
 		return nil, fmt.Errorf("nil gather input")
 	}
@@ -904,7 +904,7 @@ func meanPoolMaskedTensor(in, mask *Tensor) (*Tensor, error) {
 	}
 }
 
-func expectedTensorRank(outTypes ...barr.ValueType) int {
+func expectedTensorRank(outTypes ...mantaartifact.ValueType) int {
 	if len(outTypes) == 0 || outTypes[0].Tensor == nil {
 		return 0
 	}
@@ -1217,7 +1217,7 @@ func topKTensor(in *Tensor, k int) (*Tensor, error) {
 	return nil, fmt.Errorf("topk expects rank-1 or rank-2 scores")
 }
 
-func topKStepLimit(step barr.Step) (int, error) {
+func topKStepLimit(step mantaartifact.Step) (int, error) {
 	if step.Attributes == nil {
 		return 0, fmt.Errorf("topk step %q is missing limit attribute", step.Name)
 	}
@@ -1232,17 +1232,17 @@ func topKStepLimit(step barr.Step) (int, error) {
 	return k, nil
 }
 
-func kernelByName(mod *barr.Module, name string) (barr.Kernel, bool) {
+func kernelByName(mod *mantaartifact.Module, name string) (mantaartifact.Kernel, bool) {
 	for _, kernel := range mod.Kernels {
 		if kernel.Name == name {
 			return kernel, true
 		}
 	}
-	return barr.Kernel{}, false
+	return mantaartifact.Kernel{}, false
 }
 
-func zeroTensorForType(typ barr.ValueType, bindings map[string]int) *Tensor {
-	if typ.Kind != barr.ValueTensor || typ.Tensor == nil {
+func zeroTensorForType(typ mantaartifact.ValueType, bindings map[string]int) *Tensor {
+	if typ.Kind != mantaartifact.ValueTensor || typ.Tensor == nil {
 		return &Tensor{DType: "f32", Shape: []int{1}, F32: []float32{0}}
 	}
 	shape := make([]int, len(typ.Tensor.Shape))
@@ -1274,8 +1274,8 @@ func zeroTensorForType(typ barr.ValueType, bindings map[string]int) *Tensor {
 	return &Tensor{DType: typ.Tensor.DType, Shape: shape, F32: make([]float32, n)}
 }
 
-func zeroCandidatePackForType(typ barr.ValueType, bindings map[string]int) *CandidatePack {
-	if typ.Kind != barr.ValueCandidatePack || typ.CandidatePack == nil {
+func zeroCandidatePackForType(typ mantaartifact.ValueType, bindings map[string]int) *CandidatePack {
+	if typ.Kind != mantaartifact.ValueCandidatePack || typ.CandidatePack == nil {
 		return NewCandidatePack(NewTensorI64([]int{1}, []int64{0}), NewTensorF32([]int{1}, []float32{0}), NewTensorQ4([]int{1, 1}, []float32{0}))
 	}
 	shape := make([]int, len(typ.CandidatePack.Shape))
@@ -1320,7 +1320,7 @@ func cloneAnyMap(in map[string]any) map[string]any {
 	return out
 }
 
-func makeTensorValue(mod *barr.Module, entry barr.EntryPoint, step barr.Step, outputIndex int, tensor *Tensor, bindings map[string]int, kind barr.BackendKind, variantEntry, sourceHash string, extra map[string]any) Value {
+func makeTensorValue(mod *mantaartifact.Module, entry mantaartifact.EntryPoint, step mantaartifact.Step, outputIndex int, tensor *Tensor, bindings map[string]int, kind mantaartifact.BackendKind, variantEntry, sourceHash string, extra map[string]any) Value {
 	valueType := resolveStepOutputType(mod, entry, step, outputIndex, nil)
 	concreteType := valueType
 	if bound, err := concretizeValueType(valueType, tensor, bindings); err == nil {
@@ -1345,7 +1345,7 @@ func makeTensorValue(mod *barr.Module, entry barr.EntryPoint, step barr.Step, ou
 	}
 }
 
-func makeCandidatePackValue(mod *barr.Module, entry barr.EntryPoint, step barr.Step, pack *CandidatePack, bindings map[string]int, kind barr.BackendKind) Value {
+func makeCandidatePackValue(mod *mantaartifact.Module, entry mantaartifact.EntryPoint, step mantaartifact.Step, pack *CandidatePack, bindings map[string]int, kind mantaartifact.BackendKind) Value {
 	valueType := resolveStepOutputType(mod, entry, step, 0, nil)
 	concreteType := valueType
 	if bound, err := concretizeValueType(valueType, pack, bindings); err == nil {

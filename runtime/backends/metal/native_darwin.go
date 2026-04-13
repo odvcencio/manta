@@ -14,13 +14,13 @@ package metal
 typedef struct {
 	void* device;
 	void* queue;
-} BarrMetalRuntime;
+} MantaMetalRuntime;
 
 typedef struct {
 	void* pipeline;
-} BarrMetalKernel;
+} MantaMetalKernel;
 
-static char* barr_dup_cstr(const char* s) {
+static char* manta_dup_cstr(const char* s) {
 	if (s == NULL) {
 		return NULL;
 	}
@@ -33,7 +33,7 @@ static char* barr_dup_cstr(const char* s) {
 	return out;
 }
 
-static char* barr_dup_format(const char* prefix, const char* value) {
+static char* manta_dup_format(const char* prefix, const char* value) {
 	if (prefix == NULL) prefix = "error";
 	if (value == NULL) value = "unknown";
 	size_t n = strlen(prefix) + strlen(value) + 3;
@@ -45,29 +45,29 @@ static char* barr_dup_format(const char* prefix, const char* value) {
 	return out;
 }
 
-static char* barr_dup_ns_error(const char* prefix, NSError* error) {
+static char* manta_dup_ns_error(const char* prefix, NSError* error) {
 	if (error == nil) {
-		return barr_dup_format(prefix, "unknown");
+		return manta_dup_format(prefix, "unknown");
 	}
 	NSString* desc = [error localizedDescription];
-	return barr_dup_format(prefix, [desc UTF8String]);
+	return manta_dup_format(prefix, [desc UTF8String]);
 }
 
-static int barrMetalRuntimeCreate(BarrMetalRuntime** out, char** err) {
+static int mantaMetalRuntimeCreate(MantaMetalRuntime** out, char** err) {
 	@autoreleasepool {
 		id<MTLDevice> device = MTLCreateSystemDefaultDevice();
 		if (device == nil) {
-			*err = barr_dup_format("MTLCreateSystemDefaultDevice", "no Metal device");
+			*err = manta_dup_format("MTLCreateSystemDefaultDevice", "no Metal device");
 			return 1;
 		}
 		id<MTLCommandQueue> queue = [device newCommandQueue];
 		if (queue == nil) {
-			*err = barr_dup_format("newCommandQueue", "failed");
+			*err = manta_dup_format("newCommandQueue", "failed");
 			return 1;
 		}
-		BarrMetalRuntime* rt = (BarrMetalRuntime*)malloc(sizeof(BarrMetalRuntime));
+		MantaMetalRuntime* rt = (MantaMetalRuntime*)malloc(sizeof(MantaMetalRuntime));
 		if (rt == NULL) {
-			*err = barr_dup_format("malloc", "failed to allocate runtime");
+			*err = manta_dup_format("malloc", "failed to allocate runtime");
 			return 1;
 		}
 		rt->device = (__bridge_retained void*)device;
@@ -77,7 +77,7 @@ static int barrMetalRuntimeCreate(BarrMetalRuntime** out, char** err) {
 	}
 }
 
-static void barrMetalRuntimeDestroy(BarrMetalRuntime* rt) {
+static void mantaMetalRuntimeDestroy(MantaMetalRuntime* rt) {
 	if (rt == NULL) {
 		return;
 	}
@@ -90,34 +90,34 @@ static void barrMetalRuntimeDestroy(BarrMetalRuntime* rt) {
 	free(rt);
 }
 
-static int barrMetalCompileKernel(BarrMetalRuntime* rt, const char* src, const char* entry, BarrMetalKernel** out, char** err) {
+static int mantaMetalCompileKernel(MantaMetalRuntime* rt, const char* src, const char* entry, MantaMetalKernel** out, char** err) {
 	@autoreleasepool {
 		id<MTLDevice> device = (__bridge id<MTLDevice>)rt->device;
 		NSString* source = [NSString stringWithUTF8String:src];
 		NSString* entryName = [NSString stringWithUTF8String:entry];
 		if (source == nil || entryName == nil) {
-			*err = barr_dup_format("NSString", "invalid UTF-8");
+			*err = manta_dup_format("NSString", "invalid UTF-8");
 			return 1;
 		}
 		NSError* nsErr = nil;
 		id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&nsErr];
 		if (library == nil) {
-			*err = barr_dup_ns_error("newLibraryWithSource", nsErr);
+			*err = manta_dup_ns_error("newLibraryWithSource", nsErr);
 			return 1;
 		}
 		id<MTLFunction> function = [library newFunctionWithName:entryName];
 		if (function == nil) {
-			*err = barr_dup_format("newFunctionWithName", "entry not found");
+			*err = manta_dup_format("newFunctionWithName", "entry not found");
 			return 1;
 		}
 		id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:function error:&nsErr];
 		if (pipeline == nil) {
-			*err = barr_dup_ns_error("newComputePipelineStateWithFunction", nsErr);
+			*err = manta_dup_ns_error("newComputePipelineStateWithFunction", nsErr);
 			return 1;
 		}
-		BarrMetalKernel* kernel = (BarrMetalKernel*)malloc(sizeof(BarrMetalKernel));
+		MantaMetalKernel* kernel = (MantaMetalKernel*)malloc(sizeof(MantaMetalKernel));
 		if (kernel == NULL) {
-			*err = barr_dup_format("malloc", "failed to allocate kernel");
+			*err = manta_dup_format("malloc", "failed to allocate kernel");
 			return 1;
 		}
 		kernel->pipeline = (__bridge_retained void*)pipeline;
@@ -126,7 +126,7 @@ static int barrMetalCompileKernel(BarrMetalRuntime* rt, const char* src, const c
 	}
 }
 
-static void barrMetalKernelDestroy(BarrMetalKernel* kernel) {
+static void mantaMetalKernelDestroy(MantaMetalKernel* kernel) {
 	if (kernel == NULL) {
 		return;
 	}
@@ -136,7 +136,7 @@ static void barrMetalKernelDestroy(BarrMetalKernel* kernel) {
 	free(kernel);
 }
 
-static int barrMetalLaunchRowWise(BarrMetalRuntime* rt, BarrMetalKernel* kernel, const float* in0, float* out0, int rows, int cols, int threadgroupSize, char** err) {
+static int mantaMetalLaunchRowWise(MantaMetalRuntime* rt, MantaMetalKernel* kernel, const float* in0, float* out0, int rows, int cols, int threadgroupSize, char** err) {
 	@autoreleasepool {
 		id<MTLDevice> device = (__bridge id<MTLDevice>)rt->device;
 		id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)rt->queue;
@@ -148,13 +148,13 @@ static int barrMetalLaunchRowWise(BarrMetalRuntime* rt, BarrMetalKernel* kernel,
 		id<MTLBuffer> rowsBuf = [device newBufferWithBytes:&rows length:sizeof(int) options:MTLResourceStorageModeShared];
 		id<MTLBuffer> colsBuf = [device newBufferWithBytes:&cols length:sizeof(int) options:MTLResourceStorageModeShared];
 		if (inBuf == nil || outBuf == nil || rowsBuf == nil || colsBuf == nil) {
-			*err = barr_dup_format("newBuffer", "failed");
+			*err = manta_dup_format("newBuffer", "failed");
 			return 1;
 		}
 		id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
 		id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
 		if (commandBuffer == nil || encoder == nil) {
-			*err = barr_dup_format("commandBuffer", "failed");
+			*err = manta_dup_format("commandBuffer", "failed");
 			return 1;
 		}
 		[encoder setComputePipelineState:pipeline];
@@ -173,7 +173,7 @@ static int barrMetalLaunchRowWise(BarrMetalRuntime* rt, BarrMetalKernel* kernel,
 		[commandBuffer commit];
 		[commandBuffer waitUntilCompleted];
 		if (commandBuffer.error != nil) {
-			*err = barr_dup_ns_error("commandBuffer", commandBuffer.error);
+			*err = manta_dup_ns_error("commandBuffer", commandBuffer.error);
 			return 1;
 		}
 		memcpy(out0, [outBuf contents], bytes);
@@ -181,7 +181,7 @@ static int barrMetalLaunchRowWise(BarrMetalRuntime* rt, BarrMetalKernel* kernel,
 	}
 }
 
-static int barrMetalLaunchElementWise(BarrMetalRuntime* rt, BarrMetalKernel* kernel, const float* lhs, const float* rhs, float* out0, int elements, int threadgroupSize, char** err) {
+static int mantaMetalLaunchElementWise(MantaMetalRuntime* rt, MantaMetalKernel* kernel, const float* lhs, const float* rhs, float* out0, int elements, int threadgroupSize, char** err) {
 	@autoreleasepool {
 		id<MTLDevice> device = (__bridge id<MTLDevice>)rt->device;
 		id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)rt->queue;
@@ -192,13 +192,13 @@ static int barrMetalLaunchElementWise(BarrMetalRuntime* rt, BarrMetalKernel* ker
 		id<MTLBuffer> outBuf = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
 		id<MTLBuffer> elementsBuf = [device newBufferWithBytes:&elements length:sizeof(int) options:MTLResourceStorageModeShared];
 		if (lhsBuf == nil || rhsBuf == nil || outBuf == nil || elementsBuf == nil) {
-			*err = barr_dup_format("newBuffer", "failed");
+			*err = manta_dup_format("newBuffer", "failed");
 			return 1;
 		}
 		id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
 		id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
 		if (commandBuffer == nil || encoder == nil) {
-			*err = barr_dup_format("commandBuffer", "failed");
+			*err = manta_dup_format("commandBuffer", "failed");
 			return 1;
 		}
 		[encoder setComputePipelineState:pipeline];
@@ -217,7 +217,7 @@ static int barrMetalLaunchElementWise(BarrMetalRuntime* rt, BarrMetalKernel* ker
 		[commandBuffer commit];
 		[commandBuffer waitUntilCompleted];
 		if (commandBuffer.error != nil) {
-			*err = barr_dup_ns_error("commandBuffer", commandBuffer.error);
+			*err = manta_dup_ns_error("commandBuffer", commandBuffer.error);
 			return 1;
 		}
 		memcpy(out0, [outBuf contents], bytes);
@@ -225,7 +225,7 @@ static int barrMetalLaunchElementWise(BarrMetalRuntime* rt, BarrMetalKernel* ker
 	}
 }
 
-static int barrMetalLaunchUnary(BarrMetalRuntime* rt, BarrMetalKernel* kernel, const float* in0, float* out0, int elements, int threadgroupSize, char** err) {
+static int mantaMetalLaunchUnary(MantaMetalRuntime* rt, MantaMetalKernel* kernel, const float* in0, float* out0, int elements, int threadgroupSize, char** err) {
 	@autoreleasepool {
 		id<MTLDevice> device = (__bridge id<MTLDevice>)rt->device;
 		id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)rt->queue;
@@ -235,13 +235,13 @@ static int barrMetalLaunchUnary(BarrMetalRuntime* rt, BarrMetalKernel* kernel, c
 		id<MTLBuffer> outBuf = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
 		id<MTLBuffer> elementsBuf = [device newBufferWithBytes:&elements length:sizeof(int) options:MTLResourceStorageModeShared];
 		if (inBuf == nil || outBuf == nil || elementsBuf == nil) {
-			*err = barr_dup_format("newBuffer", "failed");
+			*err = manta_dup_format("newBuffer", "failed");
 			return 1;
 		}
 		id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
 		id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
 		if (commandBuffer == nil || encoder == nil) {
-			*err = barr_dup_format("commandBuffer", "failed");
+			*err = manta_dup_format("commandBuffer", "failed");
 			return 1;
 		}
 		[encoder setComputePipelineState:pipeline];
@@ -259,7 +259,7 @@ static int barrMetalLaunchUnary(BarrMetalRuntime* rt, BarrMetalKernel* kernel, c
 		[commandBuffer commit];
 		[commandBuffer waitUntilCompleted];
 		if (commandBuffer.error != nil) {
-			*err = barr_dup_ns_error("commandBuffer", commandBuffer.error);
+			*err = manta_dup_ns_error("commandBuffer", commandBuffer.error);
 			return 1;
 		}
 		memcpy(out0, [outBuf contents], bytes);
@@ -267,7 +267,7 @@ static int barrMetalLaunchUnary(BarrMetalRuntime* rt, BarrMetalKernel* kernel, c
 	}
 }
 
-static int barrMetalLaunchScore(BarrMetalRuntime* rt, BarrMetalKernel* kernel, const float* query, const float* docs, float* out0, int rows, int cols, int threadgroupSize, char** err) {
+static int mantaMetalLaunchScore(MantaMetalRuntime* rt, MantaMetalKernel* kernel, const float* query, const float* docs, float* out0, int rows, int cols, int threadgroupSize, char** err) {
 	@autoreleasepool {
 		id<MTLDevice> device = (__bridge id<MTLDevice>)rt->device;
 		id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)rt->queue;
@@ -281,13 +281,13 @@ static int barrMetalLaunchScore(BarrMetalRuntime* rt, BarrMetalKernel* kernel, c
 		id<MTLBuffer> rowsBuf = [device newBufferWithBytes:&rows length:sizeof(int) options:MTLResourceStorageModeShared];
 		id<MTLBuffer> colsBuf = [device newBufferWithBytes:&cols length:sizeof(int) options:MTLResourceStorageModeShared];
 		if (queryBuf == nil || docsBuf == nil || outBuf == nil || rowsBuf == nil || colsBuf == nil) {
-			*err = barr_dup_format("newBuffer", "failed");
+			*err = manta_dup_format("newBuffer", "failed");
 			return 1;
 		}
 		id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
 		id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
 		if (commandBuffer == nil || encoder == nil) {
-			*err = barr_dup_format("commandBuffer", "failed");
+			*err = manta_dup_format("commandBuffer", "failed");
 			return 1;
 		}
 		[encoder setComputePipelineState:pipeline];
@@ -307,7 +307,7 @@ static int barrMetalLaunchScore(BarrMetalRuntime* rt, BarrMetalKernel* kernel, c
 		[commandBuffer commit];
 		[commandBuffer waitUntilCompleted];
 		if (commandBuffer.error != nil) {
-			*err = barr_dup_ns_error("commandBuffer", commandBuffer.error);
+			*err = manta_dup_ns_error("commandBuffer", commandBuffer.error);
 			return 1;
 		}
 		memcpy(out0, [outBuf contents], outBytes);
@@ -315,7 +315,7 @@ static int barrMetalLaunchScore(BarrMetalRuntime* rt, BarrMetalKernel* kernel, c
 	}
 }
 
-static int barrMetalMatMulMPS(BarrMetalRuntime* rt, const float* lhs, const float* rhs, float* out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
+static int mantaMetalMatMulMPS(MantaMetalRuntime* rt, const float* lhs, const float* rhs, float* out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
 	@autoreleasepool {
 		id<MTLDevice> device = (__bridge id<MTLDevice>)rt->device;
 		id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)rt->queue;
@@ -326,7 +326,7 @@ static int barrMetalMatMulMPS(BarrMetalRuntime* rt, const float* lhs, const floa
 		NSUInteger rhsInner = transposeRight ? (NSUInteger)rhsCols : (NSUInteger)rhsRows;
 		NSUInteger cols = transposeRight ? (NSUInteger)rhsRows : (NSUInteger)rhsCols;
 		if (inner != rhsInner) {
-			*err = barr_dup_format("MPSMatrixMultiplication", "shape mismatch");
+			*err = manta_dup_format("MPSMatrixMultiplication", "shape mismatch");
 			return 1;
 		}
 		NSUInteger outBytes = (NSUInteger)rows * (NSUInteger)cols * sizeof(float);
@@ -334,12 +334,12 @@ static int barrMetalMatMulMPS(BarrMetalRuntime* rt, const float* lhs, const floa
 		id<MTLBuffer> rhsBuf = [device newBufferWithBytes:rhs length:rhsBytes options:MTLResourceStorageModeShared];
 		id<MTLBuffer> outBuf = [device newBufferWithLength:outBytes options:MTLResourceStorageModeShared];
 		if (lhsBuf == nil || rhsBuf == nil || outBuf == nil) {
-			*err = barr_dup_format("newBuffer", "failed");
+			*err = manta_dup_format("newBuffer", "failed");
 			return 1;
 		}
 		id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
 		if (commandBuffer == nil) {
-			*err = barr_dup_format("commandBuffer", "failed");
+			*err = manta_dup_format("commandBuffer", "failed");
 			return 1;
 		}
 		MPSMatrixDescriptor* lhsDesc = [MPSMatrixDescriptor matrixDescriptorWithRows:(NSUInteger)lhsRows
@@ -355,14 +355,14 @@ static int barrMetalMatMulMPS(BarrMetalRuntime* rt, const float* lhs, const floa
 		                                                                    rowBytes:cols * sizeof(float)
 		                                                                    dataType:MPSDataTypeFloat32];
 		if (lhsDesc == nil || rhsDesc == nil || outDesc == nil) {
-			*err = barr_dup_format("MPSMatrixDescriptor", "failed");
+			*err = manta_dup_format("MPSMatrixDescriptor", "failed");
 			return 1;
 		}
 		MPSMatrix* lhsMatrix = [[MPSMatrix alloc] initWithBuffer:lhsBuf descriptor:lhsDesc];
 		MPSMatrix* rhsMatrix = [[MPSMatrix alloc] initWithBuffer:rhsBuf descriptor:rhsDesc];
 		MPSMatrix* outMatrix = [[MPSMatrix alloc] initWithBuffer:outBuf descriptor:outDesc];
 		if (lhsMatrix == nil || rhsMatrix == nil || outMatrix == nil) {
-			*err = barr_dup_format("MPSMatrix", "failed");
+			*err = manta_dup_format("MPSMatrix", "failed");
 			return 1;
 		}
 		MPSMatrixMultiplication* op = [[MPSMatrixMultiplication alloc] initWithDevice:device
@@ -374,14 +374,14 @@ static int barrMetalMatMulMPS(BarrMetalRuntime* rt, const float* lhs, const floa
 		                                                                                  alpha:1.0
 		                                                                                   beta:0.0];
 		if (op == nil) {
-			*err = barr_dup_format("MPSMatrixMultiplication", "failed");
+			*err = manta_dup_format("MPSMatrixMultiplication", "failed");
 			return 1;
 		}
 		[op encodeToCommandBuffer:commandBuffer leftMatrix:lhsMatrix rightMatrix:rhsMatrix resultMatrix:outMatrix];
 		[commandBuffer commit];
 		[commandBuffer waitUntilCompleted];
 		if (commandBuffer.error != nil) {
-			*err = barr_dup_ns_error("commandBuffer", commandBuffer.error);
+			*err = manta_dup_ns_error("commandBuffer", commandBuffer.error);
 			return 1;
 		}
 		memcpy(out0, [outBuf contents], outBytes);
@@ -389,7 +389,7 @@ static int barrMetalMatMulMPS(BarrMetalRuntime* rt, const float* lhs, const floa
 	}
 }
 
-static void barrMetalFreeCString(char* s) {
+static void mantaMetalFreeCString(char* s) {
 	if (s != NULL) {
 		free(s);
 	}
@@ -402,16 +402,16 @@ import (
 	"fmt"
 	"unsafe"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
 type deviceRuntime struct {
-	ptr *C.BarrMetalRuntime
+	ptr *C.MantaMetalRuntime
 }
 
 type deviceKernel struct {
-	ptr       *C.BarrMetalKernel
+	ptr       *C.MantaMetalKernel
 	shapeKind metalShapeKind
 }
 
@@ -426,9 +426,9 @@ const (
 )
 
 func newDeviceRuntime() (*deviceRuntime, error) {
-	var rt *C.BarrMetalRuntime
+	var rt *C.MantaMetalRuntime
 	var errStr *C.char
-	if C.barrMetalRuntimeCreate(&rt, &errStr) != 0 {
+	if C.mantaMetalRuntimeCreate(&rt, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return &deviceRuntime{ptr: rt}, nil
@@ -438,11 +438,11 @@ func (rt *deviceRuntime) close() {
 	if rt == nil || rt.ptr == nil {
 		return
 	}
-	C.barrMetalRuntimeDestroy(rt.ptr)
+	C.mantaMetalRuntimeDestroy(rt.ptr)
 	rt.ptr = nil
 }
 
-func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram, kernel barr.Kernel) error {
+func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram, kernel mantaartifact.Kernel) error {
 	shapeKind := classifyMetalKernel(kernel)
 	if shapeKind == metalShapeUnsupported {
 		prog.LaunchConfig["device_execution"] = false
@@ -468,15 +468,15 @@ func (rt *deviceRuntime) compileKernel(compiled backend.CompiledKernel, shapeKin
 	defer C.free(unsafe.Pointer(src))
 	defer C.free(unsafe.Pointer(entry))
 
-	var kernel *C.BarrMetalKernel
+	var kernel *C.MantaMetalKernel
 	var errStr *C.char
-	if C.barrMetalCompileKernel(rt.ptr, src, entry, &kernel, &errStr) != 0 {
+	if C.mantaMetalCompileKernel(rt.ptr, src, entry, &kernel, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return &deviceKernel{ptr: kernel, shapeKind: shapeKind}, nil
 }
 
-func (rt *deviceRuntime) runKernel(deviceKernel *deviceKernel, kernel barr.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	switch deviceKernel.shapeKind {
 	case metalShapeRowWise:
 		return rt.runRowWiseKernel(deviceKernel, kernel, prog, inputs)
@@ -491,7 +491,7 @@ func (rt *deviceRuntime) runKernel(deviceKernel *deviceKernel, kernel barr.Kerne
 	}
 }
 
-func (rt *deviceRuntime) runRowWiseKernel(deviceKernel *deviceKernel, kernel barr.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runRowWiseKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 1 {
 		return nil, fmt.Errorf("kernel %q expected 1 input for row-wise launch, got %d", kernel.Name, len(inputs))
 	}
@@ -516,13 +516,13 @@ func (rt *deviceRuntime) runRowWiseKernel(deviceKernel *deviceKernel, kernel bar
 		outPtr = (*C.float)(unsafe.Pointer(&outHost[0]))
 	}
 	var errStr *C.char
-	if C.barrMetalLaunchRowWise(rt.ptr, deviceKernel.ptr, inPtr, outPtr, C.int(rows), C.int(cols), tg, &errStr) != 0 {
+	if C.mantaMetalLaunchRowWise(rt.ptr, deviceKernel.ptr, inPtr, outPtr, C.int(rows), C.int(cols), tg, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return []*backend.Tensor{newOutputTensor(kernel, outShape, outHost)}, nil
 }
 
-func (rt *deviceRuntime) runElementWiseKernel(deviceKernel *deviceKernel, kernel barr.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runElementWiseKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 2 {
 		return nil, fmt.Errorf("kernel %q expected 2 inputs for element-wise launch, got %d", kernel.Name, len(inputs))
 	}
@@ -545,13 +545,13 @@ func (rt *deviceRuntime) runElementWiseKernel(deviceKernel *deviceKernel, kernel
 		outPtr = (*C.float)(unsafe.Pointer(&outHost[0]))
 	}
 	var errStr *C.char
-	if C.barrMetalLaunchElementWise(rt.ptr, deviceKernel.ptr, lhsPtr, rhsPtr, outPtr, C.int(elements), tg, &errStr) != 0 {
+	if C.mantaMetalLaunchElementWise(rt.ptr, deviceKernel.ptr, lhsPtr, rhsPtr, outPtr, C.int(elements), tg, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return []*backend.Tensor{newOutputTensor(kernel, append([]int(nil), lhs.Shape...), outHost)}, nil
 }
 
-func (rt *deviceRuntime) runUnaryKernel(deviceKernel *deviceKernel, kernel barr.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runUnaryKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 1 {
 		return nil, fmt.Errorf("kernel %q expected 1 input for unary launch, got %d", kernel.Name, len(inputs))
 	}
@@ -570,13 +570,13 @@ func (rt *deviceRuntime) runUnaryKernel(deviceKernel *deviceKernel, kernel barr.
 		outPtr = (*C.float)(unsafe.Pointer(&outHost[0]))
 	}
 	var errStr *C.char
-	if C.barrMetalLaunchUnary(rt.ptr, deviceKernel.ptr, inPtr, outPtr, C.int(elements), tg, &errStr) != 0 {
+	if C.mantaMetalLaunchUnary(rt.ptr, deviceKernel.ptr, inPtr, outPtr, C.int(elements), tg, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return []*backend.Tensor{newOutputTensor(kernel, append([]int(nil), in.Shape...), outHost)}, nil
 }
 
-func (rt *deviceRuntime) runScoreKernel(deviceKernel *deviceKernel, kernel barr.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runScoreKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 2 {
 		return nil, fmt.Errorf("kernel %q expected 2 inputs for score launch, got %d", kernel.Name, len(inputs))
 	}
@@ -600,13 +600,13 @@ func (rt *deviceRuntime) runScoreKernel(deviceKernel *deviceKernel, kernel barr.
 		outPtr = (*C.float)(unsafe.Pointer(&outHost[0]))
 	}
 	var errStr *C.char
-	if C.barrMetalLaunchScore(rt.ptr, deviceKernel.ptr, queryPtr, docsPtr, outPtr, C.int(rows), C.int(cols), tg, &errStr) != 0 {
+	if C.mantaMetalLaunchScore(rt.ptr, deviceKernel.ptr, queryPtr, docsPtr, outPtr, C.int(rows), C.int(cols), tg, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return []*backend.Tensor{newOutputTensor(kernel, []int{rows}, outHost)}, nil
 }
 
-func classifyMetalKernel(kernel barr.Kernel) metalShapeKind {
+func classifyMetalKernel(kernel mantaartifact.Kernel) metalShapeKind {
 	if len(kernel.Body) < 2 {
 		return metalShapeUnsupported
 	}
@@ -624,7 +624,7 @@ func classifyMetalKernel(kernel barr.Kernel) metalShapeKind {
 	}
 }
 
-func newOutputTensor(kernel barr.Kernel, shape []int, data []float32) *backend.Tensor {
+func newOutputTensor(kernel mantaartifact.Kernel, shape []int, data []float32) *backend.Tensor {
 	dtype := "f16"
 	if len(kernel.Outputs) > 0 && kernel.Outputs[0].Type.Tensor != nil && kernel.Outputs[0].Type.Tensor.DType != "" {
 		dtype = kernel.Outputs[0].Type.Tensor.DType
@@ -641,15 +641,15 @@ func cStringError(value *C.char) error {
 	if value == nil {
 		return fmt.Errorf("metal error")
 	}
-	defer C.barrMetalFreeCString(value)
+	defer C.mantaMetalFreeCString(value)
 	return errors.New(C.GoString(value))
 }
 
-func (rt *deviceRuntime) runMatMul(inputs []*backend.Tensor, outputType barr.ValueType) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMul(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
 	return rt.runMatMulWithTranspose(inputs, outputType, false, false)
 }
 
-func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if len(inputs) != 2 {
 		return backend.StepDispatchResult{}, fmt.Errorf("matmul expects 2 inputs, got %d", len(inputs))
 	}
@@ -680,7 +680,7 @@ func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, output
 			lhsRows, lhsCols = matrixShape(inputs[0])
 			rhsRows, rhsCols = matrixShape(inputs[1])
 		}
-		if C.barrMetalMatMulMPS(rt.ptr, lhsPtr, rhsPtr, outPtr, C.int(lhsRows), C.int(lhsCols), C.int(rhsRows), C.int(rhsCols), boolToCInt(transposeLeft), boolToCInt(transposeRight), &errStr) != 0 {
+		if C.mantaMetalMatMulMPS(rt.ptr, lhsPtr, rhsPtr, outPtr, C.int(lhsRows), C.int(lhsCols), C.int(rhsRows), C.int(rhsCols), boolToCInt(transposeLeft), boolToCInt(transposeRight), &errStr) != 0 {
 			return backend.StepDispatchResult{}, cStringError(errStr)
 		}
 	} else {
@@ -708,7 +708,7 @@ func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, output
 				outPtr = (*C.float)(unsafe.Pointer(&outSlice[0]))
 			}
 			var errStr *C.char
-			if C.barrMetalMatMulMPS(rt.ptr, lhsPtr, rhsPtr, outPtr, C.int(lhsRows), C.int(lhsCols), C.int(rhsRows), C.int(rhsCols), boolToCInt(transposeLeft), boolToCInt(transposeRight), &errStr) != 0 {
+			if C.mantaMetalMatMulMPS(rt.ptr, lhsPtr, rhsPtr, outPtr, C.int(lhsRows), C.int(lhsCols), C.int(rhsRows), C.int(rhsCols), boolToCInt(transposeLeft), boolToCInt(transposeRight), &errStr) != 0 {
 				return backend.StepDispatchResult{}, cStringError(errStr)
 			}
 		}
@@ -733,7 +733,7 @@ func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, output
 func metalBuiltinMatMulCompiledKernel() backend.CompiledKernel {
 	return backend.CompiledKernel{
 		Name:       "__builtin_matmul",
-		Backend:    barr.BackendMetal,
+		Backend:    mantaartifact.BackendMetal,
 		Entry:      "mps_matrix_multiplication",
 		Source:     "library:mps_matrix_multiplication",
 		SourceHash: "library:mps_matrix_multiplication",
@@ -844,7 +844,7 @@ func boolToCInt(v bool) C.int {
 	return 0
 }
 
-func newStepOutputTensor(outputType barr.ValueType, shape []int, data []float32) *backend.Tensor {
+func newStepOutputTensor(outputType mantaartifact.ValueType, shape []int, data []float32) *backend.Tensor {
 	dtype := "f16"
 	if outputType.Tensor != nil && outputType.Tensor.DType != "" {
 		dtype = outputType.Tensor.DType

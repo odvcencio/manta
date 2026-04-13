@@ -3,7 +3,7 @@ package backend
 import (
 	"testing"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/compiler"
 )
 
@@ -12,12 +12,12 @@ func TestCompileNativeKernelProgramCUDAConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	compiled, err := CompileVariants(bundle.Artifact, barr.BackendCUDA)
+	compiled, err := CompileVariants(bundle.Artifact, mantaartifact.BackendCUDA)
 	if err != nil {
 		t.Fatalf("compile variants: %v", err)
 	}
 	kernel := bundle.Artifact.Kernels[0]
-	prog, err := CompileNativeKernelProgram(barr.BackendCUDA, kernel, compiled[kernel.Name])
+	prog, err := CompileNativeKernelProgram(mantaartifact.BackendCUDA, kernel, compiled[kernel.Name])
 	if err != nil {
 		t.Fatalf("compile native kernel: %v", err)
 	}
@@ -37,12 +37,12 @@ func TestCompileNativeKernelProgramMetalConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	compiled, err := CompileVariants(bundle.Artifact, barr.BackendMetal)
+	compiled, err := CompileVariants(bundle.Artifact, mantaartifact.BackendMetal)
 	if err != nil {
 		t.Fatalf("compile variants: %v", err)
 	}
 	kernel := bundle.Artifact.Kernels[0]
-	prog, err := CompileNativeKernelProgram(barr.BackendMetal, kernel, compiled[kernel.Name])
+	prog, err := CompileNativeKernelProgram(mantaartifact.BackendMetal, kernel, compiled[kernel.Name])
 	if err != nil {
 		t.Fatalf("compile native kernel: %v", err)
 	}
@@ -61,13 +61,13 @@ func TestCompileNativeKernelProgramPortableGPUConfigs(t *testing.T) {
 	}
 	kernel := bundle.Artifact.Kernels[0]
 	cases := []struct {
-		kind      barr.BackendKind
+		kind      mantaartifact.BackendKind
 		launchAPI string
 		sizeKey   string
 	}{
-		{kind: barr.BackendVulkan, launchAPI: "vkCmdDispatch", sizeKey: "launch_workgroup_size"},
-		{kind: barr.BackendDirectML, launchAPI: "IDMLCommandRecorder::RecordDispatch", sizeKey: "launch_threadgroup_size"},
-		{kind: barr.BackendWebGPU, launchAPI: "GPUComputePassEncoder.dispatchWorkgroups", sizeKey: "launch_workgroup_size"},
+		{kind: mantaartifact.BackendVulkan, launchAPI: "vkCmdDispatch", sizeKey: "launch_workgroup_size"},
+		{kind: mantaartifact.BackendDirectML, launchAPI: "IDMLCommandRecorder::RecordDispatch", sizeKey: "launch_threadgroup_size"},
+		{kind: mantaartifact.BackendWebGPU, launchAPI: "GPUComputePassEncoder.dispatchWorkgroups", sizeKey: "launch_workgroup_size"},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.kind), func(t *testing.T) {
@@ -90,14 +90,14 @@ func TestCompileNativeKernelProgramPortableGPUConfigs(t *testing.T) {
 }
 
 func TestCompileNativeKernelProgramRejectsBackendSourceMismatch(t *testing.T) {
-	kernel := barr.Kernel{Name: "bad"}
+	kernel := mantaartifact.Kernel{Name: "bad"}
 	compiled := CompiledKernel{
 		Name:    "bad",
-		Backend: barr.BackendCUDA,
+		Backend: mantaartifact.BackendCUDA,
 		Entry:   "bad_cuda",
 		Source:  "kernel void bad_cuda() {}",
 	}
-	_, err := CompileNativeKernelProgram(barr.BackendCUDA, kernel, compiled)
+	_, err := CompileNativeKernelProgram(mantaartifact.BackendCUDA, kernel, compiled)
 	if err == nil {
 		t.Fatal("expected backend source mismatch")
 	}

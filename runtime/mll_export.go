@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"bytes"
@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 	mll "github.com/odvcencio/mll"
 )
@@ -22,47 +22,47 @@ type mllExportState struct {
 	dims    map[string]bool
 }
 
-func DefaultMLLPath(barrPath string) string {
-	return defaultManifestPath(barrPath, ".mll")
+func DefaultMLLPath(artifactPath string) string {
+	return defaultManifestPath(artifactPath, ".mll")
 }
 
 // ExportPackageToMLL exports a Manta artifact plus its sibling package
 // files into a sealed MLL container. The resulting file keeps the current
 // Manta module JSON in a schemaless XMTA section while populating the
 // closest matching MLL core sections.
-func ExportPackageToMLL(barrPath, outPath string) (string, error) {
-	if barrPath == "" {
+func ExportPackageToMLL(artifactPath, outPath string) (string, error) {
+	if artifactPath == "" {
 		return "", fmt.Errorf("artifact path is required")
 	}
 	if outPath == "" {
-		outPath = DefaultMLLPath(barrPath)
+		outPath = DefaultMLLPath(artifactPath)
 	}
 
-	mod, err := barr.ReadFile(barrPath)
+	mod, err := mantaartifact.ReadFile(artifactPath)
 	if err != nil {
 		return "", err
 	}
 
-	packageKind, err := verifyPackageManifestForMLL(barrPath)
+	packageKind, err := verifyPackageManifestForMLL(artifactPath)
 	if err != nil {
 		return "", err
 	}
 
-	weights, err := loadWeightsForMLLExport(barrPath, mod)
+	weights, err := loadWeightsForMLLExport(artifactPath, mod)
 	if err != nil {
 		return "", err
 	}
 
-	plan, err := loadMemoryPlanForMLLExport(barrPath, mod, weights)
+	plan, err := loadMemoryPlanForMLLExport(artifactPath, mod, weights)
 	if err != nil {
 		return "", err
 	}
 
-	artifactJSON, err := barr.EncodeJSON(mod)
+	artifactJSON, err := mantaartifact.EncodeJSON(mod)
 	if err != nil {
 		return "", err
 	}
-	jsonFiles, err := loadOptionalMLLJSONFiles(barrPath)
+	jsonFiles, err := loadOptionalMLLJSONFiles(artifactPath)
 	if err != nil {
 		return "", err
 	}
@@ -77,7 +77,7 @@ func ExportPackageToMLL(barrPath, outPath string) (string, error) {
 	return outPath, nil
 }
 
-func buildMLLExport(mod *barr.Module, artifactJSON []byte, jsonFiles map[string]json.RawMessage, packageKind PackageKind, weights map[string]*backend.Tensor, plan *MemoryPlan) ([]byte, error) {
+func buildMLLExport(mod *mantaartifact.Module, artifactJSON []byte, jsonFiles map[string]json.RawMessage, packageKind PackageKind, weights map[string]*backend.Tensor, plan *MemoryPlan) ([]byte, error) {
 	if mod == nil {
 		return nil, fmt.Errorf("nil module")
 	}
@@ -241,7 +241,7 @@ func buildMLLExport(mod *barr.Module, artifactJSON []byte, jsonFiles map[string]
 		Metadata:    buildMLLHeadMetadata(state.strings, mod, packageKind, weights),
 	}
 
-	xbar, err := buildMLLExportMetadata(mod, artifactJSON, jsonFiles, packageKind, logicalTensorDTypes)
+	xmta, err := buildMLLExportMetadata(mod, artifactJSON, jsonFiles, packageKind, logicalTensorDTypes)
 	if err != nil {
 		return nil, err
 	}
@@ -360,8 +360,8 @@ func buildMLLExport(mod *barr.Module, artifactJSON []byte, jsonFiles map[string]
 		})
 	}
 	sections = append(sections, mll.SectionInput{
-		Tag:           barr.MLLTagXMTA,
-		Body:          xbar,
+		Tag:           mantaartifact.MLLTagXMTA,
+		Body:          xmta,
 		Flags:         mll.SectionFlagSkippable | mll.SectionFlagSchemaless,
 		SchemaVersion: 1,
 	})
@@ -369,8 +369,8 @@ func buildMLLExport(mod *barr.Module, artifactJSON []byte, jsonFiles map[string]
 	return mll.WriteToBytes(mll.ProfileSealed, mll.V1_0, sections)
 }
 
-func verifyPackageManifestForMLL(barrPath string) (PackageKind, error) {
-	manifestPath := ResolvePackageManifestPath(barrPath)
+func verifyPackageManifestForMLL(artifactPath string) (PackageKind, error) {
+	manifestPath := ResolvePackageManifestPath(artifactPath)
 	if _, err := os.Stat(manifestPath); err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
@@ -382,24 +382,24 @@ func verifyPackageManifestForMLL(barrPath string) (PackageKind, error) {
 		return "", err
 	}
 	if err := manifest.VerifyFiles(map[string]string{
-		"artifact":           barrPath,
-		"embedding_manifest": ResolveEmbeddingManifestPath(barrPath),
-		"score_manifest":     ResolveScoreManifestPath(barrPath),
-		"retrieval_manifest": ResolveRetrievalManifestPath(barrPath),
-		"tokenizer":          DefaultTokenizerPath(barrPath),
-		"weights":            DefaultWeightFilePath(barrPath),
-		"memory_plan":        DefaultMemoryPlanPath(barrPath),
-		"train_manifest":     ResolveEmbeddingTrainManifestPath(barrPath),
-		"checkpoint":         DefaultEmbeddingCheckpointPath(barrPath),
-		"train_profile":      DefaultEmbeddingTrainProfilePath(barrPath),
+		"artifact":           artifactPath,
+		"embedding_manifest": ResolveEmbeddingManifestPath(artifactPath),
+		"score_manifest":     ResolveScoreManifestPath(artifactPath),
+		"retrieval_manifest": ResolveRetrievalManifestPath(artifactPath),
+		"tokenizer":          DefaultTokenizerPath(artifactPath),
+		"weights":            DefaultWeightFilePath(artifactPath),
+		"memory_plan":        DefaultMemoryPlanPath(artifactPath),
+		"train_manifest":     ResolveEmbeddingTrainManifestPath(artifactPath),
+		"checkpoint":         DefaultEmbeddingCheckpointPath(artifactPath),
+		"train_profile":      DefaultEmbeddingTrainProfilePath(artifactPath),
 	}); err != nil {
 		return "", err
 	}
 	return manifest.Kind, nil
 }
 
-func loadWeightsForMLLExport(barrPath string, mod *barr.Module) (map[string]*backend.Tensor, error) {
-	weightPath := DefaultWeightFilePath(barrPath)
+func loadWeightsForMLLExport(artifactPath string, mod *mantaartifact.Module) (map[string]*backend.Tensor, error) {
+	weightPath := DefaultWeightFilePath(artifactPath)
 	if _, err := os.Stat(weightPath); err != nil {
 		if os.IsNotExist(err) {
 			if mod != nil && len(mod.Params) > 0 {
@@ -416,11 +416,11 @@ func loadWeightsForMLLExport(barrPath string, mod *barr.Module) (map[string]*bac
 	return weightFile.Weights, nil
 }
 
-func loadMemoryPlanForMLLExport(barrPath string, mod *barr.Module, weights map[string]*backend.Tensor) (*MemoryPlan, error) {
+func loadMemoryPlanForMLLExport(artifactPath string, mod *mantaartifact.Module, weights map[string]*backend.Tensor) (*MemoryPlan, error) {
 	if len(weights) == 0 {
 		return nil, nil
 	}
-	planPath := DefaultMemoryPlanPath(barrPath)
+	planPath := DefaultMemoryPlanPath(artifactPath)
 	if _, err := os.Stat(planPath); err == nil {
 		plan, err := ReadMemoryPlanFile(planPath)
 		if err != nil {
@@ -434,45 +434,45 @@ func loadMemoryPlanForMLLExport(barrPath string, mod *barr.Module, weights map[s
 	return &plan, nil
 }
 
-func loadOptionalMLLJSONFiles(barrPath string) (map[string]json.RawMessage, error) {
+func loadOptionalMLLJSONFiles(artifactPath string) (map[string]json.RawMessage, error) {
 	out := map[string]json.RawMessage{}
-	if data, ok, err := readOptionalPackageManifestJSON(ResolvePackageManifestPath(barrPath)); err != nil {
+	if data, ok, err := readOptionalPackageManifestJSON(ResolvePackageManifestPath(artifactPath)); err != nil {
 		return nil, fmt.Errorf("read package_manifest: %w", err)
 	} else if ok {
 		out["package_manifest"] = data
 	}
-	if data, ok, err := readOptionalTokenizerJSON(DefaultTokenizerPath(barrPath)); err != nil {
+	if data, ok, err := readOptionalTokenizerJSON(DefaultTokenizerPath(artifactPath)); err != nil {
 		return nil, fmt.Errorf("read tokenizer: %w", err)
 	} else if ok {
 		out["tokenizer"] = data
 	}
-	if data, ok, err := readOptionalEmbeddingManifestJSON(ResolveEmbeddingManifestPath(barrPath)); err != nil {
+	if data, ok, err := readOptionalEmbeddingManifestJSON(ResolveEmbeddingManifestPath(artifactPath)); err != nil {
 		return nil, fmt.Errorf("read embedding_manifest: %w", err)
 	} else if ok {
 		out["embedding_manifest"] = data
 	}
-	if data, ok, err := readOptionalScoreManifestJSON(ResolveScoreManifestPath(barrPath)); err != nil {
+	if data, ok, err := readOptionalScoreManifestJSON(ResolveScoreManifestPath(artifactPath)); err != nil {
 		return nil, fmt.Errorf("read score_manifest: %w", err)
 	} else if ok {
 		out["score_manifest"] = data
 	}
-	if data, ok, err := readOptionalRetrievalManifestJSON(ResolveRetrievalManifestPath(barrPath)); err != nil {
+	if data, ok, err := readOptionalRetrievalManifestJSON(ResolveRetrievalManifestPath(artifactPath)); err != nil {
 		return nil, fmt.Errorf("read retrieval_manifest: %w", err)
 	} else if ok {
 		out["retrieval_manifest"] = data
 	}
-	if data, ok, err := readOptionalTrainManifestJSON(ResolveEmbeddingTrainManifestPath(barrPath)); err != nil {
+	if data, ok, err := readOptionalTrainManifestJSON(ResolveEmbeddingTrainManifestPath(artifactPath)); err != nil {
 		return nil, fmt.Errorf("read train_manifest: %w", err)
 	} else if ok {
 		out["train_manifest"] = data
 	}
-	memoryPlanPath := DefaultMemoryPlanPath(barrPath)
+	memoryPlanPath := DefaultMemoryPlanPath(artifactPath)
 	if data, ok, err := readOptionalMemoryPlanJSON(memoryPlanPath); err != nil {
 		return nil, fmt.Errorf("read memory_plan: %w", err)
 	} else if ok {
 		out["memory_plan"] = data
 	}
-	trainProfilePath := DefaultEmbeddingTrainProfilePath(barrPath)
+	trainProfilePath := DefaultEmbeddingTrainProfilePath(artifactPath)
 	if data, ok, err := readOptionalTrainProfileJSON(trainProfilePath); err != nil {
 		return nil, fmt.Errorf("read train_profile: %w", err)
 	} else if ok {
@@ -628,9 +628,9 @@ func readOptionalMemoryPlanJSON(path string) (json.RawMessage, bool, error) {
 	return json.RawMessage(body), true, nil
 }
 
-func buildMLLExportMetadata(mod *barr.Module, artifactJSON []byte, jsonFiles map[string]json.RawMessage, packageKind PackageKind, logicalTensorDTypes map[string]string) ([]byte, error) {
-	meta := barr.MLLMetadata{
-		Version:       barr.MLLMetadataVersion,
+func buildMLLExportMetadata(mod *mantaartifact.Module, artifactJSON []byte, jsonFiles map[string]json.RawMessage, packageKind PackageKind, logicalTensorDTypes map[string]string) ([]byte, error) {
+	meta := mantaartifact.MLLMetadata{
+		Version:       mantaartifact.MLLMetadataVersion,
 		ModuleName:    mod.Name,
 		ModuleVersion: mod.Version,
 		Artifact:      json.RawMessage(bytes.TrimSpace(artifactJSON)),
@@ -654,10 +654,10 @@ func buildMLLExportMetadata(mod *barr.Module, artifactJSON []byte, jsonFiles map
 	if len(logicalTensorDTypes) > 0 {
 		meta.LogicalTensorDType = logicalTensorDTypes
 	}
-	return barr.EncodeMLLMetadata(meta)
+	return mantaartifact.EncodeMLLMetadata(meta)
 }
 
-func buildMLLHeadMetadata(strg *mll.StringTable, mod *barr.Module, packageKind PackageKind, weights map[string]*backend.Tensor) []mll.HeadMetadataEntry {
+func buildMLLHeadMetadata(strg *mll.StringTable, mod *mantaartifact.Module, packageKind PackageKind, weights map[string]*backend.Tensor) []mll.HeadMetadataEntry {
 	items := []mll.HeadMetadataEntry{
 		headStringMeta(strg, "artifact_version", mod.Version),
 		headIntMeta(strg, "param_count", int64(len(mod.Params))),
@@ -710,15 +710,15 @@ func (s *mllExportState) internOptional(value string) uint32 {
 	return s.strings.Intern(value)
 }
 
-func (s *mllExportState) addValueTypeRef(name string, typ barr.ValueType) (mll.Ref, error) {
+func (s *mllExportState) addValueTypeRef(name string, typ mantaartifact.ValueType) (mll.Ref, error) {
 	idx := uint32(len(s.types.Decls()))
 	nameIdx := s.strings.Intern(name)
 	switch typ.Kind {
-	case barr.ValueTensor:
+	case mantaartifact.ValueTensor:
 		if typ.Tensor == nil {
 			return mll.Ref{}, fmt.Errorf("tensor payload is required")
 		}
-		dtype, err := barrDTypeToMLL(typ.Tensor.DType)
+		dtype, err := mantaDTypeToMLL(typ.Tensor.DType)
 		if err != nil {
 			return mll.Ref{}, err
 		}
@@ -727,9 +727,9 @@ func (s *mllExportState) addValueTypeRef(name string, typ barr.ValueType) (mll.R
 			return mll.Ref{}, err
 		}
 		s.types.AddTensorType(nameIdx, dtype, shape)
-	case barr.ValueKVCache:
+	case mantaartifact.ValueKVCache:
 		s.types.AddKVCacheType(nameIdx, 0, 0, 0)
-	case barr.ValueCandidatePack:
+	case mantaartifact.ValueCandidatePack:
 		rank := uint32(0)
 		if typ.CandidatePack != nil {
 			rank = uint32(len(typ.CandidatePack.Shape))
@@ -744,7 +744,7 @@ func (s *mllExportState) addValueTypeRef(name string, typ barr.ValueType) (mll.R
 func (s *mllExportState) addTensorTypeRef(name, dtype string, shape []string) (mll.Ref, error) {
 	idx := uint32(len(s.types.Decls()))
 	nameIdx := s.strings.Intern(name)
-	mllDType, err := barrDTypeToMLL(dtype)
+	mllDType, err := mantaDTypeToMLL(dtype)
 	if err != nil {
 		return mll.Ref{}, err
 	}
@@ -776,11 +776,11 @@ func (s *mllExportState) shape(shape []string) ([]mll.Dimension, error) {
 	return out, nil
 }
 
-func entryPointKindToMLL(kind barr.EntryPointKind) uint8 {
+func entryPointKindToMLL(kind mantaartifact.EntryPointKind) uint8 {
 	switch kind {
-	case barr.EntryPointKernel:
+	case mantaartifact.EntryPointKernel:
 		return mll.EntryKindKernel
-	case barr.EntryPointPipeline:
+	case mantaartifact.EntryPointPipeline:
 		return mll.EntryKindPipeline
 	default:
 		return mll.EntryKindFunction
@@ -811,7 +811,7 @@ func residencyToMLL(residency MemoryResidency) uint8 {
 	}
 }
 
-func barrDTypeToMLL(dtype string) (mll.DType, error) {
+func mantaDTypeToMLL(dtype string) (mll.DType, error) {
 	switch dtype {
 	case "i32":
 		return mll.DTypeI32, nil

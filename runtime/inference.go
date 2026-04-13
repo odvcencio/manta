@@ -1,10 +1,10 @@
-package barruntime
+package mantaruntime
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -186,7 +186,7 @@ func decodeSingleTensorOutput(raw backend.Result, preferred string) (string, *ba
 	outputName := ""
 	var output backend.Value
 	for name, value := range raw.Outputs {
-		if value.Type.Kind != barr.ValueTensor {
+		if value.Type.Kind != mantaartifact.ValueTensor {
 			continue
 		}
 		if outputName != "" {
@@ -205,9 +205,9 @@ func decodeSingleTensorOutput(raw backend.Result, preferred string) (string, *ba
 	return outputName, tensor, nil
 }
 
-func (p *Program) requireNamedEntryInput(name, inputName string) (barr.EntryPoint, error) {
+func (p *Program) requireNamedEntryInput(name, inputName string) (mantaartifact.EntryPoint, error) {
 	if p == nil || p.module == nil {
-		return barr.EntryPoint{}, fmt.Errorf("program is not loaded")
+		return mantaartifact.EntryPoint{}, fmt.Errorf("program is not loaded")
 	}
 	for _, entry := range p.module.EntryPoints {
 		if entry.Name != name {
@@ -218,30 +218,30 @@ func (p *Program) requireNamedEntryInput(name, inputName string) (barr.EntryPoin
 				return entry, nil
 			}
 		}
-		return barr.EntryPoint{}, fmt.Errorf("entrypoint %q does not declare input %q", name, inputName)
+		return mantaartifact.EntryPoint{}, fmt.Errorf("entrypoint %q does not declare input %q", name, inputName)
 	}
-	return barr.EntryPoint{}, fmt.Errorf("unknown entrypoint %q", name)
+	return mantaartifact.EntryPoint{}, fmt.Errorf("unknown entrypoint %q", name)
 }
 
-func (p *Program) requireScoringEntry(name string, batched bool) (barr.EntryPoint, error) {
+func (p *Program) requireScoringEntry(name string, batched bool) (mantaartifact.EntryPoint, error) {
 	entry, err := p.requireNamedEntryInput(name, "docs")
 	if err != nil {
-		return barr.EntryPoint{}, err
+		return mantaartifact.EntryPoint{}, err
 	}
 	queryName, _, err := scoreEntryInputNames(entry)
 	if err != nil {
-		return barr.EntryPoint{}, err
+		return mantaartifact.EntryPoint{}, err
 	}
 	if batched && queryName != "queries" {
-		return barr.EntryPoint{}, fmt.Errorf("entrypoint %q is not batched", name)
+		return mantaartifact.EntryPoint{}, fmt.Errorf("entrypoint %q is not batched", name)
 	}
 	if !batched && queryName != "query" {
-		return barr.EntryPoint{}, fmt.Errorf("entrypoint %q is not unbatched", name)
+		return mantaartifact.EntryPoint{}, fmt.Errorf("entrypoint %q is not unbatched", name)
 	}
 	return entry, nil
 }
 
-func scoreEntryInputNames(entry barr.EntryPoint) (queryName, docsName string, err error) {
+func scoreEntryInputNames(entry mantaartifact.EntryPoint) (queryName, docsName string, err error) {
 	for _, input := range entry.Inputs {
 		switch input.Name {
 		case "query", "queries":

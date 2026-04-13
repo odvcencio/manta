@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -29,42 +29,42 @@ func New() *Backend {
 }
 
 // Kind reports the backend identity.
-func (b *Backend) Kind() barr.BackendKind {
-	return barr.BackendCUDA
+func (b *Backend) Kind() mantaartifact.BackendKind {
+	return mantaartifact.BackendCUDA
 }
 
 // Capabilities reports the runtime features the CUDA backend supports.
 func (b *Backend) Capabilities() []string {
 	return []string{
-		barr.CapabilityCandidatePack,
-		barr.CapabilityKVCache,
-		barr.CapabilityMaskedMeanPool,
-		barr.CapabilityHostFallback,
-		barr.CapabilityDeviceExecution,
+		mantaartifact.CapabilityCandidatePack,
+		mantaartifact.CapabilityKVCache,
+		mantaartifact.CapabilityMaskedMeanPool,
+		mantaartifact.CapabilityHostFallback,
+		mantaartifact.CapabilityDeviceExecution,
 	}
 }
 
 // CanLoad reports whether the module allows CUDA execution.
-func (b *Backend) CanLoad(mod *barr.Module) bool {
-	return mod != nil && mod.SupportsBackend(barr.BackendCUDA)
+func (b *Backend) CanLoad(mod *mantaartifact.Module) bool {
+	return mod != nil && mod.SupportsBackend(mantaartifact.BackendCUDA)
 }
 
 // Load prepares a CUDA executor stub.
-func (b *Backend) Load(_ context.Context, mod *barr.Module, weights map[string]backend.WeightBinding) (backend.Executor, error) {
+func (b *Backend) Load(_ context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding) (backend.Executor, error) {
 	return b.load(context.Background(), mod, weights, "")
 }
 
-func (b *Backend) LoadWithCacheKey(ctx context.Context, mod *barr.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *Backend) LoadWithCacheKey(ctx context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	return b.load(ctx, mod, weights, cacheKey)
 }
 
-func (b *Backend) load(_ context.Context, mod *barr.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *Backend) load(_ context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	if cacheKey != "" {
 		if cached, ok := b.cachedLoad(cacheKey); ok {
 			return &executor{module: mod, weights: weights, compiled: cached.compiled, native: cached.native, device: cached.device}, nil
 		}
 	}
-	compiled, err := backend.CompileVariants(mod, barr.BackendCUDA)
+	compiled, err := backend.CompileVariants(mod, mantaartifact.BackendCUDA)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +74,7 @@ func (b *Backend) load(_ context.Context, mod *barr.Module, weights map[string]b
 	}
 	native := map[string]backend.NativeKernelProgram{}
 	for _, kernel := range mod.Kernels {
-		prog, err := backend.CompileNativeKernelProgram(barr.BackendCUDA, kernel, compiled[kernel.Name])
+		prog, err := backend.CompileNativeKernelProgram(mantaartifact.BackendCUDA, kernel, compiled[kernel.Name])
 		if err != nil {
 			if device != nil {
 				device.close()
@@ -114,22 +114,22 @@ func (b *Backend) storeCachedLoad(cacheKey string, cached cachedLoad) {
 }
 
 type executor struct {
-	module   *barr.Module
+	module   *mantaartifact.Module
 	weights  map[string]backend.WeightBinding
 	compiled map[string]backend.CompiledKernel
 	native   map[string]backend.NativeKernelProgram
 	device   *deviceRuntime
 }
 
-func (e *executor) Backend() barr.BackendKind {
-	return barr.BackendCUDA
+func (e *executor) Backend() mantaartifact.BackendKind {
+	return mantaartifact.BackendCUDA
 }
 
 func (e *executor) Run(ctx context.Context, req backend.Request) (backend.Result, error) {
-	return backend.ExecuteSymbolic(ctx, e.module, e.weights, e.compiled, e.dispatchKernel, e.dispatchStep, barr.BackendCUDA, req)
+	return backend.ExecuteSymbolic(ctx, e.module, e.weights, e.compiled, e.dispatchKernel, e.dispatchStep, mantaartifact.BackendCUDA, req)
 }
 
-func (e *executor) dispatchKernel(_ context.Context, kernel barr.Kernel, inputs []*backend.Tensor) (backend.KernelDispatchResult, error) {
+func (e *executor) dispatchKernel(_ context.Context, kernel mantaartifact.Kernel, inputs []*backend.Tensor) (backend.KernelDispatchResult, error) {
 	prog, ok := e.native[kernel.Name]
 	if !ok {
 		return backend.KernelDispatchResult{}, fmt.Errorf("CUDA kernel %q is not compiled", kernel.Name)
@@ -156,9 +156,9 @@ func (e *executor) dispatchKernel(_ context.Context, kernel barr.Kernel, inputs 
 	}, nil
 }
 
-func (e *executor) dispatchStep(_ context.Context, step barr.Step, outputType barr.ValueType, inputs []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
+func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outputType mantaartifact.ValueType, inputs []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
 	switch step.Kind {
-	case barr.StepMatMul:
+	case mantaartifact.StepMatMul:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
@@ -198,7 +198,7 @@ func supportsBuiltinMatMul(inputs []*backend.Tensor) bool {
 	}
 }
 
-func shouldFallbackScoreKernel(kernel barr.Kernel, inputs []*backend.Tensor) bool {
+func shouldFallbackScoreKernel(kernel mantaartifact.Kernel, inputs []*backend.Tensor) bool {
 	if len(kernel.Body) == 0 {
 		return false
 	}

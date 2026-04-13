@@ -1,11 +1,11 @@
-package barruntime
+package mantaruntime
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/compiler"
 )
 
@@ -31,7 +31,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 		t.Fatalf("build: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "tiny_train_embed.mll")
-	if err := barr.WriteFile(path, bundle.Artifact); err != nil {
+	if err := mantaartifact.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 	manifest := EmbeddingManifest{
@@ -105,7 +105,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 		t.Fatalf("build: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "tiny_train_embed.mll")
-	if err := barr.WriteFile(path, bundle.Artifact); err != nil {
+	if err := mantaartifact.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 	manifest := EmbeddingManifest{

@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/compiler"
 	"github.com/odvcencio/manta/runtime/backend"
 	"github.com/odvcencio/manta/runtime/backends/cuda"
@@ -18,31 +18,31 @@ import (
 )
 
 type stubBackend struct {
-	kind         barr.BackendKind
+	kind         mantaartifact.BackendKind
 	capabilities []string
 	loads        int
 }
 
-func (b *stubBackend) Kind() barr.BackendKind { return b.kind }
+func (b *stubBackend) Kind() mantaartifact.BackendKind { return b.kind }
 
 func (b *stubBackend) Capabilities() []string {
 	return append([]string(nil), b.capabilities...)
 }
 
-func (b *stubBackend) CanLoad(mod *barr.Module) bool {
+func (b *stubBackend) CanLoad(mod *mantaartifact.Module) bool {
 	return mod != nil && mod.SupportsBackend(b.kind)
 }
 
-func (b *stubBackend) Load(_ context.Context, _ *barr.Module, _ map[string]backend.WeightBinding) (backend.Executor, error) {
+func (b *stubBackend) Load(_ context.Context, _ *mantaartifact.Module, _ map[string]backend.WeightBinding) (backend.Executor, error) {
 	b.loads++
 	return stubExecutor{kind: b.kind}, nil
 }
 
 type stubExecutor struct {
-	kind barr.BackendKind
+	kind mantaartifact.BackendKind
 }
 
-func (e stubExecutor) Backend() barr.BackendKind { return e.kind }
+func (e stubExecutor) Backend() mantaartifact.BackendKind { return e.kind }
 
 func (e stubExecutor) Run(_ context.Context, _ backend.Request) (backend.Result, error) {
 	return backend.Result{}, fmt.Errorf("stub executor does not run")
@@ -53,11 +53,11 @@ type cacheKeyStubBackend struct {
 	cacheKeys []string
 }
 
-func (b *cacheKeyStubBackend) Load(_ context.Context, _ *barr.Module, _ map[string]backend.WeightBinding) (backend.Executor, error) {
+func (b *cacheKeyStubBackend) Load(_ context.Context, _ *mantaartifact.Module, _ map[string]backend.WeightBinding) (backend.Executor, error) {
 	return nil, fmt.Errorf("unexpected uncached load")
 }
 
-func (b *cacheKeyStubBackend) LoadWithCacheKey(_ context.Context, _ *barr.Module, _ map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *cacheKeyStubBackend) LoadWithCacheKey(_ context.Context, _ *mantaartifact.Module, _ map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	b.loads++
 	b.cacheKeys = append(b.cacheKeys, cacheKey)
 	return stubExecutor{kind: b.kind}, nil
@@ -109,18 +109,18 @@ func TestLoadFallsBackWhenBackendMissingCapabilities(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	cudaOnly := &stubBackend{kind: barr.BackendCUDA}
+	cudaOnly := &stubBackend{kind: mantaartifact.BackendCUDA}
 	metalCapable := &stubBackend{
-		kind:         barr.BackendMetal,
-		capabilities: []string{barr.CapabilityCandidatePack},
+		kind:         mantaartifact.BackendMetal,
+		capabilities: []string{mantaartifact.CapabilityCandidatePack},
 	}
 	rt := New(cudaOnly, metalCapable)
 	prog, err := rt.Load(context.Background(), bundle.Artifact, tinyRerankWeights()...)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got := prog.Backend(); got != barr.BackendMetal {
-		t.Fatalf("backend = %q, want %q", got, barr.BackendMetal)
+	if got := prog.Backend(); got != mantaartifact.BackendMetal {
+		t.Fatalf("backend = %q, want %q", got, mantaartifact.BackendMetal)
 	}
 	if cudaOnly.loads != 0 {
 		t.Fatalf("unexpected CUDA load attempts = %d", cudaOnly.loads)
@@ -136,12 +136,12 @@ func TestLoadReportsMissingBackendCapabilities(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	rt := New(&stubBackend{kind: barr.BackendCUDA}, &stubBackend{kind: barr.BackendMetal})
+	rt := New(&stubBackend{kind: mantaartifact.BackendCUDA}, &stubBackend{kind: mantaartifact.BackendMetal})
 	_, err = rt.Load(context.Background(), bundle.Artifact, tinyRerankWeights()...)
 	if err == nil {
 		t.Fatal("expected missing capability error")
 	}
-	if !strings.Contains(err.Error(), barr.CapabilityCandidatePack) {
+	if !strings.Contains(err.Error(), mantaartifact.CapabilityCandidatePack) {
 		t.Fatalf("expected candidate_pack in error, got %v", err)
 	}
 }
@@ -153,7 +153,7 @@ func TestLoadFileAcceptsSerializedArtifact(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "tiny_embed.mll")
-	if err := barr.WriteFile(path, bundle.Artifact); err != nil {
+	if err := mantaartifact.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 
@@ -175,7 +175,7 @@ func TestLoadFileUsesSiblingPackageManifestCacheKey(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tiny_embed.mll")
-	if err := barr.WriteFile(path, bundle.Artifact); err != nil {
+	if err := mantaartifact.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 
@@ -190,7 +190,7 @@ func TestLoadFileUsesSiblingPackageManifestCacheKey(t *testing.T) {
 		t.Fatalf("write package manifest: %v", err)
 	}
 
-	backend := &cacheKeyStubBackend{stubBackend: stubBackend{kind: barr.BackendCUDA}}
+	backend := &cacheKeyStubBackend{stubBackend: stubBackend{kind: mantaartifact.BackendCUDA}}
 	rt := New(backend)
 	loadOnce := func() error {
 		_, err := rt.LoadFile(context.Background(), path, tinyEmbedWeights()...)
@@ -293,7 +293,7 @@ func TestRunTinyEmbedEntryPoint(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing embeddings output: %+v", result.Outputs)
 	}
-	if output.Type.Kind != barr.ValueTensor || output.Type.Tensor == nil {
+	if output.Type.Kind != mantaartifact.ValueTensor || output.Type.Tensor == nil {
 		t.Fatalf("unexpected output type: %+v", output.Type)
 	}
 	if output.Type.Tensor.DType != "f16" {
@@ -351,13 +351,13 @@ func TestPortableGPUBackendsLoadMLLArtifactsWithHostFallback(t *testing.T) {
 	cases := []struct {
 		name      string
 		rt        *Runtime
-		backend   barr.BackendKind
+		backend   mantaartifact.BackendKind
 		entry     string
 		launchAPI string
 	}{
-		{name: "vulkan", rt: New(vulkan.New()), backend: barr.BackendVulkan, entry: "l2_normalize_vulkan", launchAPI: "vkCmdDispatch"},
-		{name: "directml", rt: New(directml.New()), backend: barr.BackendDirectML, entry: "l2_normalize_directml", launchAPI: "IDMLCommandRecorder::RecordDispatch"},
-		{name: "webgpu", rt: New(webgpu.New()), backend: barr.BackendWebGPU, entry: "l2_normalize_webgpu", launchAPI: "GPUComputePassEncoder.dispatchWorkgroups"},
+		{name: "vulkan", rt: New(vulkan.New()), backend: mantaartifact.BackendVulkan, entry: "l2_normalize_vulkan", launchAPI: "vkCmdDispatch"},
+		{name: "directml", rt: New(directml.New()), backend: mantaartifact.BackendDirectML, entry: "l2_normalize_directml", launchAPI: "IDMLCommandRecorder::RecordDispatch"},
+		{name: "webgpu", rt: New(webgpu.New()), backend: mantaartifact.BackendWebGPU, entry: "l2_normalize_webgpu", launchAPI: "GPUComputePassEncoder.dispatchWorkgroups"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -506,7 +506,7 @@ func TestRunTinyScoreEntryPoint(t *testing.T) {
 	if output.Producer != "kernel:cosine" {
 		t.Fatalf("output producer = %q, want kernel:cosine", output.Producer)
 	}
-	if output.Type.Kind != barr.ValueTensor || output.Type.Tensor == nil || output.Type.Tensor.DType != "f32" {
+	if output.Type.Kind != mantaartifact.ValueTensor || output.Type.Tensor == nil || output.Type.Tensor.DType != "f32" {
 		t.Fatalf("unexpected output type: %+v", output.Type)
 	}
 	tensor, ok := output.Data.(*backend.Tensor)
@@ -577,10 +577,10 @@ func TestRunTinyRerankEntryPoint(t *testing.T) {
 	if got := len(result.Trace); got != 4 {
 		t.Fatalf("trace len = %d, want 4", got)
 	}
-	if result.Trace[1].Kind != barr.StepTopK {
+	if result.Trace[1].Kind != mantaartifact.StepTopK {
 		t.Fatalf("trace[1].kind = %q, want topk", result.Trace[1].Kind)
 	}
-	if result.Trace[2].Kind != barr.StepGather {
+	if result.Trace[2].Kind != mantaartifact.StepGather {
 		t.Fatalf("trace[2].kind = %q, want gather", result.Trace[2].Kind)
 	}
 }
@@ -619,7 +619,7 @@ func TestRunTinySelectEntryPoint(t *testing.T) {
 	if got := len(result.Trace); got != 4 {
 		t.Fatalf("trace len = %d, want 4", got)
 	}
-	if result.Trace[2].Kind != barr.StepGather {
+	if result.Trace[2].Kind != mantaartifact.StepGather {
 		t.Fatalf("trace[2].kind = %q, want gather", result.Trace[2].Kind)
 	}
 }
@@ -672,7 +672,7 @@ func TestRunTinyRetrieveEntryPoint(t *testing.T) {
 	if got := len(result.Trace); got != 5 {
 		t.Fatalf("trace len = %d, want 5", got)
 	}
-	if result.Trace[3].Kind != barr.StepGather {
+	if result.Trace[3].Kind != mantaartifact.StepGather {
 		t.Fatalf("trace[3].kind = %q, want gather", result.Trace[3].Kind)
 	}
 }
@@ -696,7 +696,7 @@ func TestRunTinyEmbedEntryPointOnMetal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if got := prog.Backend(); got != barr.BackendMetal {
+	if got := prog.Backend(); got != mantaartifact.BackendMetal {
 		t.Fatalf("backend = %q, want metal", got)
 	}
 	output := result.Outputs["embeddings"]
@@ -1165,7 +1165,7 @@ func TestRunTinyPackedCandidatesEntryPoint(t *testing.T) {
 	}
 
 	output := result.Outputs["candidates"]
-	if output.Type.Kind != barr.ValueCandidatePack || output.Type.CandidatePack == nil {
+	if output.Type.Kind != mantaartifact.ValueCandidatePack || output.Type.CandidatePack == nil {
 		t.Fatalf("output kind = %+v, want candidate_pack", output.Type)
 	}
 	pack, ok := output.Data.(*backend.CandidatePack)
@@ -1277,7 +1277,7 @@ pipeline rerank_candidates_packed_batch(queries: f16[Q, D], docs: q4[Q, N, D], c
 	}
 
 	output := result.Outputs["result"]
-	if output.Type.Kind != barr.ValueCandidatePack || output.Type.CandidatePack == nil {
+	if output.Type.Kind != mantaartifact.ValueCandidatePack || output.Type.CandidatePack == nil {
 		t.Fatalf("output kind = %+v, want candidate_pack", output.Type)
 	}
 	pack := output.Data.(*backend.CandidatePack)
@@ -1554,7 +1554,7 @@ pipeline identity(x: f16[T, D]) -> f16[T, D] {
 	if got := len(result.Trace); got != 3 {
 		t.Fatalf("trace len = %d, want 3", got)
 	}
-	if result.Trace[0].Kind != barr.StepAlias || result.Trace[1].Kind != barr.StepAlias {
+	if result.Trace[0].Kind != mantaartifact.StepAlias || result.Trace[1].Kind != mantaartifact.StepAlias {
 		t.Fatalf("expected alias trace steps, got %+v", result.Trace)
 	}
 }
@@ -1592,42 +1592,42 @@ func tinyRerankWeights() []LoadOption {
 	}
 }
 
-func newLazyStagedParamModule() *barr.Module {
-	mod := barr.NewModule("lazy_params")
-	valueType := barr.ValueType{
-		Kind: barr.ValueTensor,
-		Tensor: &barr.TensorType{
+func newLazyStagedParamModule() *mantaartifact.Module {
+	mod := mantaartifact.NewModule("lazy_params")
+	valueType := mantaartifact.ValueType{
+		Kind: mantaartifact.ValueTensor,
+		Tensor: &mantaartifact.TensorType{
 			DType: "f16",
 			Shape: []string{"T", "D"},
 		},
 	}
-	mod.Params = []barr.Param{
+	mod.Params = []mantaartifact.Param{
 		{Name: "used", Type: valueType, Binding: "used"},
 		{Name: "unused", Type: valueType, Binding: "unused"},
 	}
-	mod.EntryPoints = []barr.EntryPoint{
+	mod.EntryPoints = []mantaartifact.EntryPoint{
 		{
 			Name: "serve",
-			Kind: barr.EntryPointPipeline,
-			Outputs: []barr.ValueBinding{
+			Kind: mantaartifact.EntryPointPipeline,
+			Outputs: []mantaartifact.ValueBinding{
 				{Name: "result", Type: valueType},
 			},
 		},
 	}
-	mod.Buffers = []barr.Buffer{
+	mod.Buffers = []mantaartifact.Buffer{
 		{Name: "result", DType: "f16", Shape: []string{"T", "D"}},
 	}
-	mod.Steps = []barr.Step{
+	mod.Steps = []mantaartifact.Step{
 		{
 			Entry:   "serve",
-			Kind:    barr.StepAlias,
+			Kind:    mantaartifact.StepAlias,
 			Name:    "forward_used",
 			Inputs:  []string{"used"},
 			Outputs: []string{"result"},
 		},
 		{
 			Entry:   "serve",
-			Kind:    barr.StepReturn,
+			Kind:    mantaartifact.StepReturn,
 			Name:    "return_result",
 			Outputs: []string{"result"},
 		},

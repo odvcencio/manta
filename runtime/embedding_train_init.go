@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"fmt"
@@ -6,7 +6,7 @@ import (
 	"math/rand"
 	"strconv"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -17,17 +17,17 @@ type EmbeddingTrainInitOptions struct {
 }
 
 // InitializeEmbeddingTrainerPackage reads an artifact plus its sibling embedding manifest, initializes trainable weights, and writes a training package.
-func InitializeEmbeddingTrainerPackage(barrPath string, opts EmbeddingTrainInitOptions) (EmbeddingTrainPackagePaths, error) {
-	manifest, err := ReadEmbeddingManifestFile(ResolveEmbeddingManifestPath(barrPath))
+func InitializeEmbeddingTrainerPackage(artifactPath string, opts EmbeddingTrainInitOptions) (EmbeddingTrainPackagePaths, error) {
+	manifest, err := ReadEmbeddingManifestFile(ResolveEmbeddingManifestPath(artifactPath))
 	if err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
-	return InitializeEmbeddingTrainerPackageWithManifest(barrPath, manifest, EmbeddingTrainConfig{}, opts)
+	return InitializeEmbeddingTrainerPackageWithManifest(artifactPath, manifest, EmbeddingTrainConfig{}, opts)
 }
 
 // InitializeEmbeddingTrainerPackageWithManifest initializes a training package from an explicit embedding manifest and trainer config.
-func InitializeEmbeddingTrainerPackageWithManifest(barrPath string, manifest EmbeddingManifest, cfg EmbeddingTrainConfig, opts EmbeddingTrainInitOptions) (EmbeddingTrainPackagePaths, error) {
-	mod, err := barr.ReadFile(barrPath)
+func InitializeEmbeddingTrainerPackageWithManifest(artifactPath string, manifest EmbeddingManifest, cfg EmbeddingTrainConfig, opts EmbeddingTrainInitOptions) (EmbeddingTrainPackagePaths, error) {
+	mod, err := mantaartifact.ReadFile(artifactPath)
 	if err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
@@ -47,10 +47,10 @@ func InitializeEmbeddingTrainerPackageWithManifest(barrPath string, manifest Emb
 	if err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
-	return trainer.WriteTrainingPackage(barrPath)
+	return trainer.WriteTrainingPackage(artifactPath)
 }
 
-func initializedTrainingWeights(mod *barr.Module, tokenizer TokenizerManifest, opts EmbeddingTrainInitOptions) (map[string]*backend.Tensor, error) {
+func initializedTrainingWeights(mod *mantaartifact.Module, tokenizer TokenizerManifest, opts EmbeddingTrainInitOptions) (map[string]*backend.Tensor, error) {
 	if mod == nil {
 		return nil, fmt.Errorf("nil module")
 	}
@@ -61,7 +61,7 @@ func initializedTrainingWeights(mod *barr.Module, tokenizer TokenizerManifest, o
 	rng := rand.New(rand.NewSource(seed))
 	weights := make(map[string]*backend.Tensor, len(mod.Params))
 	for _, param := range mod.Params {
-		if param.Type.Kind != barr.ValueTensor || param.Type.Tensor == nil {
+		if param.Type.Kind != mantaartifact.ValueTensor || param.Type.Tensor == nil {
 			return nil, fmt.Errorf("param %q is not a tensor weight", param.Name)
 		}
 		shape, err := resolveTrainingInitShape(param.Type.Tensor.Shape, tokenizer, opts.ShapeSizes)

@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"bufio"
@@ -16,12 +16,12 @@ type EmbeddingTextMiningConfig struct {
 	Seed      int64
 }
 
-func DefaultMinedTrainPairsPath(barrPath string) string {
-	return defaultManifestPath(barrPath, ".mined-train.jsonl")
+func DefaultMinedTrainPairsPath(artifactPath string) string {
+	return defaultManifestPath(artifactPath, ".mined-train.jsonl")
 }
 
-func DefaultMinedEvalPairsPath(barrPath string) string {
-	return defaultManifestPath(barrPath, ".mined-eval.jsonl")
+func DefaultMinedEvalPairsPath(artifactPath string) string {
+	return defaultManifestPath(artifactPath, ".mined-eval.jsonl")
 }
 
 func ReadEmbeddingTextCorpusFile(path string) ([]string, error) {

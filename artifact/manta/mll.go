@@ -1,4 +1,4 @@
-package barr
+package manta
 
 import (
 	"bytes"
@@ -373,7 +373,7 @@ func (s *mllState) addValueTypeRef(name string, typ ValueType) (mll.Ref, error) 
 		if typ.Tensor == nil {
 			return mll.Ref{}, fmt.Errorf("tensor payload is required")
 		}
-		dtype, err := barrDTypeToMLL(typ.Tensor.DType)
+		dtype, err := mantaDTypeToMLL(typ.Tensor.DType)
 		if err != nil {
 			return mll.Ref{}, err
 		}
@@ -399,7 +399,7 @@ func (s *mllState) addValueTypeRef(name string, typ ValueType) (mll.Ref, error) 
 func (s *mllState) addTensorTypeRef(name, dtype string, shape []string) (mll.Ref, error) {
 	idx := uint32(len(s.types.Decls()))
 	nameIdx := s.strings.Intern(name)
-	mllDType, err := barrDTypeToMLL(dtype)
+	mllDType, err := mantaDTypeToMLL(dtype)
 	if err != nil {
 		return mll.Ref{}, err
 	}
@@ -420,7 +420,7 @@ func (s *mllState) addBufferTypeRef(name, dtype string, shape []string) (mll.Ref
 	case "kv_cache":
 		s.types.AddKVCacheType(nameIdx, 0, 0, 0)
 	default:
-		mllDType, err := barrDTypeToMLL(dtype)
+		mllDType, err := mantaDTypeToMLL(dtype)
 		if err != nil {
 			return mll.Ref{}, err
 		}
@@ -475,7 +475,7 @@ func bufferStorageClassToMLL(storage string) uint8 {
 	}
 }
 
-func barrDTypeToMLL(dtype string) (mll.DType, error) {
+func mantaDTypeToMLL(dtype string) (mll.DType, error) {
 	switch dtype {
 	case "i32":
 		return mll.DTypeI32, nil

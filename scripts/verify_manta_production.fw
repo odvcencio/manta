@@ -1,0 +1,406 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+type verifyConfig struct {
+	Root           string
+	RunID          string
+	RunDir         string
+	LogDir         string
+	ModelName      string
+	MantaBin       string
+	Artifact       string
+	Tokenizer      string
+	TrainJSONL     string
+	EvalJSONL      string
+	HardEvalJSONL  string
+	TrainTokens    string
+	EvalTokens     string
+	HardEvalTokens string
+	Corpus         string
+	SealedArtifact string
+}
+
+func usage() {
+	fmt.Println(`Verify the Manta production training/inference path.
+
+This is a local preflight, not a quality run. It checks the Manta public surface,
+builds cmd/manta, creates a tiny .mll embedding package, trains it, evals it
+without optimizer updates, exports a sealed .mll, and verifies the package.
+
+Run:
+  MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/verify_manta_production.fw
+
+Optional:
+  MANTA_VERIFY_RUN_ROOT=$PWD/runs
+  MANTA_VERIFY_RUN_ID=production-verify-20260412
+  MANTA_VERIFY_SKIP_TESTS=1`)
+}
+
+func getenv(name string, fallback string) string {
+	let value = os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envEnabled(name string) bool {
+	let value = strings.ToLower(os.Getenv(name))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func step(label string) {
+	fmt.Println(f"\n== {label} ==")
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+func findRoot() (string, error) {
+	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	if hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	let pwd = os.Getenv("PWD")
+	if hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(name string, args []string) string {
+	parts := []string{shellQuote(name)}
+	for arg in args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runCmd(cfg verifyConfig, label string, logName string, name string, args []string) error {
+	step(label)
+	let rendered = renderCommand(name, args)
+	fmt.Println(f"+ {rendered}")
+	logPath := filepath.Join(cfg.LogDir, logName)
+	err := os.WriteFile(logPath+".cmd", []byte(rendered+"\n"), 0o644)
+	guard err == nil else return err
+	logFile, err := os.Create(logPath)
+	guard err == nil else return err
+	defer logFile.Close()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = cfg.Root
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err = cmd.Run()
+	guard err == nil else return fmt.Errorf("%s failed; see %s: %w", label, logPath, err)
+	return nil
+}
+
+func commandOutput(dir string, name string, args []string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("%s %s: %w\n%s", name, strings.Join(args, " "), err, string(out))
+	}
+	return string(out), nil
+}
+
+func prepareConfig(root string) (verifyConfig, error) {
+	runID := getenv("MANTA_VERIFY_RUN_ID", "production-verify-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot := getenv("MANTA_VERIFY_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir, err := filepath.Abs(getenv("MANTA_VERIFY_RUN_DIR", filepath.Join(runRoot, runID)))
+	guard err == nil else return verifyConfig{}, err
+	if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
+		return verifyConfig{}, fmt.Errorf("run directory already exists and is not empty: %s", runDir)
+	}
+	err = os.MkdirAll(filepath.Join(runDir, "bin"), 0o755)
+	guard err == nil else return verifyConfig{}, err
+	err = os.MkdirAll(filepath.Join(runDir, "logs"), 0o755)
+	guard err == nil else return verifyConfig{}, err
+	modelName := getenv("MANTA_VERIFY_MODEL_NAME", "manta-embed-v1")
+	return verifyConfig{
+		Root:           root,
+		RunID:          runID,
+		RunDir:         runDir,
+		LogDir:         filepath.Join(runDir, "logs"),
+		ModelName:      modelName,
+		MantaBin:       filepath.Join(runDir, "bin", "manta"),
+		Artifact:       filepath.Join(runDir, modelName+".mll"),
+		Tokenizer:      filepath.Join(runDir, modelName+".tokenizer.mll"),
+		TrainJSONL:     filepath.Join(runDir, "train.jsonl"),
+		EvalJSONL:      filepath.Join(runDir, "eval.jsonl"),
+		HardEvalJSONL:  filepath.Join(runDir, "hard-eval.jsonl"),
+		TrainTokens:    filepath.Join(runDir, "train.tokens.jsonl"),
+		EvalTokens:     filepath.Join(runDir, "eval.tokens.jsonl"),
+		HardEvalTokens: filepath.Join(runDir, "hard-eval.tokens.jsonl"),
+		Corpus:         filepath.Join(runDir, "tokenizer-corpus.txt"),
+		SealedArtifact: filepath.Join(runDir, modelName+".sealed.mll"),
+	}, nil
+}
+
+func shouldScan(path string) bool {
+	switch filepath.Ext(path) {
+	case ".go", ".md", ".fw", ".manta", ".json", ".txt":
+		return true
+	}
+	return filepath.Base(path) == "README.md"
+}
+
+func auditPublicSurface(root string) error {
+	oldName := "ba" + "rr"
+	if _, err := os.Stat(filepath.Join(root, "artifact", oldName)); err == nil {
+		return fmt.Errorf("old artifact package still exists: artifact/%s", oldName)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	oldTag := "X" + "BAR"
+	markers := []string{
+		"github.com/odvcencio/manta/artifact/" + oldName,
+		"artifact/" + oldName,
+		"cmd/" + oldName,
+		"." + oldName,
+		oldName + "/",
+		oldTag,
+	}
+	roots := []string{"README.md", "docs", "scripts", "cmd", "examples", "models", "artifact", "compiler", "runtime"}
+	for _, rel := range roots {
+		start := filepath.Join(root, rel)
+		if _, err := os.Stat(start); os.IsNotExist(err) {
+			continue
+		}
+		err := filepath.Walk(start, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				switch info.Name() {
+				case ".git", "runs", "datasets", "bin", "dist", "vendor":
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !shouldScan(path) {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			guard err == nil else return err
+			text := string(data)
+			for _, marker := range markers {
+				if marker == "."+oldName && filepath.Ext(path) == ".go" {
+					continue
+				}
+				if strings.Contains(text, marker) {
+					return fmt.Errorf("%s contains old public marker %q", path, marker)
+				}
+			}
+			return nil
+		})
+		guard err == nil else return err
+	}
+	return nil
+}
+
+func writeFixtures(cfg verifyConfig) error {
+	train := strings.Join([]string{
+		`{"query":"manta local inference package","positive":"manta local inference package"}`,
+		`{"query":"gpu embedding training efficiency","positive":"gpu embedding training efficiency"}`,
+		`{"query":"sealed mll model artifact","positive":"sealed mll model artifact"}`,
+		`{"query":"vector search semantic retrieval","positive":"vector search semantic retrieval"}`,
+		"",
+	}, "\n")
+	eval := strings.Join([]string{
+		`{"query":"manta local inference package","document":"manta local inference package","label":1}`,
+		`{"left":"manta local inference package","right":"billing invoice export","label":0}`,
+		`{"query":"gpu embedding training efficiency","document":"gpu embedding training efficiency","label":1}`,
+		`{"left":"gpu embedding training efficiency","right":"gardening soil moisture","label":0}`,
+		"",
+	}, "\n")
+	hard := strings.Join([]string{
+		`{"query":"sealed mll model artifact","document":"sealed mll model artifact","label":1}`,
+		`{"left":"sealed mll model artifact","right":"sourdough recipe starter","label":0}`,
+		`{"query":"vector search semantic retrieval","document":"vector search semantic retrieval","label":1}`,
+		`{"left":"vector search semantic retrieval","right":"quarterly payroll calendar","label":0}`,
+		"",
+	}, "\n")
+	corpus := strings.Join([]string{
+		"manta local inference package",
+		"gpu embedding training efficiency",
+		"sealed mll model artifact",
+		"vector search semantic retrieval",
+		"billing invoice export",
+		"gardening soil moisture",
+		"sourdough recipe starter",
+		"quarterly payroll calendar",
+		"",
+	}, "\n")
+	err := os.WriteFile(cfg.TrainJSONL, []byte(train), 0o644)
+	guard err == nil else return err
+	err = os.WriteFile(cfg.EvalJSONL, []byte(eval), 0o644)
+	guard err == nil else return err
+	err = os.WriteFile(cfg.HardEvalJSONL, []byte(hard), 0o644)
+	guard err == nil else return err
+	return os.WriteFile(cfg.Corpus, []byte(corpus), 0o644)
+}
+
+func requireContains(label string, output string, needle string) error {
+	if !strings.Contains(output, needle) {
+		return fmt.Errorf("%s output missing %q\n%s", label, needle, output)
+	}
+	return nil
+}
+
+func runVerification(cfg verifyConfig) error {
+	step("Audit Manta public surface")
+	err := auditPublicSurface(cfg.Root)
+	guard err == nil else return err
+
+	if !envEnabled("MANTA_VERIFY_SKIP_TESTS") {
+		err = runCmd(cfg, "Go package gate", "go-test.log", "go", []string{"test", "./artifact/manta", "./cmd/manta", "./runtime", "./models", "-count=1"})
+		guard err == nil else return err
+	}
+	err = runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/manta"})
+	guard err == nil else return err
+
+	step("Write local production preflight fixtures")
+	err = writeFixtures(cfg)
+	guard err == nil else return err
+	fmt.Println(f"run_dir={cfg.RunDir}")
+
+	err = runCmd(cfg, "Initialize .mll embedding package", "init-model.log", cfg.MantaBin, []string{
+		"init-model",
+		"--name", cfg.ModelName,
+		"--vocab-size", "96",
+		"--max-seq", "64",
+		"--embedding-dim", "16",
+		"--hidden-dim", "32",
+		"--seed", "1",
+		"--weight-bits", "8",
+		"--lr", "0.005",
+		"--contrastive-loss", "infonce",
+		"--temperature", "0.05",
+		cfg.Artifact,
+	})
+	guard err == nil else return err
+	err = runCmd(cfg, "Train tokenizer", "train-tokenizer.log", cfg.MantaBin, []string{
+		"train-tokenizer",
+		"--output", cfg.Tokenizer,
+		"--vocab-size", "96",
+		"--min-freq", "1",
+		cfg.Artifact,
+		cfg.Corpus,
+	})
+	guard err == nil else return err
+	err = runCmd(cfg, "Tokenize train JSONL", "tokenize-train.log", cfg.MantaBin, []string{
+		"tokenize-embed", "--mode", "contrastive", "--tokenizer", cfg.Tokenizer, cfg.Artifact, cfg.TrainJSONL, cfg.TrainTokens,
+	})
+	guard err == nil else return err
+	err = runCmd(cfg, "Tokenize eval JSONL", "tokenize-eval.log", cfg.MantaBin, []string{
+		"tokenize-embed", "--mode", "pair", "--tokenizer", cfg.Tokenizer, cfg.Artifact, cfg.EvalJSONL, cfg.EvalTokens,
+	})
+	guard err == nil else return err
+	err = runCmd(cfg, "Tokenize hard eval JSONL", "tokenize-hard-eval.log", cfg.MantaBin, []string{
+		"tokenize-embed", "--mode", "pair", "--tokenizer", cfg.Tokenizer, cfg.Artifact, cfg.HardEvalJSONL, cfg.HardEvalTokens,
+	})
+	guard err == nil else return err
+	err = runCmd(cfg, "Train .mll package", "train.log", cfg.MantaBin, []string{
+		"train-embed",
+		"--no-tokenizer",
+		"--epochs", "1",
+		"--batch-size", "2",
+		"--lr", "0.005",
+		"--contrastive-loss", "infonce",
+		"--temperature", "0.05",
+		"--eval-every", "1",
+		"--eval-every-steps", "0",
+		cfg.Artifact,
+		cfg.TrainTokens,
+		cfg.EvalTokens,
+	})
+	guard err == nil else return err
+
+	step("Validation eval-only")
+	evalOut, err := commandOutput(cfg.Root, cfg.MantaBin, []string{"train-embed", "--eval-only", "--no-tokenizer", cfg.Artifact, cfg.EvalTokens})
+	guard err == nil else return err
+	fmt.Print(evalOut)
+	err = requireContains("validation eval-only", evalOut, "optimizer_updates=0")
+	guard err == nil else return err
+
+	step("Hard eval-only")
+	hardOut, err := commandOutput(cfg.Root, cfg.MantaBin, []string{"train-embed", "--eval-only", "--no-tokenizer", cfg.Artifact, cfg.HardEvalTokens})
+	guard err == nil else return err
+	fmt.Print(hardOut)
+	err = requireContains("hard eval-only", hardOut, "optimizer_updates=0")
+	guard err == nil else return err
+
+	err = runCmd(cfg, "Export sealed .mll", "export-mll.log", cfg.MantaBin, []string{"export-mll", cfg.Artifact, cfg.SealedArtifact})
+	guard err == nil else return err
+	inspectPackage, err := commandOutput(cfg.Root, cfg.MantaBin, []string{"inspect", cfg.Artifact})
+	guard err == nil else return err
+	err = requireContains("package inspect", inspectPackage, "package verify: OK")
+	guard err == nil else return err
+	inspectSealed, err := commandOutput(cfg.Root, cfg.MantaBin, []string{"inspect", cfg.SealedArtifact})
+	guard err == nil else return err
+	err = requireContains("sealed inspect", inspectSealed, "package verify: OK")
+	guard err == nil else return err
+	err = requireContains("sealed inspect", inspectSealed, "package: embedded sealed MLL")
+	guard err == nil else return err
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	guard err == nil else {
+		fmt.Println(f"failed to resolve repo root: {err}")
+		os.Exit(1)
+	}
+	cfg, err := prepareConfig(root)
+	guard err == nil else {
+		fmt.Println(f"verification config failed: {err}")
+		os.Exit(1)
+	}
+	err = runVerification(cfg)
+	guard err == nil else {
+		fmt.Println(f"production verification failed: {err}")
+		os.Exit(1)
+	}
+	step("Manta production preflight ready")
+	fmt.Println(f"run_dir={cfg.RunDir}")
+	fmt.Println(f"artifact={cfg.Artifact}")
+	fmt.Println(f"sealed_artifact={cfg.SealedArtifact}")
+}

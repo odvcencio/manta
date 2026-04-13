@@ -13,12 +13,12 @@ import (
 	"math"
 	"time"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
 const optimizerKernelSource = `
-extern "C" __global__ void barr_optimizer_update(
+extern "C" __global__ void manta_optimizer_update(
     float* param,
     float* mom1,
     float* mom2,
@@ -72,7 +72,7 @@ type residentOptimizerState struct {
 }
 
 func init() {
-	backend.RegisterOptimizerAccelerator(barr.BackendCUDA, NewOptimizerAccelerator)
+	backend.RegisterOptimizerAccelerator(mantaartifact.BackendCUDA, NewOptimizerAccelerator)
 }
 
 func NewOptimizerAccelerator() (backend.OptimizerAccelerator, error) {
@@ -83,7 +83,7 @@ func NewOptimizerAccelerator() (backend.OptimizerAccelerator, error) {
 	if device == nil {
 		return nil, nil
 	}
-	kernel, err := device.compileAuxKernel(optimizerKernelSource, "barr_optimizer_update")
+	kernel, err := device.compileAuxKernel(optimizerKernelSource, "manta_optimizer_update")
 	if err != nil {
 		device.close()
 		return nil, err
@@ -91,8 +91,8 @@ func NewOptimizerAccelerator() (backend.OptimizerAccelerator, error) {
 	return &optimizerAccelerator{device: device, kernel: kernel, resident: map[string]residentOptimizerState{}}, nil
 }
 
-func (a *optimizerAccelerator) Backend() barr.BackendKind {
-	return barr.BackendCUDA
+func (a *optimizerAccelerator) Backend() mantaartifact.BackendKind {
+	return mantaartifact.BackendCUDA
 }
 
 func (a *optimizerAccelerator) Stats() backend.OptimizerAcceleratorStats {

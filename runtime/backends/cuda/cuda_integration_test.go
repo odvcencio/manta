@@ -7,9 +7,9 @@ import (
 	"math"
 	"testing"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/compiler"
-	barruntime "github.com/odvcencio/manta/runtime"
+	mantaruntime "github.com/odvcencio/manta/runtime"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -19,16 +19,16 @@ func TestCUDADeviceExecutionTinyEmbed(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	rt := barruntime.New(New())
+	rt := mantaruntime.New(New())
 	prog, err := rt.Load(
 		context.Background(),
 		bundle.Artifact,
-		barruntime.WithWeight("token_embedding", backend.NewTensorF16([]int{3, 2}, []float32{
+		mantaruntime.WithWeight("token_embedding", backend.NewTensorF16([]int{3, 2}, []float32{
 			1, 0,
 			0, 1,
 			1, 1,
 		})),
-		barruntime.WithWeight("projection", backend.NewTensorF16([]int{2, 2}, []float32{
+		mantaruntime.WithWeight("projection", backend.NewTensorF16([]int{2, 2}, []float32{
 			1, 0,
 			0, 1,
 		})),
@@ -67,11 +67,11 @@ func TestCUDADeviceExecutionTinyScore(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	rt := barruntime.New(New())
+	rt := mantaruntime.New(New())
 	prog, err := rt.Load(
 		context.Background(),
 		bundle.Artifact,
-		barruntime.WithWeight("docs", backend.NewTensorQ4([]int{2, 2}, []float32{
+		mantaruntime.WithWeight("docs", backend.NewTensorQ4([]int{2, 2}, []float32{
 			1, 0,
 			0, 1,
 		})),
@@ -129,9 +129,9 @@ func TestCUDABoundQuantizedMatrixMatchesHostFakeQuantization(t *testing.T) {
 	if err := accelAny.BindMatrix("quant_rhs", rhs); err != nil {
 		t.Fatalf("bind quantized rhs: %v", err)
 	}
-	result, err := accelAny.RunMatMulWithBoundRight(lhs, "quant_rhs", barr.ValueType{
-		Kind: barr.ValueTensor,
-		Tensor: &barr.TensorType{
+	result, err := accelAny.RunMatMulWithBoundRight(lhs, "quant_rhs", mantaartifact.ValueType{
+		Kind: mantaartifact.ValueTensor,
+		Tensor: &mantaartifact.TensorType{
 			DType: "f32",
 		},
 	}, false, false)
@@ -205,9 +205,9 @@ func TestCUDAMultiBoundRightMatMulUploadsLHSOnce(t *testing.T) {
 	if err := accelAny.BindMatrix("rhs_b", rhsB); err != nil {
 		t.Fatalf("bind rhs_b: %v", err)
 	}
-	results, err := multi.RunMatMulWithBoundRights(lhs, []string{"rhs_a", "rhs_b"}, barr.ValueType{
-		Kind: barr.ValueTensor,
-		Tensor: &barr.TensorType{
+	results, err := multi.RunMatMulWithBoundRights(lhs, []string{"rhs_a", "rhs_b"}, mantaartifact.ValueType{
+		Kind: mantaartifact.ValueTensor,
+		Tensor: &mantaartifact.TensorType{
 			DType: "f32",
 		},
 	}, false, false)
@@ -283,9 +283,9 @@ func TestCUDAAccumulatedBoundRightMatMulDownloadsOnce(t *testing.T) {
 	if err := accelAny.BindMatrix("rhs_b", rhsB); err != nil {
 		t.Fatalf("bind rhs_b: %v", err)
 	}
-	result, err := accumulated.RunAccumulatedMatMulsWithBoundRights([]*backend.Tensor{lhsA, lhsB}, []string{"rhs_a", "rhs_b"}, barr.ValueType{
-		Kind: barr.ValueTensor,
-		Tensor: &barr.TensorType{
+	result, err := accumulated.RunAccumulatedMatMulsWithBoundRights([]*backend.Tensor{lhsA, lhsB}, []string{"rhs_a", "rhs_b"}, mantaartifact.ValueType{
+		Kind: mantaartifact.ValueTensor,
+		Tensor: &mantaartifact.TensorType{
 			DType: "f32",
 		},
 	}, false, true)
@@ -362,9 +362,9 @@ func TestCUDASharedLeftMatMulUploadsLHSOnce(t *testing.T) {
 		1, 0,
 		0, 2,
 	})
-	results, err := shared.RunMatMulsWithSharedLeft(lhs, []*backend.Tensor{rhsA, rhsB}, barr.ValueType{
-		Kind: barr.ValueTensor,
-		Tensor: &barr.TensorType{
+	results, err := shared.RunMatMulsWithSharedLeft(lhs, []*backend.Tensor{rhsA, rhsB}, mantaartifact.ValueType{
+		Kind: mantaartifact.ValueTensor,
+		Tensor: &mantaartifact.TensorType{
 			DType: "f32",
 		},
 	}, true, false)
@@ -423,9 +423,9 @@ func TestCUDAStridedBatchedMatMulMatchesHost(t *testing.T) {
 		0, 2,
 		1, -1,
 	})
-	result, err := accelAny.RunMatMul([]*backend.Tensor{lhs, rhs}, barr.ValueType{
-		Kind: barr.ValueTensor,
-		Tensor: &barr.TensorType{
+	result, err := accelAny.RunMatMul([]*backend.Tensor{lhs, rhs}, mantaartifact.ValueType{
+		Kind: mantaartifact.ValueTensor,
+		Tensor: &mantaartifact.TensorType{
 			DType: "f32",
 		},
 	})
@@ -456,9 +456,9 @@ func TestCUDAStridedBatchedMatMulTransposeMatchesHost(t *testing.T) {
 	}
 	defer accelAny.Close()
 
-	outputType := barr.ValueType{
-		Kind: barr.ValueTensor,
-		Tensor: &barr.TensorType{
+	outputType := mantaartifact.ValueType{
+		Kind: mantaartifact.ValueTensor,
+		Tensor: &mantaartifact.TensorType{
 			DType: "f32",
 		},
 	}

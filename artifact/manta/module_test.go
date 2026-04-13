@@ -1,4 +1,4 @@
-package barr
+package manta
 
 import (
 	"os"

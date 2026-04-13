@@ -20,14 +20,14 @@ typedef struct {
 	int minor;
 	int primary_ctx;
 	cublasHandle_t blas;
-} BarrCudaRuntime;
+} MantaCudaRuntime;
 
 typedef struct {
 	CUmodule module;
 	CUfunction function;
-} BarrCudaKernel;
+} MantaCudaKernel;
 
-static char* barr_dup_cstr(const char* s) {
+static char* manta_dup_cstr(const char* s) {
 	if (s == NULL) {
 		return NULL;
 	}
@@ -40,7 +40,7 @@ static char* barr_dup_cstr(const char* s) {
 	return out;
 }
 
-static char* barr_dup_format(const char* prefix, const char* value) {
+static char* manta_dup_format(const char* prefix, const char* value) {
 	if (prefix == NULL) prefix = "error";
 	if (value == NULL) value = "unknown";
 	size_t n = strlen(prefix) + strlen(value) + 3;
@@ -52,7 +52,7 @@ static char* barr_dup_format(const char* prefix, const char* value) {
 	return out;
 }
 
-static char* barr_dup_cu_error(const char* prefix, CUresult res) {
+static char* manta_dup_cu_error(const char* prefix, CUresult res) {
 	const char* name = NULL;
 	const char* detail = NULL;
 	cuGetErrorName(res, &name);
@@ -68,13 +68,13 @@ static char* barr_dup_cu_error(const char* prefix, CUresult res) {
 	return out;
 }
 
-static char* barr_dup_nvrtc_error(const char* prefix, nvrtcResult res) {
+static char* manta_dup_nvrtc_error(const char* prefix, nvrtcResult res) {
 	const char* detail = nvrtcGetErrorString(res);
 	if (detail == NULL) detail = "unknown";
-	return barr_dup_format(prefix, detail);
+	return manta_dup_format(prefix, detail);
 }
 
-static const char* barr_cublas_status_name(cublasStatus_t status) {
+static const char* manta_cublas_status_name(cublasStatus_t status) {
 	switch (status) {
 	case CUBLAS_STATUS_SUCCESS:
 		return "CUBLAS_STATUS_SUCCESS";
@@ -101,12 +101,12 @@ static const char* barr_cublas_status_name(cublasStatus_t status) {
 	}
 }
 
-static char* barr_dup_cublas_error(const char* prefix, cublasStatus_t status) {
-	return barr_dup_format(prefix, barr_cublas_status_name(status));
+static char* manta_dup_cublas_error(const char* prefix, cublasStatus_t status) {
+	return manta_dup_format(prefix, manta_cublas_status_name(status));
 }
 
-static int barrCudaRuntimeCreate(BarrCudaRuntime** out, char** err) {
-	BarrCudaRuntime* rt = NULL;
+static int mantaCudaRuntimeCreate(MantaCudaRuntime** out, char** err) {
+	MantaCudaRuntime* rt = NULL;
 	CUdevice device = 0;
 	CUcontext ctx = NULL;
 	int major = 0;
@@ -114,48 +114,48 @@ static int barrCudaRuntimeCreate(BarrCudaRuntime** out, char** err) {
 	cublasHandle_t blas = NULL;
 	CUresult cuRes = cuInit(0);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuInit", cuRes);
+		*err = manta_dup_cu_error("cuInit", cuRes);
 		return 1;
 	}
 	cuRes = cuDeviceGet(&device, 0);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuDeviceGet", cuRes);
+		*err = manta_dup_cu_error("cuDeviceGet", cuRes);
 		return 1;
 	}
 	cuRes = cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuDeviceGetAttribute(COMPUTE_CAPABILITY_MAJOR)", cuRes);
+		*err = manta_dup_cu_error("cuDeviceGetAttribute(COMPUTE_CAPABILITY_MAJOR)", cuRes);
 		return 1;
 	}
 	cuRes = cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuDeviceGetAttribute(COMPUTE_CAPABILITY_MINOR)", cuRes);
+		*err = manta_dup_cu_error("cuDeviceGetAttribute(COMPUTE_CAPABILITY_MINOR)", cuRes);
 		return 1;
 	}
 	// Repeated runtime loads must not allocate independent CUDA contexts.
 	// The primary context is shared by the process and avoids suite-wide VRAM exhaustion.
 	cuRes = cuDevicePrimaryCtxRetain(&ctx, device);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuDevicePrimaryCtxRetain", cuRes);
+		*err = manta_dup_cu_error("cuDevicePrimaryCtxRetain", cuRes);
 		return 1;
 	}
 	cuRes = cuCtxSetCurrent(ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		cuDevicePrimaryCtxRelease(device);
-		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
+		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
 	cublasStatus_t blasRes = cublasCreate(&blas);
 	if (blasRes != CUBLAS_STATUS_SUCCESS) {
 		cuDevicePrimaryCtxRelease(device);
-		*err = barr_dup_cublas_error("cublasCreate", blasRes);
+		*err = manta_dup_cublas_error("cublasCreate", blasRes);
 		return 1;
 	}
-	rt = (BarrCudaRuntime*)malloc(sizeof(BarrCudaRuntime));
+	rt = (MantaCudaRuntime*)malloc(sizeof(MantaCudaRuntime));
 	if (rt == NULL) {
 		cublasDestroy(blas);
 		cuDevicePrimaryCtxRelease(device);
-		*err = barr_dup_format("malloc", "failed to allocate runtime");
+		*err = manta_dup_format("malloc", "failed to allocate runtime");
 		return 1;
 	}
 	rt->ctx = ctx;
@@ -168,7 +168,7 @@ static int barrCudaRuntimeCreate(BarrCudaRuntime** out, char** err) {
 	return 0;
 }
 
-static void barrCudaRuntimeDestroy(BarrCudaRuntime* rt) {
+static void mantaCudaRuntimeDestroy(MantaCudaRuntime* rt) {
 	if (rt == NULL) {
 		return;
 	}
@@ -188,20 +188,20 @@ static void barrCudaRuntimeDestroy(BarrCudaRuntime* rt) {
 	free(rt);
 }
 
-static int barrCudaCompileKernel(BarrCudaRuntime* rt, const char* src, const char* entry, BarrCudaKernel** out, char** log, char** err) {
+static int mantaCudaCompileKernel(MantaCudaRuntime* rt, const char* src, const char* entry, MantaCudaKernel** out, char** log, char** err) {
 	nvrtcProgram program;
 	nvrtcResult nvRes;
 	size_t logSize = 0;
 	size_t ptxSize = 0;
 	char arch[64];
 	char* ptx = NULL;
-	BarrCudaKernel* kernel = NULL;
+	MantaCudaKernel* kernel = NULL;
 	CUmodule module = NULL;
 	CUfunction function = NULL;
 
 	nvRes = nvrtcCreateProgram(&program, src, entry, 0, NULL, NULL);
 	if (nvRes != NVRTC_SUCCESS) {
-		*err = barr_dup_nvrtc_error("nvrtcCreateProgram", nvRes);
+		*err = manta_dup_nvrtc_error("nvrtcCreateProgram", nvRes);
 		return 1;
 	}
 
@@ -216,20 +216,20 @@ static int barrCudaCompileKernel(BarrCudaRuntime* rt, const char* src, const cha
 		}
 	}
 	if (nvRes != NVRTC_SUCCESS) {
-		*err = barr_dup_nvrtc_error("nvrtcCompileProgram", nvRes);
+		*err = manta_dup_nvrtc_error("nvrtcCompileProgram", nvRes);
 		nvrtcDestroyProgram(&program);
 		return 1;
 	}
 
 	nvRes = nvrtcGetPTXSize(program, &ptxSize);
 	if (nvRes != NVRTC_SUCCESS) {
-		*err = barr_dup_nvrtc_error("nvrtcGetPTXSize", nvRes);
+		*err = manta_dup_nvrtc_error("nvrtcGetPTXSize", nvRes);
 		nvrtcDestroyProgram(&program);
 		return 1;
 	}
 	ptx = (char*)malloc(ptxSize);
 	if (ptx == NULL) {
-		*err = barr_dup_format("malloc", "failed to allocate PTX buffer");
+		*err = manta_dup_format("malloc", "failed to allocate PTX buffer");
 		nvrtcDestroyProgram(&program);
 		return 1;
 	}
@@ -237,33 +237,33 @@ static int barrCudaCompileKernel(BarrCudaRuntime* rt, const char* src, const cha
 	nvrtcDestroyProgram(&program);
 	if (nvRes != NVRTC_SUCCESS) {
 		free(ptx);
-		*err = barr_dup_nvrtc_error("nvrtcGetPTX", nvRes);
+		*err = manta_dup_nvrtc_error("nvrtcGetPTX", nvRes);
 		return 1;
 	}
 
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		free(ptx);
-		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
+		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
 	cuRes = cuModuleLoadDataEx(&module, ptx, 0, NULL, NULL);
 	free(ptx);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuModuleLoadDataEx", cuRes);
+		*err = manta_dup_cu_error("cuModuleLoadDataEx", cuRes);
 		return 1;
 	}
 	cuRes = cuModuleGetFunction(&function, module, entry);
 	if (cuRes != CUDA_SUCCESS) {
 		cuModuleUnload(module);
-		*err = barr_dup_cu_error("cuModuleGetFunction", cuRes);
+		*err = manta_dup_cu_error("cuModuleGetFunction", cuRes);
 		return 1;
 	}
 
-	kernel = (BarrCudaKernel*)malloc(sizeof(BarrCudaKernel));
+	kernel = (MantaCudaKernel*)malloc(sizeof(MantaCudaKernel));
 	if (kernel == NULL) {
 		cuModuleUnload(module);
-		*err = barr_dup_format("malloc", "failed to allocate kernel");
+		*err = manta_dup_format("malloc", "failed to allocate kernel");
 		return 1;
 	}
 	kernel->module = module;
@@ -272,7 +272,7 @@ static int barrCudaCompileKernel(BarrCudaRuntime* rt, const char* src, const cha
 	return 0;
 }
 
-static void barrCudaKernelDestroy(BarrCudaKernel* kernel) {
+static void mantaCudaKernelDestroy(MantaCudaKernel* kernel) {
 	if (kernel == NULL) {
 		return;
 	}
@@ -282,184 +282,184 @@ static void barrCudaKernelDestroy(BarrCudaKernel* kernel) {
 	free(kernel);
 }
 
-static int barrCudaMemAlloc(BarrCudaRuntime* rt, CUdeviceptr* out, size_t bytes, char** err) {
+static int mantaCudaMemAlloc(MantaCudaRuntime* rt, CUdeviceptr* out, size_t bytes, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
+		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
 	cuRes = cuMemAlloc(out, bytes);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuMemAlloc", cuRes);
+		*err = manta_dup_cu_error("cuMemAlloc", cuRes);
 		return 1;
 	}
 	return 0;
 }
 
-static int barrCudaMemFree(BarrCudaRuntime* rt, CUdeviceptr ptr, char** err) {
+static int mantaCudaMemFree(MantaCudaRuntime* rt, CUdeviceptr ptr, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
+		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
 	cuRes = cuMemFree(ptr);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuMemFree", cuRes);
+		*err = manta_dup_cu_error("cuMemFree", cuRes);
 		return 1;
 	}
 	return 0;
 }
 
-static int barrCudaMemcpyHtoD(BarrCudaRuntime* rt, CUdeviceptr dst, const void* src, size_t bytes, char** err) {
+static int mantaCudaMemcpyHtoD(MantaCudaRuntime* rt, CUdeviceptr dst, const void* src, size_t bytes, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
+		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
 	cuRes = cuMemcpyHtoD(dst, src, bytes);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuMemcpyHtoD", cuRes);
+		*err = manta_dup_cu_error("cuMemcpyHtoD", cuRes);
 		return 1;
 	}
 	return 0;
 }
 
-static int barrCudaMemcpyDtoH(BarrCudaRuntime* rt, void* dst, CUdeviceptr src, size_t bytes, char** err) {
+static int mantaCudaMemcpyDtoH(MantaCudaRuntime* rt, void* dst, CUdeviceptr src, size_t bytes, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
+		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
 	cuRes = cuMemcpyDtoH(dst, src, bytes);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuMemcpyDtoH", cuRes);
+		*err = manta_dup_cu_error("cuMemcpyDtoH", cuRes);
 		return 1;
 	}
 	return 0;
 }
 
-static int barrCudaSynchronize(BarrCudaRuntime* rt, char** err) {
+static int mantaCudaSynchronize(MantaCudaRuntime* rt, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
+		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
 	cuRes = cuCtxSynchronize();
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxSynchronize", cuRes);
+		*err = manta_dup_cu_error("cuCtxSynchronize", cuRes);
 		return 1;
 	}
 	return 0;
 }
 
-static int barrCudaReadFloat32(BarrCudaRuntime* rt, CUdeviceptr src, int elementIndex, float* out, char** err) {
+static int mantaCudaReadFloat32(MantaCudaRuntime* rt, CUdeviceptr src, int elementIndex, float* out, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
+		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
 	CUdeviceptr addr = src + ((CUdeviceptr)elementIndex * sizeof(float));
 	cuRes = cuMemcpyDtoH(out, addr, sizeof(float));
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuMemcpyDtoH", cuRes);
+		*err = manta_dup_cu_error("cuMemcpyDtoH", cuRes);
 		return 1;
 	}
 	return 0;
 }
 
-static int barrCudaBlasIsamax(BarrCudaRuntime* rt, CUdeviceptr src, int elements, int* outIndex, char** err) {
+static int mantaCudaBlasIsamax(MantaCudaRuntime* rt, CUdeviceptr src, int elements, int* outIndex, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
+		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
 	const float* ptr = (const float*)(uintptr_t)src;
 	cublasStatus_t blasRes = cublasIsamax(rt->blas, elements, ptr, 1, outIndex);
 	if (blasRes != CUBLAS_STATUS_SUCCESS) {
-		*err = barr_dup_cublas_error("cublasIsamax", blasRes);
+		*err = manta_dup_cublas_error("cublasIsamax", blasRes);
 		return 1;
 	}
 	return 0;
 }
 
-static int barrCudaLaunch1D(BarrCudaRuntime* rt, BarrCudaKernel* kernel, unsigned int grid, unsigned int block, void** args, char** err) {
+static int mantaCudaLaunch1D(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, void** args, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
+		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
 	cuRes = cuLaunchKernel(kernel->function, grid, 1, 1, block, 1, 1, 0, NULL, args, NULL);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuLaunchKernel", cuRes);
+		*err = manta_dup_cu_error("cuLaunchKernel", cuRes);
 		return 1;
 	}
 	cuRes = cuCtxSynchronize();
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxSynchronize", cuRes);
+		*err = manta_dup_cu_error("cuCtxSynchronize", cuRes);
 		return 1;
 	}
 	return 0;
 }
 
-static int barrCudaLaunchRowWise(BarrCudaRuntime* rt, BarrCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr in0, CUdeviceptr out0, int rows, int cols, char** err) {
+static int mantaCudaLaunchRowWise(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr in0, CUdeviceptr out0, int rows, int cols, char** err) {
 	void* args[] = {&in0, &out0, &rows, &cols};
-	return barrCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int barrCudaLaunchElementWise(BarrCudaRuntime* rt, BarrCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int elements, char** err) {
+static int mantaCudaLaunchElementWise(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int elements, char** err) {
 	void* args[] = {&lhs, &rhs, &out0, &elements};
-	return barrCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int barrCudaLaunchUnary(BarrCudaRuntime* rt, BarrCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr in0, CUdeviceptr out0, int elements, char** err) {
+static int mantaCudaLaunchUnary(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr in0, CUdeviceptr out0, int elements, char** err) {
 	void* args[] = {&in0, &out0, &elements};
-	return barrCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int barrCudaLaunchScore(BarrCudaRuntime* rt, BarrCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr docs, CUdeviceptr out0, int rows, int cols, char** err) {
+static int mantaCudaLaunchScore(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr docs, CUdeviceptr out0, int rows, int cols, char** err) {
 	void* args[] = {&query, &docs, &out0, &rows, &cols};
-	return barrCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int barrCudaLaunchOptimizerUpdate(BarrCudaRuntime* rt, BarrCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr param, CUdeviceptr mom1, CUdeviceptr mom2, CUdeviceptr grad, int elements, int mode, float learningRate, float weightDecay, float beta1, float beta2, float corr1, float corr2, float epsilon, float scale, char** err) {
+static int mantaCudaLaunchOptimizerUpdate(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr param, CUdeviceptr mom1, CUdeviceptr mom2, CUdeviceptr grad, int elements, int mode, float learningRate, float weightDecay, float beta1, float beta2, float corr1, float corr2, float epsilon, float scale, char** err) {
 	void* args[] = {&param, &mom1, &mom2, &grad, &elements, &mode, &learningRate, &weightDecay, &beta1, &beta2, &corr1, &corr2, &epsilon, &scale};
-	return barrCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int barrCudaLaunchSoftmaxBackwardRows(BarrCudaRuntime* rt, BarrCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr gradOut, CUdeviceptr probs, CUdeviceptr out0, int rows, int cols, char** err) {
+static int mantaCudaLaunchSoftmaxBackwardRows(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr gradOut, CUdeviceptr probs, CUdeviceptr out0, int rows, int cols, char** err) {
 	void* args[] = {&gradOut, &probs, &out0, &rows, &cols};
-	return barrCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int barrCudaLaunchLayerNormBackwardRows(BarrCudaRuntime* rt, BarrCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr gradOut, CUdeviceptr normalized, CUdeviceptr pre, CUdeviceptr out0, int rows, int cols, char** err) {
+static int mantaCudaLaunchLayerNormBackwardRows(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr gradOut, CUdeviceptr normalized, CUdeviceptr pre, CUdeviceptr out0, int rows, int cols, char** err) {
 	void* args[] = {&gradOut, &normalized, &pre, &out0, &rows, &cols};
-	return barrCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int barrCudaLaunchQuantizeInPlace(BarrCudaRuntime* rt, BarrCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr data, int elements, float levels, float scale, char** err) {
+static int mantaCudaLaunchQuantizeInPlace(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr data, int elements, float levels, float scale, char** err) {
 	void* args[] = {&data, &elements, &levels, &scale};
-	return barrCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int barrCudaLaunchContrastiveScores(BarrCudaRuntime* rt, BarrCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr positive, CUdeviceptr queryNorms, CUdeviceptr positiveNorms, CUdeviceptr scores, int rows, int width, char** err) {
+static int mantaCudaLaunchContrastiveScores(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr positive, CUdeviceptr queryNorms, CUdeviceptr positiveNorms, CUdeviceptr scores, int rows, int width, char** err) {
 	void* args[] = {&query, &positive, &queryNorms, &positiveNorms, &scores, &rows, &width};
-	return barrCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int barrCudaLaunchInfoNCEScales(BarrCudaRuntime* rt, BarrCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr scores, CUdeviceptr scales, CUdeviceptr rowLoss, CUdeviceptr rowScore, int rows, float temperature, char** err) {
+static int mantaCudaLaunchInfoNCEScales(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr scores, CUdeviceptr scales, CUdeviceptr rowLoss, CUdeviceptr rowScore, int rows, float temperature, char** err) {
 	void* args[] = {&scores, &scales, &rowLoss, &rowScore, &rows, &temperature};
-	return barrCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int barrCudaLaunchContrastiveGrad(BarrCudaRuntime* rt, BarrCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr positive, CUdeviceptr queryNorms, CUdeviceptr positiveNorms, CUdeviceptr scores, CUdeviceptr scales, CUdeviceptr queryGrads, CUdeviceptr positiveGrads, int rows, int width, char** err) {
+static int mantaCudaLaunchContrastiveGrad(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr positive, CUdeviceptr queryNorms, CUdeviceptr positiveNorms, CUdeviceptr scores, CUdeviceptr scales, CUdeviceptr queryGrads, CUdeviceptr positiveGrads, int rows, int width, char** err) {
 	void* args[] = {&query, &positive, &queryNorms, &positiveNorms, &scores, &scales, &queryGrads, &positiveGrads, &rows, &width};
-	return barrCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int barrCudaMatMulCublasWithBetaNoSync(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, float betaValue, char** err) {
+static int mantaCudaMatMulCublasWithBetaNoSync(MantaCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, float betaValue, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
+		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
 	int rows = transposeLeft ? lhsCols : lhsRows;
@@ -467,7 +467,7 @@ static int barrCudaMatMulCublasWithBetaNoSync(BarrCudaRuntime* rt, CUdeviceptr l
 	int rhsInner = transposeRight ? rhsCols : rhsRows;
 	int cols = transposeRight ? rhsRows : rhsCols;
 	if (inner != rhsInner) {
-		*err = barr_dup_format("cublasSgemm", "shape mismatch");
+		*err = manta_dup_format("cublasSgemm", "shape mismatch");
 		return 1;
 	}
 	const float alpha = 1.0f;
@@ -492,31 +492,31 @@ static int barrCudaMatMulCublasWithBetaNoSync(BarrCudaRuntime* rt, CUdeviceptr l
 		cols
 	);
 	if (blasRes != CUBLAS_STATUS_SUCCESS) {
-		*err = barr_dup_cublas_error("cublasSgemm", blasRes);
+		*err = manta_dup_cublas_error("cublasSgemm", blasRes);
 		return 1;
 	}
 	return 0;
 }
 
-static int barrCudaMatMulCublasWithBeta(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, float betaValue, char** err) {
-	if (barrCudaMatMulCublasWithBetaNoSync(rt, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, transposeLeft, transposeRight, betaValue, err) != 0) {
+static int mantaCudaMatMulCublasWithBeta(MantaCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, float betaValue, char** err) {
+	if (mantaCudaMatMulCublasWithBetaNoSync(rt, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, transposeLeft, transposeRight, betaValue, err) != 0) {
 		return 1;
 	}
-	return barrCudaSynchronize(rt, err);
+	return mantaCudaSynchronize(rt, err);
 }
 
-static int barrCudaMatMulCublas(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
-	return barrCudaMatMulCublasWithBeta(rt, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, transposeLeft, transposeRight, 0.0f, err);
+static int mantaCudaMatMulCublas(MantaCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
+	return mantaCudaMatMulCublasWithBeta(rt, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, transposeLeft, transposeRight, 0.0f, err);
 }
 
-static int barrCudaMatMulCublasStridedBatched(BarrCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int batches, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
+static int mantaCudaMatMulCublasStridedBatched(MantaCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int batches, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxSetCurrent", cuRes);
+		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
 	if (batches <= 0 || lhsRows <= 0 || lhsCols <= 0 || rhsRows <= 0 || rhsCols <= 0) {
-		*err = barr_dup_format("cublasSgemmStridedBatched", "invalid shape");
+		*err = manta_dup_format("cublasSgemmStridedBatched", "invalid shape");
 		return 1;
 	}
 	int rows = transposeLeft ? lhsCols : lhsRows;
@@ -524,7 +524,7 @@ static int barrCudaMatMulCublasStridedBatched(BarrCudaRuntime* rt, CUdeviceptr l
 	int rhsInner = transposeRight ? rhsCols : rhsRows;
 	int cols = transposeRight ? rhsRows : rhsCols;
 	if (inner != rhsInner) {
-		*err = barr_dup_format("cublasSgemmStridedBatched", "shape mismatch");
+		*err = manta_dup_format("cublasSgemmStridedBatched", "shape mismatch");
 		return 1;
 	}
 	const float alpha = 1.0f;
@@ -556,18 +556,18 @@ static int barrCudaMatMulCublasStridedBatched(BarrCudaRuntime* rt, CUdeviceptr l
 		batches
 	);
 	if (blasRes != CUBLAS_STATUS_SUCCESS) {
-		*err = barr_dup_cublas_error("cublasSgemmStridedBatched", blasRes);
+		*err = manta_dup_cublas_error("cublasSgemmStridedBatched", blasRes);
 		return 1;
 	}
 	cuRes = cuCtxSynchronize();
 	if (cuRes != CUDA_SUCCESS) {
-		*err = barr_dup_cu_error("cuCtxSynchronize", cuRes);
+		*err = manta_dup_cu_error("cuCtxSynchronize", cuRes);
 		return 1;
 	}
 	return 0;
 }
 
-static void barrCudaFreeCString(char* s) {
+static void mantaCudaFreeCString(char* s) {
 	if (s != NULL) {
 		free(s);
 	}
@@ -583,12 +583,12 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
 const forwardQuantizeKernelSource = `
-extern "C" __global__ void barr_forward_quantize_in_place(
+extern "C" __global__ void manta_forward_quantize_in_place(
     float* data,
     int elements,
     float levels,
@@ -610,7 +610,7 @@ extern "C" __global__ void barr_forward_quantize_in_place(
 `
 
 type deviceRuntime struct {
-	ptr              *C.BarrCudaRuntime
+	ptr              *C.MantaCudaRuntime
 	residentMatrices map[string]residentMatrix
 	matMulScratch    map[string]deviceScratchBuffer
 	quantizeKernel   *auxKernel
@@ -630,12 +630,12 @@ type deviceScratchBuffer struct {
 }
 
 type deviceKernel struct {
-	ptr       *C.BarrCudaKernel
+	ptr       *C.MantaCudaKernel
 	shapeKind cudaShapeKind
 }
 
 type auxKernel struct {
-	ptr *C.BarrCudaKernel
+	ptr *C.MantaCudaKernel
 }
 
 type cudaShapeKind int
@@ -649,9 +649,9 @@ const (
 )
 
 func newDeviceRuntime() (*deviceRuntime, error) {
-	var rt *C.BarrCudaRuntime
+	var rt *C.MantaCudaRuntime
 	var errStr *C.char
-	if C.barrCudaRuntimeCreate(&rt, &errStr) != 0 {
+	if C.mantaCudaRuntimeCreate(&rt, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return &deviceRuntime{ptr: rt, residentMatrices: map[string]residentMatrix{}, matMulScratch: map[string]deviceScratchBuffer{}}, nil
@@ -671,7 +671,7 @@ func (rt *deviceRuntime) close() {
 	}
 	rt.destroyAuxKernel(rt.quantizeKernel)
 	rt.quantizeKernel = nil
-	C.barrCudaRuntimeDestroy(rt.ptr)
+	C.mantaCudaRuntimeDestroy(rt.ptr)
 	rt.ptr = nil
 }
 
@@ -700,7 +700,7 @@ func (rt *deviceRuntime) recordMatMulRun(start time.Time, uploadedBytes, downloa
 	rt.matMulStats.RunNanos += time.Since(start).Nanoseconds()
 }
 
-func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram, kernel barr.Kernel) error {
+func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram, kernel mantaartifact.Kernel) error {
 	shapeKind := classifyCUDAKernel(kernel)
 	if shapeKind == cudaShapeUnsupported {
 		prog.LaunchConfig["device_execution"] = false
@@ -726,10 +726,10 @@ func (rt *deviceRuntime) compileKernel(compiled backend.CompiledKernel, shapeKin
 	defer C.free(unsafe.Pointer(src))
 	defer C.free(unsafe.Pointer(entry))
 
-	var kernel *C.BarrCudaKernel
+	var kernel *C.MantaCudaKernel
 	var logStr *C.char
 	var errStr *C.char
-	rc := C.barrCudaCompileKernel(rt.ptr, src, entry, &kernel, &logStr, &errStr)
+	rc := C.mantaCudaCompileKernel(rt.ptr, src, entry, &kernel, &logStr, &errStr)
 	logText := cStringValue(logStr)
 	if rc != 0 {
 		err := cStringError(errStr)
@@ -747,10 +747,10 @@ func (rt *deviceRuntime) compileAuxKernel(source, entry string) (*auxKernel, err
 	defer C.free(unsafe.Pointer(src))
 	defer C.free(unsafe.Pointer(cEntry))
 
-	var kernel *C.BarrCudaKernel
+	var kernel *C.MantaCudaKernel
 	var logStr *C.char
 	var errStr *C.char
-	rc := C.barrCudaCompileKernel(rt.ptr, src, cEntry, &kernel, &logStr, &errStr)
+	rc := C.mantaCudaCompileKernel(rt.ptr, src, cEntry, &kernel, &logStr, &errStr)
 	logText := cStringValue(logStr)
 	if rc != 0 {
 		err := cStringError(errStr)
@@ -766,10 +766,10 @@ func (rt *deviceRuntime) destroyAuxKernel(kernel *auxKernel) {
 	if kernel == nil || kernel.ptr == nil {
 		return
 	}
-	C.barrCudaKernelDestroy(kernel.ptr)
+	C.mantaCudaKernelDestroy(kernel.ptr)
 }
 
-func (rt *deviceRuntime) runKernel(deviceKernel *deviceKernel, kernel barr.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	switch deviceKernel.shapeKind {
 	case cudaShapeRowWise:
 		return rt.runRowWiseKernel(deviceKernel, kernel, prog, inputs)
@@ -784,7 +784,7 @@ func (rt *deviceRuntime) runKernel(deviceKernel *deviceKernel, kernel barr.Kerne
 	}
 }
 
-func (rt *deviceRuntime) runRowWiseKernel(deviceKernel *deviceKernel, kernel barr.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runRowWiseKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 1 {
 		return nil, fmt.Errorf("kernel %q expected 1 input for row-wise launch, got %d", kernel.Name, len(inputs))
 	}
@@ -825,7 +825,7 @@ func (rt *deviceRuntime) runRowWiseKernel(deviceKernel *deviceKernel, kernel bar
 	return []*backend.Tensor{newOutputTensor(kernel, outShape, outHost)}, nil
 }
 
-func (rt *deviceRuntime) runElementWiseKernel(deviceKernel *deviceKernel, kernel barr.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runElementWiseKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 2 {
 		return nil, fmt.Errorf("kernel %q expected 2 inputs for element-wise launch, got %d", kernel.Name, len(inputs))
 	}
@@ -863,7 +863,7 @@ func (rt *deviceRuntime) runElementWiseKernel(deviceKernel *deviceKernel, kernel
 	return []*backend.Tensor{newOutputTensor(kernel, append([]int(nil), lhs.Shape...), outHost)}, nil
 }
 
-func (rt *deviceRuntime) runUnaryKernel(deviceKernel *deviceKernel, kernel barr.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runUnaryKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 1 {
 		return nil, fmt.Errorf("kernel %q expected 1 input for unary launch, got %d", kernel.Name, len(inputs))
 	}
@@ -895,7 +895,7 @@ func (rt *deviceRuntime) runUnaryKernel(deviceKernel *deviceKernel, kernel barr.
 	return []*backend.Tensor{newOutputTensor(kernel, append([]int(nil), in.Shape...), outHost)}, nil
 }
 
-func (rt *deviceRuntime) runScoreKernel(deviceKernel *deviceKernel, kernel barr.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runScoreKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 2 {
 		return nil, fmt.Errorf("kernel %q expected 2 inputs for score launch, got %d", kernel.Name, len(inputs))
 	}
@@ -935,7 +935,7 @@ func (rt *deviceRuntime) runScoreKernel(deviceKernel *deviceKernel, kernel barr.
 	return []*backend.Tensor{newOutputTensor(kernel, []int{rows}, outHost)}, nil
 }
 
-func classifyCUDAKernel(kernel barr.Kernel) cudaShapeKind {
+func classifyCUDAKernel(kernel mantaartifact.Kernel) cudaShapeKind {
 	if len(kernel.Body) < 2 {
 		return cudaShapeUnsupported
 	}
@@ -953,7 +953,7 @@ func classifyCUDAKernel(kernel barr.Kernel) cudaShapeKind {
 	}
 }
 
-func newOutputTensor(kernel barr.Kernel, shape []int, data []float32) *backend.Tensor {
+func newOutputTensor(kernel mantaartifact.Kernel, shape []int, data []float32) *backend.Tensor {
 	dtype := "f16"
 	if len(kernel.Outputs) > 0 && kernel.Outputs[0].Type.Tensor != nil && kernel.Outputs[0].Type.Tensor.DType != "" {
 		dtype = kernel.Outputs[0].Type.Tensor.DType
@@ -970,7 +970,7 @@ func (rt *deviceRuntime) allocFloat32(elements int) (C.CUdeviceptr, error) {
 	var ptr C.CUdeviceptr
 	var errStr *C.char
 	bytes := C.size_t(elements * 4)
-	if C.barrCudaMemAlloc(rt.ptr, &ptr, bytes, &errStr) != 0 {
+	if C.mantaCudaMemAlloc(rt.ptr, &ptr, bytes, &errStr) != 0 {
 		return 0, cStringError(errStr)
 	}
 	return ptr, nil
@@ -1030,7 +1030,7 @@ func (rt *deviceRuntime) copyFloat32ToBuffer(ptr C.CUdeviceptr, data []float32) 
 		src = unsafe.Pointer(&data[0])
 	}
 	var errStr *C.char
-	if C.barrCudaMemcpyHtoD(rt.ptr, ptr, src, C.size_t(len(data)*4), &errStr) != 0 {
+	if C.mantaCudaMemcpyHtoD(rt.ptr, ptr, src, C.size_t(len(data)*4), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1041,7 +1041,7 @@ func (rt *deviceRuntime) downloadFloat32(dst []float32, src C.CUdeviceptr) error
 		return nil
 	}
 	var errStr *C.char
-	if C.barrCudaMemcpyDtoH(rt.ptr, unsafe.Pointer(&dst[0]), src, C.size_t(len(dst)*4), &errStr) != 0 {
+	if C.mantaCudaMemcpyDtoH(rt.ptr, unsafe.Pointer(&dst[0]), src, C.size_t(len(dst)*4), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1050,7 +1050,7 @@ func (rt *deviceRuntime) downloadFloat32(dst []float32, src C.CUdeviceptr) error
 func (rt *deviceRuntime) readFloat32At(src C.CUdeviceptr, elementIndex int) (float32, error) {
 	var out C.float
 	var errStr *C.char
-	if C.barrCudaReadFloat32(rt.ptr, src, C.int(elementIndex), &out, &errStr) != 0 {
+	if C.mantaCudaReadFloat32(rt.ptr, src, C.int(elementIndex), &out, &errStr) != 0 {
 		return 0, cStringError(errStr)
 	}
 	return float32(out), nil
@@ -1062,7 +1062,7 @@ func (rt *deviceRuntime) maxAbsFloat32(src C.CUdeviceptr, elements int) (float32
 	}
 	var index C.int
 	var errStr *C.char
-	if C.barrCudaBlasIsamax(rt.ptr, src, C.int(elements), &index, &errStr) != 0 {
+	if C.mantaCudaBlasIsamax(rt.ptr, src, C.int(elements), &index, &errStr) != 0 {
 		return 0, cStringError(errStr)
 	}
 	if index <= 0 {
@@ -1082,7 +1082,7 @@ func (rt *deviceRuntime) ensureQuantizeKernel() (*auxKernel, error) {
 	if rt.quantizeKernel != nil {
 		return rt.quantizeKernel, nil
 	}
-	kernel, err := rt.compileAuxKernel(forwardQuantizeKernelSource, "barr_forward_quantize_in_place")
+	kernel, err := rt.compileAuxKernel(forwardQuantizeKernelSource, "manta_forward_quantize_in_place")
 	if err != nil {
 		return nil, err
 	}
@@ -1117,7 +1117,7 @@ func (rt *deviceRuntime) quantizeBufferInPlace(ptr C.CUdeviceptr, elements, bits
 	block := uint(128)
 	grid := uint((elements + int(block) - 1) / int(block))
 	var errStr *C.char
-	if C.barrCudaLaunchQuantizeInPlace(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), ptr, C.int(elements), C.float(levels), C.float(scale), &errStr) != 0 {
+	if C.mantaCudaLaunchQuantizeInPlace(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), ptr, C.int(elements), C.float(levels), C.float(scale), &errStr) != 0 {
 		return false, cStringError(errStr)
 	}
 	return true, nil
@@ -1142,23 +1142,23 @@ func (rt *deviceRuntime) freeBuffer(ptr C.CUdeviceptr) error {
 		return nil
 	}
 	var errStr *C.char
-	if C.barrCudaMemFree(rt.ptr, ptr, &errStr) != 0 {
+	if C.mantaCudaMemFree(rt.ptr, ptr, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
 }
 
-func (rt *deviceRuntime) launchRowWise(kernel *C.BarrCudaKernel, grid, block C.uint, in0, out0 C.CUdeviceptr, rows, cols C.int) error {
+func (rt *deviceRuntime) launchRowWise(kernel *C.MantaCudaKernel, grid, block C.uint, in0, out0 C.CUdeviceptr, rows, cols C.int) error {
 	var errStr *C.char
-	if C.barrCudaLaunchRowWise(rt.ptr, kernel, grid, block, in0, out0, rows, cols, &errStr) != 0 {
+	if C.mantaCudaLaunchRowWise(rt.ptr, kernel, grid, block, in0, out0, rows, cols, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
 }
 
-func (rt *deviceRuntime) launchElementWise(kernel *C.BarrCudaKernel, grid, block C.uint, lhs, rhs, out0 C.CUdeviceptr, elements C.int) error {
+func (rt *deviceRuntime) launchElementWise(kernel *C.MantaCudaKernel, grid, block C.uint, lhs, rhs, out0 C.CUdeviceptr, elements C.int) error {
 	var errStr *C.char
-	if C.barrCudaLaunchElementWise(rt.ptr, kernel, grid, block, lhs, rhs, out0, elements, &errStr) != 0 {
+	if C.mantaCudaLaunchElementWise(rt.ptr, kernel, grid, block, lhs, rhs, out0, elements, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1171,17 +1171,17 @@ func (rt *deviceRuntime) launchAuxElementWise(kernel *auxKernel, grid, block uin
 	return rt.launchElementWise(kernel.ptr, C.uint(grid), C.uint(block), lhs, rhs, out0, C.int(elements))
 }
 
-func (rt *deviceRuntime) launchUnary(kernel *C.BarrCudaKernel, grid, block C.uint, in0, out0 C.CUdeviceptr, elements C.int) error {
+func (rt *deviceRuntime) launchUnary(kernel *C.MantaCudaKernel, grid, block C.uint, in0, out0 C.CUdeviceptr, elements C.int) error {
 	var errStr *C.char
-	if C.barrCudaLaunchUnary(rt.ptr, kernel, grid, block, in0, out0, elements, &errStr) != 0 {
+	if C.mantaCudaLaunchUnary(rt.ptr, kernel, grid, block, in0, out0, elements, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
 }
 
-func (rt *deviceRuntime) launchScore(kernel *C.BarrCudaKernel, grid, block C.uint, query, docs, out0 C.CUdeviceptr, rows, cols C.int) error {
+func (rt *deviceRuntime) launchScore(kernel *C.MantaCudaKernel, grid, block C.uint, query, docs, out0 C.CUdeviceptr, rows, cols C.int) error {
 	var errStr *C.char
-	if C.barrCudaLaunchScore(rt.ptr, kernel, grid, block, query, docs, out0, rows, cols, &errStr) != 0 {
+	if C.mantaCudaLaunchScore(rt.ptr, kernel, grid, block, query, docs, out0, rows, cols, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1192,7 +1192,7 @@ func (rt *deviceRuntime) launchOptimizerUpdate(kernel *auxKernel, grid, block ui
 		return fmt.Errorf("cuda optimizer kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.barrCudaLaunchOptimizerUpdate(
+	if C.mantaCudaLaunchOptimizerUpdate(
 		rt.ptr,
 		kernel.ptr,
 		C.uint(grid),
@@ -1223,7 +1223,7 @@ func (rt *deviceRuntime) launchAuxSoftmaxBackwardRows(kernel *auxKernel, grid, b
 		return fmt.Errorf("cuda auxiliary softmax backward kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.barrCudaLaunchSoftmaxBackwardRows(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), gradOut, probs, out0, C.int(rows), C.int(cols), &errStr) != 0 {
+	if C.mantaCudaLaunchSoftmaxBackwardRows(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), gradOut, probs, out0, C.int(rows), C.int(cols), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1234,7 +1234,7 @@ func (rt *deviceRuntime) launchAuxLayerNormBackwardRows(kernel *auxKernel, grid,
 		return fmt.Errorf("cuda auxiliary layernorm backward kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.barrCudaLaunchLayerNormBackwardRows(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), gradOut, normalized, pre, out0, C.int(rows), C.int(cols), &errStr) != 0 {
+	if C.mantaCudaLaunchLayerNormBackwardRows(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), gradOut, normalized, pre, out0, C.int(rows), C.int(cols), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1245,7 +1245,7 @@ func (rt *deviceRuntime) launchAuxContrastiveScores(kernel *auxKernel, grid, blo
 		return fmt.Errorf("cuda auxiliary contrastive score kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.barrCudaLaunchContrastiveScores(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), query, positive, queryNorms, positiveNorms, scores, C.int(rows), C.int(width), &errStr) != 0 {
+	if C.mantaCudaLaunchContrastiveScores(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), query, positive, queryNorms, positiveNorms, scores, C.int(rows), C.int(width), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1256,7 +1256,7 @@ func (rt *deviceRuntime) launchAuxInfoNCEScales(kernel *auxKernel, grid, block u
 		return fmt.Errorf("cuda auxiliary infonce scale kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.barrCudaLaunchInfoNCEScales(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), scores, scales, rowLoss, rowScore, C.int(rows), C.float(temperature), &errStr) != 0 {
+	if C.mantaCudaLaunchInfoNCEScales(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), scores, scales, rowLoss, rowScore, C.int(rows), C.float(temperature), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1267,7 +1267,7 @@ func (rt *deviceRuntime) launchAuxContrastiveGrad(kernel *auxKernel, grid, block
 		return fmt.Errorf("cuda auxiliary contrastive grad kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.barrCudaLaunchContrastiveGrad(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), query, positive, queryNorms, positiveNorms, scores, scales, queryGrads, positiveGrads, C.int(rows), C.int(width), &errStr) != 0 {
+	if C.mantaCudaLaunchContrastiveGrad(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), query, positive, queryNorms, positiveNorms, scores, scales, queryGrads, positiveGrads, C.int(rows), C.int(width), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1287,7 +1287,7 @@ func (rt *deviceRuntime) matMulCublasWithBeta(lhs, rhs, out0 C.CUdeviceptr, lhsR
 	if transposeRight {
 		right = 1
 	}
-	if C.barrCudaMatMulCublasWithBeta(rt.ptr, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, left, right, C.float(beta), &errStr) != 0 {
+	if C.mantaCudaMatMulCublasWithBeta(rt.ptr, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, left, right, C.float(beta), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1303,7 +1303,7 @@ func (rt *deviceRuntime) matMulCublasWithBetaNoSync(lhs, rhs, out0 C.CUdeviceptr
 	if transposeRight {
 		right = 1
 	}
-	if C.barrCudaMatMulCublasWithBetaNoSync(rt.ptr, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, left, right, C.float(beta), &errStr) != 0 {
+	if C.mantaCudaMatMulCublasWithBetaNoSync(rt.ptr, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, left, right, C.float(beta), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1319,7 +1319,7 @@ func (rt *deviceRuntime) matMulCublasStridedBatched(lhs, rhs, out0 C.CUdeviceptr
 	if transposeRight {
 		right = 1
 	}
-	if C.barrCudaMatMulCublasStridedBatched(rt.ptr, lhs, rhs, out0, batches, lhsRows, lhsCols, rhsRows, rhsCols, left, right, &errStr) != 0 {
+	if C.mantaCudaMatMulCublasStridedBatched(rt.ptr, lhs, rhs, out0, batches, lhsRows, lhsCols, rhsRows, rhsCols, left, right, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1330,7 +1330,7 @@ func cStringValue(value *C.char) string {
 		return ""
 	}
 	out := C.GoString(value)
-	C.barrCudaFreeCString(value)
+	C.mantaCudaFreeCString(value)
 	return out
 }
 
@@ -1338,13 +1338,13 @@ func cStringError(value *C.char) error {
 	if value == nil {
 		return fmt.Errorf("cuda error")
 	}
-	defer C.barrCudaFreeCString(value)
+	defer C.mantaCudaFreeCString(value)
 	return errors.New(C.GoString(value))
 }
 
 func (rt *deviceRuntime) synchronize() error {
 	var errStr *C.char
-	if C.barrCudaSynchronize(rt.ptr, &errStr) != 0 {
+	if C.mantaCudaSynchronize(rt.ptr, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -1366,7 +1366,7 @@ func cudaEnv(name string) string {
 	return ""
 }
 
-func (rt *deviceRuntime) runMatMul(inputs []*backend.Tensor, outputType barr.ValueType) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMul(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
 	return rt.runMatMulWithTranspose(inputs, outputType, false, false)
 }
 
@@ -1455,7 +1455,7 @@ func (rt *deviceRuntime) unbindMatMulRight(name string) error {
 	return nil
 }
 
-func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
 	if lhs == nil {
 		return nil, fmt.Errorf("cuda matmul lhs is nil")
 	}
@@ -1562,7 +1562,7 @@ func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightName
 	return results, nil
 }
 
-func (rt *deviceRuntime) runAccumulatedMatMulsWithBoundRights(lhsInputs []*backend.Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runAccumulatedMatMulsWithBoundRights(lhsInputs []*backend.Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if len(lhsInputs) == 0 {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda accumulated matmul requires at least one lhs input")
 	}
@@ -1701,7 +1701,7 @@ func (rt *deviceRuntime) runAccumulatedMatMulsWithBoundRights(lhsInputs []*backe
 	}, nil
 }
 
-func (rt *deviceRuntime) runMatMulsWithSharedLeft(lhs *backend.Tensor, rhsInputs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulsWithSharedLeft(lhs *backend.Tensor, rhsInputs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
 	if lhs == nil {
 		return nil, fmt.Errorf("cuda matmul lhs is nil")
 	}
@@ -1810,7 +1810,7 @@ func (rt *deviceRuntime) runMatMulsWithSharedLeft(lhs *backend.Tensor, rhsInputs
 	return results, nil
 }
 
-func (rt *deviceRuntime) runMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if lhs == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda matmul lhs is nil")
 	}
@@ -1874,7 +1874,7 @@ func (rt *deviceRuntime) runMatMulWithBoundRight(lhs *backend.Tensor, rightName 
 	}, nil
 }
 
-func (rt *deviceRuntime) runMatMulWithBoundLeft(leftName string, rhs *backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithBoundLeft(leftName string, rhs *backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if rhs == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda matmul rhs is nil")
 	}
@@ -1938,7 +1938,7 @@ func (rt *deviceRuntime) runMatMulWithBoundLeft(leftName string, rhs *backend.Te
 	}, nil
 }
 
-func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if len(inputs) != 2 {
 		return backend.StepDispatchResult{}, fmt.Errorf("matmul expects 2 inputs, got %d", len(inputs))
 	}
@@ -2028,7 +2028,7 @@ func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, output
 func cudaBuiltinMatMulCompiledKernel() backend.CompiledKernel {
 	return backend.CompiledKernel{
 		Name:       "__builtin_matmul",
-		Backend:    barr.BackendCUDA,
+		Backend:    mantaartifact.BackendCUDA,
 		Entry:      "cublas_sgemm",
 		Source:     "library:cublas_sgemm",
 		SourceHash: "library:cublas_sgemm",
@@ -2144,7 +2144,7 @@ func sameIntSlice(a, b []int) bool {
 	return true
 }
 
-func newStepOutputTensor(outputType barr.ValueType, shape []int, data []float32) *backend.Tensor {
+func newStepOutputTensor(outputType mantaartifact.ValueType, shape []int, data []float32) *backend.Tensor {
 	dtype := "f16"
 	if outputType.Tensor != nil && outputType.Tensor.DType != "" {
 		dtype = outputType.Tensor.DType

@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 )
 
 // Request is an execution request for a loaded program.
@@ -17,7 +17,7 @@ type Request struct {
 
 // Value is a typed runtime value flowing through the symbolic executor.
 type Value struct {
-	Type     barr.ValueType
+	Type     mantaartifact.ValueType
 	Data     any
 	Producer string
 	Inputs   []string
@@ -27,7 +27,7 @@ type Value struct {
 // TraceStep records one executed plan step.
 type TraceStep struct {
 	Entry   string
-	Kind    barr.StepKind
+	Kind    mantaartifact.StepKind
 	Name    string
 	Kernel  string
 	Variant string
@@ -46,7 +46,7 @@ type WeightBinding struct {
 // CompiledKernel is a backend-selected variant cached at load time.
 type CompiledKernel struct {
 	Name       string
-	Backend    barr.BackendKind
+	Backend    mantaartifact.BackendKind
 	Entry      string
 	Source     string
 	SourceHash string
@@ -152,13 +152,13 @@ type ContrastiveGradResult struct {
 
 // MatMulAccelerator exposes a backend-owned matmul fast path for non-plan callers.
 type MatMulAccelerator interface {
-	Backend() barr.BackendKind
-	RunMatMul(inputs []*Tensor, outputType barr.ValueType) (StepDispatchResult, error)
-	RunMatMulWithTranspose(inputs []*Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (StepDispatchResult, error)
+	Backend() mantaartifact.BackendKind
+	RunMatMul(inputs []*Tensor, outputType mantaartifact.ValueType) (StepDispatchResult, error)
+	RunMatMulWithTranspose(inputs []*Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (StepDispatchResult, error)
 	BindMatrix(name string, tensor *Tensor) error
 	UnbindMatrix(name string) error
-	RunMatMulWithBoundLeft(leftName string, rhs *Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) (StepDispatchResult, error)
-	RunMatMulWithBoundRight(lhs *Tensor, rightName string, outputType barr.ValueType, transposeLeft, transposeRight bool) (StepDispatchResult, error)
+	RunMatMulWithBoundLeft(leftName string, rhs *Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (StepDispatchResult, error)
+	RunMatMulWithBoundRight(lhs *Tensor, rightName string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (StepDispatchResult, error)
 	Stats() MatMulAcceleratorStats
 	Close()
 }
@@ -167,24 +167,24 @@ type MatMulAccelerator interface {
 // that share the same left input. It preserves each bound right-hand tensor's own
 // residency and quantization state while avoiding repeated LHS uploads.
 type MultiBoundRightMatMulAccelerator interface {
-	RunMatMulWithBoundRights(lhs *Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]StepDispatchResult, error)
+	RunMatMulWithBoundRights(lhs *Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]StepDispatchResult, error)
 }
 
 // SharedLeftMatMulAccelerator optionally coalesces several matmuls that share
 // the same left input but use different non-resident right inputs.
 type SharedLeftMatMulAccelerator interface {
-	RunMatMulsWithSharedLeft(lhs *Tensor, rhs []*Tensor, outputType barr.ValueType, transposeLeft, transposeRight bool) ([]StepDispatchResult, error)
+	RunMatMulsWithSharedLeft(lhs *Tensor, rhs []*Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]StepDispatchResult, error)
 }
 
 // AccumulatedBoundRightMatMulAccelerator optionally coalesces several
 // resident-right matmuls with distinct left inputs into one accumulated output.
 type AccumulatedBoundRightMatMulAccelerator interface {
-	RunAccumulatedMatMulsWithBoundRights(lhs []*Tensor, rightNames []string, outputType barr.ValueType, transposeLeft, transposeRight bool) (StepDispatchResult, error)
+	RunAccumulatedMatMulsWithBoundRights(lhs []*Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (StepDispatchResult, error)
 }
 
 // OptimizerAccelerator exposes a backend-owned optimizer update fast path.
 type OptimizerAccelerator interface {
-	Backend() barr.BackendKind
+	Backend() mantaartifact.BackendKind
 	ApplyUpdate(name string, cfg OptimizerUpdateConfig, tensor, mom1, mom2, grad *Tensor) error
 	SyncState(name string, tensor, mom1, mom2 *Tensor, includeMoments bool) error
 	Stats() OptimizerAcceleratorStats
@@ -193,7 +193,7 @@ type OptimizerAccelerator interface {
 
 // ActivationAccelerator exposes backend-owned elementwise training ops.
 type ActivationAccelerator interface {
-	Backend() barr.BackendKind
+	Backend() mantaartifact.BackendKind
 	BindTensor(name string, tensor *Tensor) error
 	UnbindTensor(name string) error
 	RunGELUBackwardMul(gradOut, preAct *Tensor) (*Tensor, error)
@@ -208,7 +208,7 @@ type ActivationAccelerator interface {
 
 // ContrastiveAccelerator exposes backend-owned contrastive loss and pooled-gradient ops.
 type ContrastiveAccelerator interface {
-	Backend() barr.BackendKind
+	Backend() mantaartifact.BackendKind
 	RunInfoNCE(query, positive *Tensor, cfg ContrastiveLossConfig) (ContrastiveGradResult, error)
 	Stats() ContrastiveAcceleratorStats
 	Close()
@@ -220,30 +220,30 @@ var activationAcceleratorFactories []activationAcceleratorFactory
 var contrastiveAcceleratorFactories []contrastiveAcceleratorFactory
 
 type matMulAcceleratorFactory struct {
-	kind    barr.BackendKind
+	kind    mantaartifact.BackendKind
 	factory func() (MatMulAccelerator, error)
 }
 
 type optimizerAcceleratorFactory struct {
-	kind    barr.BackendKind
+	kind    mantaartifact.BackendKind
 	factory func() (OptimizerAccelerator, error)
 }
 
 type activationAcceleratorFactory struct {
-	kind    barr.BackendKind
+	kind    mantaartifact.BackendKind
 	factory func() (ActivationAccelerator, error)
 }
 
 type contrastiveAcceleratorFactory struct {
-	kind    barr.BackendKind
+	kind    mantaartifact.BackendKind
 	factory func() (ContrastiveAccelerator, error)
 }
 
 // KernelDispatcher executes a launch_kernel step through a backend-owned path.
-type KernelDispatcher func(ctx context.Context, kernel barr.Kernel, inputs []*Tensor) (KernelDispatchResult, error)
+type KernelDispatcher func(ctx context.Context, kernel mantaartifact.Kernel, inputs []*Tensor) (KernelDispatchResult, error)
 
 // StepDispatcher executes a backend-owned plan step such as library-backed matmul.
-type StepDispatcher func(ctx context.Context, step barr.Step, outputType barr.ValueType, inputs []*Tensor) (StepDispatchResult, bool, error)
+type StepDispatcher func(ctx context.Context, step mantaartifact.Step, outputType mantaartifact.ValueType, inputs []*Tensor) (StepDispatchResult, bool, error)
 
 // Result is the execution response from a backend.
 type Result struct {
@@ -254,15 +254,15 @@ type Result struct {
 
 // Executor runs a previously loaded Manta module.
 type Executor interface {
-	Backend() barr.BackendKind
+	Backend() mantaartifact.BackendKind
 	Run(ctx context.Context, req Request) (Result, error)
 }
 
 // Backend loads Manta modules and returns executors.
 type Backend interface {
-	Kind() barr.BackendKind
-	CanLoad(mod *barr.Module) bool
-	Load(ctx context.Context, mod *barr.Module, weights map[string]WeightBinding) (Executor, error)
+	Kind() mantaartifact.BackendKind
+	CanLoad(mod *mantaartifact.Module) bool
+	Load(ctx context.Context, mod *mantaartifact.Module, weights map[string]WeightBinding) (Executor, error)
 }
 
 // CapabilityProvider reports runtime features a backend can satisfy.
@@ -271,7 +271,7 @@ type CapabilityProvider interface {
 }
 
 // CompileVariants resolves backend-specific kernel variants at load time.
-func CompileVariants(mod *barr.Module, kind barr.BackendKind) (map[string]CompiledKernel, error) {
+func CompileVariants(mod *mantaartifact.Module, kind mantaartifact.BackendKind) (map[string]CompiledKernel, error) {
 	compiled := map[string]CompiledKernel{}
 	if mod == nil {
 		return compiled, nil
@@ -306,7 +306,7 @@ func cloneStringMap(in map[string]string) map[string]string {
 }
 
 // RegisterMatMulAccelerator registers an optional backend-owned matmul fast path.
-func RegisterMatMulAccelerator(kind barr.BackendKind, factory func() (MatMulAccelerator, error)) {
+func RegisterMatMulAccelerator(kind mantaartifact.BackendKind, factory func() (MatMulAccelerator, error)) {
 	if factory == nil {
 		return
 	}
@@ -317,7 +317,7 @@ func RegisterMatMulAccelerator(kind barr.BackendKind, factory func() (MatMulAcce
 }
 
 // RegisterOptimizerAccelerator registers an optional backend-owned optimizer fast path.
-func RegisterOptimizerAccelerator(kind barr.BackendKind, factory func() (OptimizerAccelerator, error)) {
+func RegisterOptimizerAccelerator(kind mantaartifact.BackendKind, factory func() (OptimizerAccelerator, error)) {
 	if factory == nil {
 		return
 	}
@@ -328,7 +328,7 @@ func RegisterOptimizerAccelerator(kind barr.BackendKind, factory func() (Optimiz
 }
 
 // RegisterActivationAccelerator registers an optional backend-owned activation fast path.
-func RegisterActivationAccelerator(kind barr.BackendKind, factory func() (ActivationAccelerator, error)) {
+func RegisterActivationAccelerator(kind mantaartifact.BackendKind, factory func() (ActivationAccelerator, error)) {
 	if factory == nil {
 		return
 	}
@@ -339,7 +339,7 @@ func RegisterActivationAccelerator(kind barr.BackendKind, factory func() (Activa
 }
 
 // RegisterContrastiveAccelerator registers an optional backend-owned contrastive fast path.
-func RegisterContrastiveAccelerator(kind barr.BackendKind, factory func() (ContrastiveAccelerator, error)) {
+func RegisterContrastiveAccelerator(kind mantaartifact.BackendKind, factory func() (ContrastiveAccelerator, error)) {
 	if factory == nil {
 		return
 	}
@@ -350,7 +350,7 @@ func RegisterContrastiveAccelerator(kind barr.BackendKind, factory func() (Contr
 }
 
 // NewPreferredMatMulAccelerator returns the first available registered accelerator.
-func NewPreferredMatMulAccelerator(preferred ...barr.BackendKind) (MatMulAccelerator, barr.BackendKind, error) {
+func NewPreferredMatMulAccelerator(preferred ...mantaartifact.BackendKind) (MatMulAccelerator, mantaartifact.BackendKind, error) {
 	for _, kind := range preferred {
 		for _, candidate := range matMulAcceleratorFactories {
 			if candidate.kind != kind {
@@ -369,7 +369,7 @@ func NewPreferredMatMulAccelerator(preferred ...barr.BackendKind) (MatMulAcceler
 }
 
 // NewPreferredContrastiveAccelerator returns the first available registered contrastive accelerator.
-func NewPreferredContrastiveAccelerator(preferred ...barr.BackendKind) (ContrastiveAccelerator, barr.BackendKind, error) {
+func NewPreferredContrastiveAccelerator(preferred ...mantaartifact.BackendKind) (ContrastiveAccelerator, mantaartifact.BackendKind, error) {
 	for _, kind := range preferred {
 		for _, candidate := range contrastiveAcceleratorFactories {
 			if candidate.kind != kind {
@@ -388,7 +388,7 @@ func NewPreferredContrastiveAccelerator(preferred ...barr.BackendKind) (Contrast
 }
 
 // NewPreferredOptimizerAccelerator returns the first available registered optimizer accelerator.
-func NewPreferredOptimizerAccelerator(preferred ...barr.BackendKind) (OptimizerAccelerator, barr.BackendKind, error) {
+func NewPreferredOptimizerAccelerator(preferred ...mantaartifact.BackendKind) (OptimizerAccelerator, mantaartifact.BackendKind, error) {
 	for _, kind := range preferred {
 		for _, candidate := range optimizerAcceleratorFactories {
 			if candidate.kind != kind {
@@ -407,7 +407,7 @@ func NewPreferredOptimizerAccelerator(preferred ...barr.BackendKind) (OptimizerA
 }
 
 // NewPreferredActivationAccelerator returns the first available registered activation accelerator.
-func NewPreferredActivationAccelerator(preferred ...barr.BackendKind) (ActivationAccelerator, barr.BackendKind, error) {
+func NewPreferredActivationAccelerator(preferred ...mantaartifact.BackendKind) (ActivationAccelerator, mantaartifact.BackendKind, error) {
 	for _, kind := range preferred {
 		for _, candidate := range activationAcceleratorFactories {
 			if candidate.kind != kind {

@@ -1,10 +1,10 @@
-package barruntime
+package mantaruntime
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -41,12 +41,12 @@ func ReadScoreManifestFile(path string) (ScoreManifest, error) {
 }
 
 // DefaultScoreManifestPath returns the conventional sibling manifest path for an .mll artifact.
-func DefaultScoreManifestPath(barrPath string) string {
-	return defaultManifestPath(barrPath, ".score.mll")
+func DefaultScoreManifestPath(artifactPath string) string {
+	return defaultManifestPath(artifactPath, ".score.mll")
 }
 
-func ResolveScoreManifestPath(barrPath string) string {
-	return DefaultScoreManifestPath(barrPath)
+func ResolveScoreManifestPath(artifactPath string) string {
+	return DefaultScoreManifestPath(artifactPath)
 }
 
 // WriteFile writes the score manifest as an authored MLL container.
@@ -55,7 +55,7 @@ func (m ScoreManifest) WriteFile(path string) error {
 }
 
 // LoadScore loads a score module with a validated serving manifest.
-func (rt *Runtime) LoadScore(ctx context.Context, mod *barr.Module, manifest ScoreManifest, opts ...LoadOption) (*ScoreModel, error) {
+func (rt *Runtime) LoadScore(ctx context.Context, mod *mantaartifact.Module, manifest ScoreManifest, opts ...LoadOption) (*ScoreModel, error) {
 	manifest = manifest.normalized()
 	if err := manifest.ValidateModule(mod); err != nil {
 		return nil, err
@@ -68,8 +68,8 @@ func (rt *Runtime) LoadScore(ctx context.Context, mod *barr.Module, manifest Sco
 }
 
 // LoadScoreFile reads a .mll artifact and loads it as a score model.
-func (rt *Runtime) LoadScoreFile(ctx context.Context, barrPath string, manifest ScoreManifest, opts ...LoadOption) (*ScoreModel, error) {
-	mod, err := barr.ReadFile(barrPath)
+func (rt *Runtime) LoadScoreFile(ctx context.Context, artifactPath string, manifest ScoreManifest, opts ...LoadOption) (*ScoreModel, error) {
+	mod, err := mantaartifact.ReadFile(artifactPath)
 	if err != nil {
 		return nil, err
 	}
@@ -77,17 +77,17 @@ func (rt *Runtime) LoadScoreFile(ctx context.Context, barrPath string, manifest 
 }
 
 // LoadScoreBundle reads a .mll artifact plus its sibling score manifest.
-func (rt *Runtime) LoadScoreBundle(ctx context.Context, barrPath string, opts ...LoadOption) (*ScoreModel, error) {
-	return rt.LoadScoreBundleWithManifest(ctx, barrPath, ResolveScoreManifestPath(barrPath), opts...)
+func (rt *Runtime) LoadScoreBundle(ctx context.Context, artifactPath string, opts ...LoadOption) (*ScoreModel, error) {
+	return rt.LoadScoreBundleWithManifest(ctx, artifactPath, ResolveScoreManifestPath(artifactPath), opts...)
 }
 
 // LoadScoreBundleWithManifest reads a .mll artifact plus an explicit score manifest path.
-func (rt *Runtime) LoadScoreBundleWithManifest(ctx context.Context, barrPath, manifestPath string, opts ...LoadOption) (*ScoreModel, error) {
+func (rt *Runtime) LoadScoreBundleWithManifest(ctx context.Context, artifactPath, manifestPath string, opts ...LoadOption) (*ScoreModel, error) {
 	manifest, err := ReadScoreManifestFile(manifestPath)
 	if err != nil {
 		return nil, err
 	}
-	return rt.LoadScoreFile(ctx, barrPath, manifest, opts...)
+	return rt.LoadScoreFile(ctx, artifactPath, manifest, opts...)
 }
 
 func (m ScoreManifest) nameOrDefault() string {
@@ -161,7 +161,7 @@ func (m *ScoreModel) Manifest() ScoreManifest {
 }
 
 // Backend reports the selected backend.
-func (m *ScoreModel) Backend() barr.BackendKind {
+func (m *ScoreModel) Backend() mantaartifact.BackendKind {
 	if m == nil || m.program == nil {
 		return ""
 	}
@@ -235,7 +235,7 @@ func (m ScoreManifest) normalized() ScoreManifest {
 }
 
 // ValidateModule checks that a module satisfies the score serving contract.
-func (m ScoreManifest) ValidateModule(mod *barr.Module) error {
+func (m ScoreManifest) ValidateModule(mod *mantaartifact.Module) error {
 	if mod == nil {
 		return fmt.Errorf("nil module")
 	}
@@ -273,7 +273,7 @@ func (m *ScoreModel) validateScoreResult(result ScoreResult, batched bool) error
 	return nil
 }
 
-func validateScoreEntry(mod *barr.Module, entryName, queryInput string, queryRank int, docsInput string, docsRank int, queryDType, docsDType, outputName string, outputRank int, outputDType string) error {
+func validateScoreEntry(mod *mantaartifact.Module, entryName, queryInput string, queryRank int, docsInput string, docsRank int, queryDType, docsDType, outputName string, outputRank int, outputDType string) error {
 	entry, err := findEntryPoint(mod, entryName)
 	if err != nil {
 		return err
@@ -282,7 +282,7 @@ func validateScoreEntry(mod *barr.Module, entryName, queryInput string, queryRan
 	if err != nil {
 		return err
 	}
-	if query.Type.Kind != barr.ValueTensor || query.Type.Tensor == nil {
+	if query.Type.Kind != mantaartifact.ValueTensor || query.Type.Tensor == nil {
 		return fmt.Errorf("entrypoint %q input %q is not a tensor", entryName, queryInput)
 	}
 	if queryDType != "" && query.Type.Tensor.DType != queryDType {
@@ -295,7 +295,7 @@ func validateScoreEntry(mod *barr.Module, entryName, queryInput string, queryRan
 	if err != nil {
 		return err
 	}
-	if docs.Type.Kind != barr.ValueTensor || docs.Type.Tensor == nil {
+	if docs.Type.Kind != mantaartifact.ValueTensor || docs.Type.Tensor == nil {
 		return fmt.Errorf("entrypoint %q input %q is not a tensor", entryName, docsInput)
 	}
 	if docsDType != "" && docs.Type.Tensor.DType != docsDType {
@@ -311,7 +311,7 @@ func validateScoreEntry(mod *barr.Module, entryName, queryInput string, queryRan
 	if outputName != "" && output.Name != outputName {
 		return fmt.Errorf("entrypoint %q output %q does not match manifest %q", entryName, output.Name, outputName)
 	}
-	if output.Type.Kind != barr.ValueTensor || output.Type.Tensor == nil {
+	if output.Type.Kind != mantaartifact.ValueTensor || output.Type.Tensor == nil {
 		return fmt.Errorf("entrypoint %q output %q is not a tensor", entryName, output.Name)
 	}
 	if outputDType != "" && output.Type.Tensor.DType != outputDType {

@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -27,7 +27,7 @@ type loadConfig struct {
 
 // Program is a loaded executable module.
 type Program struct {
-	module            *barr.Module
+	module            *mantaartifact.Module
 	executor          backend.Executor
 	candidateMetadata map[int64]map[string]string
 	memoryPlan        *MemoryPlan
@@ -40,7 +40,7 @@ func New(backends ...backend.Backend) *Runtime {
 }
 
 // Load selects a compatible backend and prepares the program.
-func (rt *Runtime) Load(ctx context.Context, mod *barr.Module, opts ...LoadOption) (*Program, error) {
+func (rt *Runtime) Load(ctx context.Context, mod *mantaartifact.Module, opts ...LoadOption) (*Program, error) {
 	if mod == nil {
 		return nil, fmt.Errorf("nil module")
 	}
@@ -87,7 +87,7 @@ func (rt *Runtime) Load(ctx context.Context, mod *barr.Module, opts ...LoadOptio
 
 // LoadFile reads a serialized .mll artifact and loads it.
 func (rt *Runtime) LoadFile(ctx context.Context, path string, opts ...LoadOption) (*Program, error) {
-	mod, err := barr.ReadFile(path)
+	mod, err := mantaartifact.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func (rt *Runtime) LoadFile(ctx context.Context, path string, opts ...LoadOption
 }
 
 // Backend reports the selected backend.
-func (p *Program) Backend() barr.BackendKind {
+func (p *Program) Backend() mantaartifact.BackendKind {
 	if p == nil || p.executor == nil {
 		return ""
 	}
@@ -155,7 +155,7 @@ func WithPackageManifest(manifest PackageManifest) LoadOption {
 	}
 }
 
-func validateParamBindings(mod *barr.Module, weights map[string]backend.WeightBinding) error {
+func validateParamBindings(mod *mantaartifact.Module, weights map[string]backend.WeightBinding) error {
 	bindings := map[string]int{}
 	for _, param := range mod.Params {
 		weight, ok := weights[param.Name]
@@ -169,7 +169,7 @@ func validateParamBindings(mod *barr.Module, weights map[string]backend.WeightBi
 	return nil
 }
 
-func applyMemoryPlanToWeights(mod *barr.Module, weights map[string]backend.WeightBinding, plan *MemoryPlan) error {
+func applyMemoryPlanToWeights(mod *mantaartifact.Module, weights map[string]backend.WeightBinding, plan *MemoryPlan) error {
 	if mod == nil || plan == nil {
 		return nil
 	}
@@ -218,22 +218,22 @@ func cloneCandidateMetadata(in map[string]string) map[string]string {
 	return out
 }
 
-func missingBackendCapabilities(candidate backend.Backend, mod *barr.Module) []string {
+func missingBackendCapabilities(candidate backend.Backend, mod *mantaartifact.Module) []string {
 	if candidate == nil || mod == nil {
 		return nil
 	}
 	provider, ok := candidate.(backend.CapabilityProvider)
 	if !ok {
-		return barr.MissingCapabilities(mod.Requirements.Capabilities, nil)
+		return mantaartifact.MissingCapabilities(mod.Requirements.Capabilities, nil)
 	}
-	return barr.MissingCapabilities(mod.Requirements.Capabilities, provider.Capabilities())
+	return mantaartifact.MissingCapabilities(mod.Requirements.Capabilities, provider.Capabilities())
 }
 
 type cacheKeyLoader interface {
-	LoadWithCacheKey(ctx context.Context, mod *barr.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error)
+	LoadWithCacheKey(ctx context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error)
 }
 
-func loadBackendExecutor(ctx context.Context, candidate backend.Backend, mod *barr.Module, weights map[string]backend.WeightBinding, manifest *PackageManifest) (backend.Executor, error) {
+func loadBackendExecutor(ctx context.Context, candidate backend.Backend, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, manifest *PackageManifest) (backend.Executor, error) {
 	cacheKey := ""
 	if manifest != nil {
 		cacheKey = manifest.CacheKey()

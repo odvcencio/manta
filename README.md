@@ -321,6 +321,8 @@ manta demo [tiny_embed|tiny_decode|tiny_score]      Run a built-in preset module
 manta version                                      Print version
 ```
 
+Before a candidate run, use `ferrous-wheel run scripts/verify_manta_production.fw` to preflight the local `.mll` training, eval-only, sealed export, and inspect path.
+
 For production-grade `manta-embed-v1` candidate training, use `scripts/acquire_manta_embed_v1_datasets.fw` followed by `scripts/train_manta_embed_v1_candidate.fw`; they record dataset hashes, repo provenance, eval-only gates, sealed export, and artifact hashes. See `docs/production-embedding.md`.
 
 ## Design Constraints

@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/compiler"
 	"github.com/odvcencio/manta/runtime/backend"
 	"github.com/odvcencio/manta/runtime/backends/cuda"
@@ -142,16 +142,16 @@ pipeline score(query: f16[D], docs: q4[N, D]) -> f32[N] {
 	}
 
 	dir := t.TempDir()
-	barrPath := filepath.Join(dir, "score_bundle.mll")
-	if err := barr.WriteFile(barrPath, bundle.Artifact); err != nil {
+	artifactPath := filepath.Join(dir, "score_bundle.mll")
+	if err := mantaartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
-	if err := scoreBundleManifest().WriteFile(DefaultScoreManifestPath(barrPath)); err != nil {
+	if err := scoreBundleManifest().WriteFile(DefaultScoreManifestPath(artifactPath)); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
 
 	rt := New(cuda.New(), metal.New())
-	model, err := rt.LoadScoreBundle(context.Background(), barrPath)
+	model, err := rt.LoadScoreBundle(context.Background(), artifactPath)
 	if err != nil {
 		t.Fatalf("load score bundle: %v", err)
 	}

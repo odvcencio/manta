@@ -1,4 +1,4 @@
-package barruntime
+package mantaruntime
 
 import (
 	"encoding/binary"
@@ -8,7 +8,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 	mll "github.com/odvcencio/mll"
 )
@@ -30,8 +30,8 @@ type weightFileMLLMetadata struct {
 }
 
 // DefaultWeightFilePath returns the conventional sibling weight path for an artifact.
-func DefaultWeightFilePath(barrPath string) string {
-	return defaultManifestPath(barrPath, ".weights.mll")
+func DefaultWeightFilePath(artifactPath string) string {
+	return defaultManifestPath(artifactPath, ".weights.mll")
 }
 
 // NewWeightFile clones the provided named tensors into a serializable weight file.
@@ -95,7 +95,7 @@ func ReadWeightFile(path string) (WeightFile, error) {
 	if err != nil {
 		return WeightFile{}, err
 	}
-	if !barr.IsMLLBytes(data) {
+	if !mantaartifact.IsMLLBytes(data) {
 		return WeightFile{}, fmt.Errorf("weight file %q is not an MLL file", path)
 	}
 	return decodeWeightFileMLL(data)
@@ -312,7 +312,7 @@ func decodeTensorEntry(entry mll.TensorEntry, logicalDType string) (*backend.Ten
 	dtype := logicalDType
 	if dtype == "" {
 		var err error
-		dtype, err = mllDTypeToBarr(entry.DType)
+		dtype, err = mllDTypeToManta(entry.DType)
 		if err != nil {
 			return nil, err
 		}
@@ -366,7 +366,7 @@ func decodeTensorEntry(entry mll.TensorEntry, logicalDType string) (*backend.Ten
 	}
 }
 
-func mllDTypeToBarr(dtype mll.DType) (string, error) {
+func mllDTypeToManta(dtype mll.DType) (string, error) {
 	switch dtype {
 	case mll.DTypeI32:
 		return "i32", nil

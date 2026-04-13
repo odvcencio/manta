@@ -1,6 +1,6 @@
 package lir
 
-import "github.com/odvcencio/manta/artifact/barr"
+import mantaartifact "github.com/odvcencio/manta/artifact/manta"
 
 // Plan is the scheduled executable IR.
 type Plan struct {
@@ -8,7 +8,7 @@ type Plan struct {
 	Buffers []Buffer
 	Kernels []Kernel
 	Params  []Param
-	Steps   []barr.Step
+	Steps   []mantaartifact.Step
 }
 
 // Buffer is a scheduled storage object.

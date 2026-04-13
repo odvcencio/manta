@@ -13,12 +13,12 @@ import (
 	"math"
 	"time"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
 const contrastiveScoresKernelSource = `
-extern "C" __global__ void barr_contrastive_scores(
+extern "C" __global__ void manta_contrastive_scores(
     const float* query,
     const float* positive,
     const float* query_norms,
@@ -51,7 +51,7 @@ extern "C" __global__ void barr_contrastive_scores(
 `
 
 const infoNCEScalesKernelSource = `
-extern "C" __global__ void barr_infonce_scales(
+extern "C" __global__ void manta_infonce_scales(
     const float* scores,
     float* scales,
     float* row_loss,
@@ -101,7 +101,7 @@ extern "C" __global__ void barr_infonce_scales(
 `
 
 const contrastiveGradKernelSource = `
-extern "C" __global__ void barr_contrastive_grad(
+extern "C" __global__ void manta_contrastive_grad(
     const float* query,
     const float* positive,
     const float* query_norms,
@@ -150,7 +150,7 @@ type contrastiveAccelerator struct {
 }
 
 func init() {
-	backend.RegisterContrastiveAccelerator(barr.BackendCUDA, NewContrastiveAccelerator)
+	backend.RegisterContrastiveAccelerator(mantaartifact.BackendCUDA, NewContrastiveAccelerator)
 }
 
 func NewContrastiveAccelerator() (backend.ContrastiveAccelerator, error) {
@@ -161,18 +161,18 @@ func NewContrastiveAccelerator() (backend.ContrastiveAccelerator, error) {
 	if device == nil {
 		return nil, nil
 	}
-	scoreKernel, err := device.compileAuxKernel(contrastiveScoresKernelSource, "barr_contrastive_scores")
+	scoreKernel, err := device.compileAuxKernel(contrastiveScoresKernelSource, "manta_contrastive_scores")
 	if err != nil {
 		device.close()
 		return nil, err
 	}
-	scaleKernel, err := device.compileAuxKernel(infoNCEScalesKernelSource, "barr_infonce_scales")
+	scaleKernel, err := device.compileAuxKernel(infoNCEScalesKernelSource, "manta_infonce_scales")
 	if err != nil {
 		device.destroyAuxKernel(scoreKernel)
 		device.close()
 		return nil, err
 	}
-	gradKernel, err := device.compileAuxKernel(contrastiveGradKernelSource, "barr_contrastive_grad")
+	gradKernel, err := device.compileAuxKernel(contrastiveGradKernelSource, "manta_contrastive_grad")
 	if err != nil {
 		device.destroyAuxKernel(scoreKernel)
 		device.destroyAuxKernel(scaleKernel)
@@ -187,8 +187,8 @@ func NewContrastiveAccelerator() (backend.ContrastiveAccelerator, error) {
 	}, nil
 }
 
-func (a *contrastiveAccelerator) Backend() barr.BackendKind {
-	return barr.BackendCUDA
+func (a *contrastiveAccelerator) Backend() mantaartifact.BackendKind {
+	return mantaartifact.BackendCUDA
 }
 
 func (a *contrastiveAccelerator) RunInfoNCE(query, positive *backend.Tensor, cfg backend.ContrastiveLossConfig) (backend.ContrastiveGradResult, error) {

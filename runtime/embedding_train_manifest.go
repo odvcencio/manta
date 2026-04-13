@@ -1,9 +1,9 @@
-package barruntime
+package mantaruntime
 
 import (
 	"fmt"
 
-	"github.com/odvcencio/manta/artifact/barr"
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 )
 
 const EmbeddingTrainManifestVersion = "manta/train-manifest/v0alpha1"
@@ -16,12 +16,12 @@ type EmbeddingTrainManifest struct {
 }
 
 // DefaultEmbeddingTrainManifestPath returns the conventional sibling train-manifest path for an .mll artifact.
-func DefaultEmbeddingTrainManifestPath(barrPath string) string {
-	return defaultManifestPath(barrPath, ".train.mll")
+func DefaultEmbeddingTrainManifestPath(artifactPath string) string {
+	return defaultManifestPath(artifactPath, ".train.mll")
 }
 
-func ResolveEmbeddingTrainManifestPath(barrPath string) string {
-	return DefaultEmbeddingTrainManifestPath(barrPath)
+func ResolveEmbeddingTrainManifestPath(artifactPath string) string {
+	return DefaultEmbeddingTrainManifestPath(artifactPath)
 }
 
 // ReadEmbeddingTrainManifestFile decodes an authored MLL training manifest.
@@ -44,7 +44,7 @@ func (m EmbeddingTrainManifest) normalized() EmbeddingTrainManifest {
 }
 
 // ValidateModule checks that a module satisfies the training contract.
-func (m EmbeddingTrainManifest) ValidateModule(mod *barr.Module) error {
+func (m EmbeddingTrainManifest) ValidateModule(mod *mantaartifact.Module) error {
 	m = m.normalized()
 	if mod == nil {
 		return fmt.Errorf("nil module")
@@ -69,7 +69,7 @@ func (m EmbeddingTrainManifest) ValidateModule(mod *barr.Module) error {
 	return nil
 }
 
-func validateTrainableAttentionParams(mod *barr.Module, manifest EmbeddingManifest) error {
+func validateTrainableAttentionParams(mod *mantaartifact.Module, manifest EmbeddingManifest) error {
 	names := []string{
 		manifest.AttentionQueryParam,
 		manifest.AttentionKeyParam,
