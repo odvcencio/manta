@@ -342,7 +342,7 @@ fn fwht_block(values: ptr<function, array<f32, 256>>, start: u32, size: u32) {
     }
     stride = stride * 2u;
   }
-  let scale = inverseSqrt(f32(size));
+  let scale = 1.0 / sqrt(f32(size));
   for (var k = 0u; k < size; k = k + 1u) {
     (*values)[start + k] = (*values)[start + k] * scale;
   }

@@ -12,6 +12,7 @@ import (
 type cachedLoad struct {
 	compiled map[string]backend.CompiledKernel
 	native   map[string]backend.NativeKernelProgram
+	device   *deviceRuntime
 }
 
 // Backend is the WebGPU backend surface. Kernel sources and launch plans are
@@ -58,16 +59,20 @@ func (b *Backend) LoadWithCacheKey(ctx context.Context, mod *mantaartifact.Modul
 	return b.load(ctx, mod, weights, cacheKey)
 }
 
-func (b *Backend) load(_ context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *Backend) load(ctx context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	if b == nil {
 		return nil, fmt.Errorf("nil WebGPU backend")
 	}
 	if cacheKey != "" {
 		if cached, ok := b.cachedLoad(cacheKey); ok {
-			return &executor{module: mod, weights: weights, compiled: cached.compiled, native: cached.native}, nil
+			return &executor{module: mod, weights: weights, compiled: cached.compiled, native: cached.native, device: cached.device}, nil
 		}
 	}
 	compiled, err := backend.CompileVariants(mod, mantaartifact.BackendWebGPU)
+	if err != nil {
+		return nil, err
+	}
+	device, err := newDeviceRuntime(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -86,9 +91,9 @@ func (b *Backend) load(_ context.Context, mod *mantaartifact.Module, weights map
 		native[kernel.Name] = prog
 	}
 	if cacheKey != "" {
-		b.storeCachedLoad(cacheKey, cachedLoad{compiled: compiled, native: native})
+		b.storeCachedLoad(cacheKey, cachedLoad{compiled: compiled, native: native, device: device})
 	}
-	return &executor{module: mod, weights: weights, compiled: compiled, native: native}, nil
+	return &executor{module: mod, weights: weights, compiled: compiled, native: native, device: device}, nil
 }
 
 func (b *Backend) cachedLoad(cacheKey string) (cachedLoad, bool) {
@@ -114,6 +119,7 @@ type executor struct {
 	weights  map[string]backend.WeightBinding
 	compiled map[string]backend.CompiledKernel
 	native   map[string]backend.NativeKernelProgram
+	device   *deviceRuntime
 }
 
 func (e *executor) Backend() mantaartifact.BackendKind {
@@ -145,10 +151,16 @@ func (e *executor) dispatchKernel(_ context.Context, kernel mantaartifact.Kernel
 	}, nil
 }
 
-func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, _ mantaartifact.ValueType, inputs []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
+func (e *executor) dispatchStep(ctx context.Context, step mantaartifact.Step, _ mantaartifact.ValueType, inputs []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
 	kernel, ok := BuiltinForStep(step.Kind)
 	if !ok {
 		return backend.StepDispatchResult{}, false, nil
+	}
+	if e.device != nil {
+		result, handled, err := e.device.dispatchStep(ctx, step, inputs)
+		if err != nil || handled {
+			return result, handled, err
+		}
 	}
 	out, ok, err := runBuiltinReference(step, inputs)
 	if err != nil || !ok {
