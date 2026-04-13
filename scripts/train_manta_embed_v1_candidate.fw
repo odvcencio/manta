@@ -55,6 +55,7 @@ type candidateConfig struct {
 	ProgressEvery       string
 	LengthBucketBatches string
 	ActivationAccel     string
+	FastGELU            string
 	MantaBin            string
 	Artifact            string
 	SealedArtifact      string
@@ -89,10 +90,13 @@ Common knobs:
   MANTA_SELECT_METRIC=score_margin
   MANTA_EVAL_EVERY_STEPS=0
   MANTA_PRETOKENIZE_JSONL=0
+  MANTA_TRAIN_ENABLE_FAST_GELU=1
   MANTA_MIN_AUC=0.70
   MANTA_MIN_THRESHOLD_ACCURACY=0.65
-  MANTA_MIN_TRAIN_PAIRS_PER_SEC=85000
-  MANTA_MAX_MATMUL_RUN_UPLOAD_MB=950000`)
+  MANTA_MIN_TRAIN_PAIRS_PER_SEC=120000
+  MANTA_MAX_MATMUL_RUNS=400000
+  MANTA_MAX_MATMUL_RUN_UPLOAD_MB=950000
+  MANTA_MAX_MATMUL_RUN_DOWNLOAD_MB=485000`)
 }
 
 func getenv(name string, fallback string) string {
@@ -578,6 +582,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		ProgressEvery:       getenv("MANTA_PROGRESS_EVERY", "0"),
 		LengthBucketBatches: getenv("MANTA_LENGTH_BUCKET_BATCHES", "1"),
 		ActivationAccel:     getenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1"),
+		FastGELU:            getenv("MANTA_TRAIN_ENABLE_FAST_GELU", "1"),
 		MantaBin:            filepath.Join(runDir, "bin", "manta"),
 		Artifact:            filepath.Join(runDir, modelName+".mll"),
 		SealedArtifact:      filepath.Join(runDir, modelName+".sealed.mll"),
@@ -683,6 +688,11 @@ func trainCommonArgs(cfg candidateConfig) []string {
 func applyCandidateRuntimeEnv(cfg candidateConfig) {
 	if !envEnabled("MANTA_TRAIN_DISABLE_ACTIVATION_ACCEL") && cfg.ActivationAccel != "" {
 		os.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", cfg.ActivationAccel)
+	}
+	if envEnabled("MANTA_TRAIN_DISABLE_FAST_GELU") {
+		os.Setenv("MANTA_TRAIN_ENABLE_FAST_GELU", "0")
+	} else if cfg.FastGELU != "" {
+		os.Setenv("MANTA_TRAIN_ENABLE_FAST_GELU", cfg.FastGELU)
 	}
 }
 
