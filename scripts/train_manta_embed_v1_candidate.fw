@@ -54,6 +54,7 @@ type candidateConfig struct {
 	EvalPairs           string
 	ProgressEvery       string
 	LengthBucketBatches string
+	ActivationAccel     string
 	MantaBin            string
 	Artifact            string
 	SealedArtifact      string
@@ -576,6 +577,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		EvalPairs:           getenv("MANTA_EVAL_PAIRS", "512"),
 		ProgressEvery:       getenv("MANTA_PROGRESS_EVERY", "0"),
 		LengthBucketBatches: getenv("MANTA_LENGTH_BUCKET_BATCHES", "1"),
+		ActivationAccel:     getenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1"),
 		MantaBin:            filepath.Join(runDir, "bin", "manta"),
 		Artifact:            filepath.Join(runDir, modelName+".mll"),
 		SealedArtifact:      filepath.Join(runDir, modelName+".sealed.mll"),
@@ -678,7 +680,14 @@ func trainCommonArgs(cfg candidateConfig) []string {
 	return args
 }
 
+func applyCandidateRuntimeEnv(cfg candidateConfig) {
+	if !envEnabled("MANTA_TRAIN_DISABLE_ACTIVATION_ACCEL") && cfg.ActivationAccel != "" {
+		os.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", cfg.ActivationAccel)
+	}
+}
+
 func runCandidate(cfg candidateConfig) (candidateConfig, error) {
+	applyCandidateRuntimeEnv(cfg)
 	err := writeSelectedEnvironment(cfg)
 	guard err == nil else return cfg, err
 	err = writeManifest(cfg, "started")
