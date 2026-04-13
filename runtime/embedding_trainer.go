@@ -1525,7 +1525,7 @@ func pairwiseEvalBatchSize(total int) int {
 	if total <= 0 {
 		return 0
 	}
-	size := 256
+	size := 512
 	if raw := trainEnv("MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE"); raw != "" {
 		var parsed int
 		if _, err := fmt.Sscanf(raw, "%d", &parsed); err == nil && parsed > 0 {

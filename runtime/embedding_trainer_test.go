@@ -2147,8 +2147,8 @@ func TestEmbeddingTrainerEvaluatePairsUsesBatchedForwardChunks(t *testing.T) {
 
 func TestPairwiseEvalBatchSizeDefaultAndEnv(t *testing.T) {
 	t.Setenv("MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE", "")
-	if got := pairwiseEvalBatchSize(1024); got != 256 {
-		t.Fatalf("default pairwise eval batch size = %d, want 256", got)
+	if got := pairwiseEvalBatchSize(1024); got != 512 {
+		t.Fatalf("default pairwise eval batch size = %d, want 512", got)
 	}
 	if got := pairwiseEvalBatchSize(128); got != 128 {
 		t.Fatalf("capped pairwise eval batch size = %d, want total size", got)
