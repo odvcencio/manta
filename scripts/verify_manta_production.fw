@@ -232,6 +232,48 @@ func auditPublicSurface(root string) error {
 	return nil
 }
 
+func trackedFiles(root string) ([]string, error) {
+	out, err := commandOutput(root, "git", []string{"ls-files"})
+	guard err == nil else return nil, err
+	files := []string{}
+	for _, raw := range strings.Split(out, "\n") {
+		path := strings.TrimSpace(raw)
+		if path != "" {
+			files = append(files, path)
+		}
+	}
+	return files, nil
+}
+
+func isSpecOrPlanDoc(path string) bool {
+	path = strings.ToLower(filepath.ToSlash(path))
+	if strings.HasPrefix(path, "specs/") ||
+		strings.HasPrefix(path, "plans/") ||
+		strings.HasPrefix(path, "docs/specs/") ||
+		strings.HasPrefix(path, "docs/plans/") {
+		return true
+	}
+	base := filepath.Base(path)
+	switch base {
+	case "spec.md", "specs.md", "specification.md", "specifications.md", "plan.md", "plans.md":
+		return true
+	}
+	return strings.HasSuffix(path, ".spec.md") || strings.HasSuffix(path, ".plan.md")
+}
+
+func auditNoSpecOrPlanDocs(root string) error {
+	files, err := trackedFiles(root)
+	guard err == nil else return err
+	bad := []string{}
+	for _, path := range files {
+		if isSpecOrPlanDoc(path) {
+			bad = append(bad, path)
+		}
+	}
+	guard len(bad) == 0 else return fmt.Errorf("spec/plan docs must not be tracked:\n%s", strings.Join(bad, "\n"))
+	return nil
+}
+
 func writeFixtures(cfg verifyConfig) error {
 	train := strings.Join([]string{
 		`{"query":"manta local inference package","positive":"manta local inference package"}`,
@@ -284,6 +326,8 @@ func requireContains(label string, output string, needle string) error {
 func runVerification(cfg verifyConfig) error {
 	step("Audit Manta public surface")
 	err := auditPublicSurface(cfg.Root)
+	guard err == nil else return err
+	err = auditNoSpecOrPlanDocs(cfg.Root)
 	guard err == nil else return err
 
 	if !envEnabled("MANTA_VERIFY_SKIP_TESTS") {

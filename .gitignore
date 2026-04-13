@@ -4,3 +4,9 @@ datasets/
 runs/
 .DS_Store
 .local/
+specs/
+plans/
+docs/specs/
+docs/plans/
+*.spec.md
+*.plan.md
