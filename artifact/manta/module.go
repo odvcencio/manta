@@ -26,6 +26,9 @@ const (
 	CapabilityMaskedMeanPool  = "masked_mean_pool"
 	CapabilityHostFallback    = "host_fallback"
 	CapabilityDeviceExecution = "device_execution"
+	CapabilityImageOps        = "image_ops"
+	CapabilityTrainingLosses  = "training_losses"
+	CapabilityTurboQuant      = "turboquant"
 )
 
 // EntryPointKind identifies a top-level entrypoint in the artifact.
@@ -54,6 +57,15 @@ const (
 	StepKVWrite      StepKind = "kv_write"
 	StepCopy         StepKind = "copy"
 	StepReturn       StepKind = "return"
+	StepConv2D       StepKind = "conv2d"
+	StepConv2DTrans  StepKind = "conv2d_transpose"
+	StepGDN          StepKind = "gdn"
+	StepIGDN         StepKind = "igdn"
+	StepTurboQEncode StepKind = "turboquant_encode"
+	StepTurboQDecode StepKind = "turboquant_decode"
+	StepCrossEntropy StepKind = "cross_entropy_factorized"
+	StepMSELoss      StepKind = "mse_loss"
+	StepMSSSIMLoss   StepKind = "ms_ssim_loss"
 )
 
 // ValueKind classifies the values used by params and entrypoints.
@@ -153,8 +165,11 @@ type KernelVariant struct {
 // ScheduleHints describe backend-neutral scheduling intent for a kernel body.
 type ScheduleHints struct {
 	Tile        []int  `json:"tile,omitempty"`
+	Tile2D      []int  `json:"tile_2d,omitempty"`
 	VectorWidth int    `json:"vector_width,omitempty"`
 	Subgroup    bool   `json:"subgroup,omitempty"`
+	Subgroup2D  []int  `json:"subgroup_2d,omitempty"`
+	Halo        []int  `json:"halo,omitempty"`
 	Memory      string `json:"memory,omitempty"`
 }
 

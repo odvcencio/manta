@@ -56,8 +56,11 @@ type Value struct {
 // ScheduleHints describe backend-neutral kernel scheduling intent.
 type ScheduleHints struct {
 	Tile        []int
+	Tile2D      []int
 	VectorWidth int
 	Subgroup    bool
+	Subgroup2D  []int
+	Halo        []int
 	Memory      string
 }
 

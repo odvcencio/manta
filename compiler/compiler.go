@@ -228,8 +228,11 @@ func lowerArtifact(file *syntax.File, h *hir.Module, plan *lir.Plan) (*mantaarti
 			Name: kernel.Name,
 			Hints: mantaartifact.ScheduleHints{
 				Tile:        append([]int(nil), kernel.Hints.Tile...),
+				Tile2D:      append([]int(nil), kernel.Hints.Tile2D...),
 				VectorWidth: kernel.Hints.VectorWidth,
 				Subgroup:    kernel.Hints.Subgroup,
+				Subgroup2D:  append([]int(nil), kernel.Hints.Subgroup2D...),
+				Halo:        append([]int(nil), kernel.Hints.Halo...),
 				Memory:      kernel.Hints.Memory,
 			},
 			Variants: emitKernelVariants(kernel),
@@ -291,6 +294,7 @@ func inferModuleCapabilities(mod *mantaartifact.Module) []string {
 			if op.Op == "mean_pool" && len(op.Inputs) > 1 {
 				add(mantaartifact.CapabilityMaskedMeanPool)
 			}
+			addCapabilitiesFromOp(add, op.Op)
 		}
 	}
 	for _, step := range mod.Steps {
@@ -299,9 +303,26 @@ func inferModuleCapabilities(mod *mantaartifact.Module) []string {
 			add(mantaartifact.CapabilityKVCache)
 		case mantaartifact.StepPack:
 			add(mantaartifact.CapabilityCandidatePack)
+		case mantaartifact.StepConv2D, mantaartifact.StepConv2DTrans, mantaartifact.StepGDN, mantaartifact.StepIGDN:
+			add(mantaartifact.CapabilityImageOps)
+		case mantaartifact.StepTurboQEncode, mantaartifact.StepTurboQDecode:
+			add(mantaartifact.CapabilityTurboQuant)
+		case mantaartifact.StepCrossEntropy, mantaartifact.StepMSELoss, mantaartifact.StepMSSSIMLoss:
+			add(mantaartifact.CapabilityTrainingLosses)
 		}
 	}
 	return out
+}
+
+func addCapabilitiesFromOp(add func(string), op string) {
+	switch op {
+	case "conv2d", "conv2d_transpose", "gdn", "igdn":
+		add(mantaartifact.CapabilityImageOps)
+	case "turboquant_encode", "turboquant_decode":
+		add(mantaartifact.CapabilityTurboQuant)
+	case "cross_entropy_factorized", "mse_loss", "ms_ssim_loss":
+		add(mantaartifact.CapabilityTrainingLosses)
+	}
 }
 
 func addCapabilitiesFromValueType(add func(string), v mantaartifact.ValueType) {
@@ -938,8 +959,11 @@ var metalNativeEmitter = nativeKernelEmitter{
 func emitKernelVariants(kernel lir.Kernel) []mantaartifact.KernelVariant {
 	meta := map[string]string{
 		"tile":         scheduleTileString(kernel.Hints.Tile),
+		"tile_2d":      scheduleTileString(kernel.Hints.Tile2D),
 		"vector_width": strconv.Itoa(kernel.Hints.VectorWidth),
 		"subgroup":     strconv.FormatBool(kernel.Hints.Subgroup),
+		"subgroup_2d":  scheduleTileString(kernel.Hints.Subgroup2D),
+		"halo":         scheduleTileString(kernel.Hints.Halo),
 		"memory":       kernel.Hints.Memory,
 	}
 	variants := make([]mantaartifact.KernelVariant, 0, len(kernelBackendEmitters))
@@ -964,10 +988,16 @@ func emitGenericKernelSource(emitter kernelBackendEmitter, kernel lir.Kernel) st
 	b.WriteString(") {\n")
 	b.WriteString("  // tile=")
 	b.WriteString(scheduleTileString(kernel.Hints.Tile))
+	b.WriteString(" tile_2d=")
+	b.WriteString(scheduleTileString(kernel.Hints.Tile2D))
 	b.WriteString(" vector_width=")
 	b.WriteString(strconv.Itoa(kernel.Hints.VectorWidth))
 	b.WriteString(" subgroup=")
 	b.WriteString(strconv.FormatBool(kernel.Hints.Subgroup))
+	b.WriteString(" subgroup_2d=")
+	b.WriteString(scheduleTileString(kernel.Hints.Subgroup2D))
+	b.WriteString(" halo=")
+	b.WriteString(scheduleTileString(kernel.Hints.Halo))
 	b.WriteString(" memory=")
 	b.WriteString(kernel.Hints.Memory)
 	b.WriteString("\n")
@@ -2341,6 +2371,13 @@ func scheduleHintsForKernel(name string, ops []lir.KernelOp) lir.ScheduleHints {
 		case "binary_add", "binary_mul", "binary_sub", "binary_div":
 			hints.Tile = []int{128}
 			hints.VectorWidth = 4
+		case "conv2d", "conv2d_transpose", "gdn", "igdn", "turboquant_encode", "turboquant_decode":
+			hints.Tile = []int{16}
+			hints.Tile2D = []int{8, 8}
+			hints.Subgroup = true
+			hints.Subgroup2D = []int{8, 4}
+			hints.Halo = []int{1, 1}
+			hints.Memory = "workgroup_local"
 		}
 	}
 	if strings.Contains(name, "norm") {

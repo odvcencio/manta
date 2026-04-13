@@ -114,6 +114,66 @@ func TestEncodeDecodeJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMirageV1ArtifactSurfaceRoundTrip(t *testing.T) {
+	module := NewModule("mirage_v1_smoke")
+	module.Requirements.Capabilities = []string{CapabilityImageOps, CapabilityTrainingLosses, CapabilityTurboQuant}
+	module.EntryPoints = []EntryPoint{
+		{
+			Name: "quantize",
+			Kind: EntryPointPipeline,
+			Inputs: []ValueBinding{
+				{Name: "x", Type: ValueType{Kind: ValueTensor, Tensor: &TensorType{DType: "f16", Shape: []string{"1", "4", "1", "1"}}}},
+			},
+			Outputs: []ValueBinding{
+				{Name: "coords", Type: ValueType{Kind: ValueTensor, Tensor: &TensorType{DType: "q2", Shape: []string{"1", "4", "1", "1"}}}},
+				{Name: "norms", Type: ValueType{Kind: ValueTensor, Tensor: &TensorType{DType: "q_norm", Shape: []string{"1", "1", "1"}}}},
+			},
+		},
+	}
+	module.Buffers = []Buffer{
+		{Name: "coords", DType: "q2", Shape: []string{"1", "4", "1", "1"}},
+		{Name: "norms", DType: "q_norm", Shape: []string{"1", "1", "1"}},
+	}
+	module.Kernels = []Kernel{
+		{
+			Name:  "conv2d_wgsl_smoke",
+			Hints: ScheduleHints{Tile2D: []int{8, 8}, Subgroup2D: []int{8, 4}, Halo: []int{1, 1}, Memory: "workgroup_local"},
+			Inputs: []ValueBinding{
+				{Name: "x", Type: ValueType{Kind: ValueTensor, Tensor: &TensorType{DType: "f16", Shape: []string{"1", "1", "4", "4"}}}},
+			},
+			Outputs: []ValueBinding{
+				{Name: "y", Type: ValueType{Kind: ValueTensor, Tensor: &TensorType{DType: "f16", Shape: []string{"1", "1", "4", "4"}}}},
+			},
+			Body: []KernelOp{{Kind: KernelOpReturn, Op: "return", Outputs: []string{"x"}}},
+			Variants: []KernelVariant{
+				{Backend: BackendCUDA, Entry: "conv2d_cuda", Source: "extern \"C\" __global__ void conv2d_cuda() {}"},
+				{Backend: BackendMetal, Entry: "conv2d_metal", Source: "kernel void conv2d_metal() {}"},
+				{Backend: BackendVulkan, Entry: "conv2d_vulkan", Source: "void conv2d_vulkan() {}"},
+				{Backend: BackendDirectML, Entry: "conv2d_directml", Source: "manta_directml_graph conv2d_directml() {}"},
+				{Backend: BackendWebGPU, Entry: "conv2d_webgpu", Source: "@compute @workgroup_size(8, 8) fn conv2d_webgpu() {}"},
+			},
+		},
+	}
+	module.Steps = []Step{
+		{Entry: "quantize", Kind: StepTurboQEncode, Name: "tq", Inputs: []string{"x"}, Outputs: []string{"coords", "norms"}, Attributes: map[string]string{"bits": "2"}},
+		{Entry: "quantize", Kind: StepReturn, Outputs: []string{"coords", "norms"}},
+	}
+	data, err := EncodeJSON(module)
+	if err != nil {
+		t.Fatalf("encode JSON: %v", err)
+	}
+	got, err := DecodeJSON(data)
+	if err != nil {
+		t.Fatalf("decode JSON: %v", err)
+	}
+	if got.Kernels[0].Hints.Tile2D[0] != 8 || got.Kernels[0].Hints.Halo[0] != 1 {
+		t.Fatalf("2D schedule hints did not round-trip: %+v", got.Kernels[0].Hints)
+	}
+	if _, err := EncodeMLL(got); err != nil {
+		t.Fatalf("EncodeMLL with q2/q_norm: %v", err)
+	}
+}
+
 func TestValidateRejectsUnknownStepEntry(t *testing.T) {
 	module := NewModule("bad")
 	module.EntryPoints = []EntryPoint{

@@ -69,35 +69,42 @@ func nativeLaunchConfig(kind mantaartifact.BackendKind, kernel mantaartifact.Ker
 		"device_execution":    false,
 		"launch_entry":        compiled.Entry,
 		"launch_tile":         compiled.Meta["tile"],
+		"launch_tile_2d":      compiled.Meta["tile_2d"],
 		"launch_vector_width": compiled.Meta["vector_width"],
 		"launch_memory":       compiled.Meta["memory"],
 		"launch_subgroup":     compiled.Meta["subgroup"],
+		"launch_subgroup_2d":  compiled.Meta["subgroup_2d"],
+		"launch_halo":         compiled.Meta["halo"],
 	}
 	tile := firstTileSize(kernel, compiled)
+	grid := "1d"
+	if len(kernel.Hints.Tile2D) > 0 || compiled.Meta["tile_2d"] != "" {
+		grid = "2d"
+	}
 	switch kind {
 	case mantaartifact.BackendCUDA:
 		config["launch_api"] = "cuLaunchKernel"
-		config["launch_grid"] = "1d"
+		config["launch_grid"] = grid
 		config["launch_block_size"] = tile
 		config["launch_shared_bytes"] = estimatedSharedBytes(kernel, tile)
 	case mantaartifact.BackendMetal:
 		config["launch_api"] = "dispatchThreadgroups"
-		config["launch_grid"] = "1d"
+		config["launch_grid"] = grid
 		config["launch_threadgroup_size"] = tile
 		config["launch_threadgroup_memory_bytes"] = estimatedSharedBytes(kernel, tile)
 	case mantaartifact.BackendVulkan:
 		config["launch_api"] = "vkCmdDispatch"
-		config["launch_grid"] = "1d"
+		config["launch_grid"] = grid
 		config["launch_workgroup_size"] = tile
 		config["launch_shared_bytes"] = estimatedSharedBytes(kernel, tile)
 	case mantaartifact.BackendDirectML:
 		config["launch_api"] = "IDMLCommandRecorder::RecordDispatch"
-		config["launch_grid"] = "1d"
+		config["launch_grid"] = grid
 		config["launch_threadgroup_size"] = tile
 		config["launch_temporary_resource_bytes"] = estimatedSharedBytes(kernel, tile)
 	case mantaartifact.BackendWebGPU:
 		config["launch_api"] = "GPUComputePassEncoder.dispatchWorkgroups"
-		config["launch_grid"] = "1d"
+		config["launch_grid"] = grid
 		config["launch_workgroup_size"] = tile
 		config["launch_workgroup_memory_bytes"] = estimatedSharedBytes(kernel, tile)
 	}

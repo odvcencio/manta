@@ -106,6 +106,8 @@ func run(args []string) error {
 		return runExportMLL(args[1:])
 	case "init-model":
 		return runInitModel(args[1:])
+	case "init-mirage":
+		return runInitMirage(args[1:])
 	case "init-train":
 		return runInitTrain(args[1:])
 	case "rename-embed":
@@ -162,6 +164,12 @@ func runDemo(args []string) error {
 	}
 	preset := compiler.PresetTinyEmbed
 	switch name {
+	case "mirage_v1":
+		mod, err := models.DefaultMirageV1Module(models.MirageV1Config{})
+		if err != nil {
+			return err
+		}
+		return runDemoModule(mod)
 	case "tiny_embed_pooled":
 		preset = compiler.PresetTinyEmbedPooled
 	case "tiny_embed_masked_pooled":
@@ -214,6 +222,36 @@ func runDemo(args []string) error {
 	fmt.Printf("kernel ops: %d\n", totalKernelOps(bundle.Artifact.Kernels))
 	fmt.Printf("params: %d\n", len(bundle.Artifact.Params))
 	fmt.Printf("artifact version: %s\n", displayArtifactVersion(bundle.Artifact.Version))
+	fmt.Printf("ran entrypoint: %s\n", entryName)
+	fmt.Printf("outputs: %s\n", strings.Join(sortedValueKeys(result.Outputs), ", "))
+	fmt.Printf("output summary: %s\n", strings.Join(outputSummaries(result.Outputs), "; "))
+	fmt.Printf("trace steps: %d\n", len(result.Trace))
+	return nil
+}
+
+func runDemoModule(mod *mantaartifact.Module) error {
+	rt := mantaruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	prog, err := rt.Load(context.Background(), mod, stubLoadOptions(mod)...)
+	if err != nil {
+		return err
+	}
+	entryName := defaultEntryName(mod)
+	entry, err := entryPointByName(mod, entryName)
+	if err != nil {
+		return err
+	}
+	result, err := prog.Run(context.Background(), backend.Request{
+		Entry:  entryName,
+		Inputs: stubInputs(entry),
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("loaded module %q for backend %q\n", mod.Name, prog.Backend())
+	fmt.Printf("entrypoints: %d, steps: %d, kernels: %d\n", len(mod.EntryPoints), len(mod.Steps), len(mod.Kernels))
+	fmt.Printf("kernel ops: %d\n", totalKernelOps(mod.Kernels))
+	fmt.Printf("params: %d\n", len(mod.Params))
+	fmt.Printf("artifact version: %s\n", displayArtifactVersion(mod.Version))
 	fmt.Printf("ran entrypoint: %s\n", entryName)
 	fmt.Printf("outputs: %s\n", strings.Join(sortedValueKeys(result.Outputs), ", "))
 	fmt.Printf("output summary: %s\n", strings.Join(outputSummaries(result.Outputs), "; "))
@@ -483,6 +521,48 @@ func runInitModel(args []string) error {
 	fmt.Printf("weights: %s\n", paths.WeightFilePath)
 	fmt.Printf("checkpoint: %s\n", paths.CheckpointPath)
 	fmt.Printf("profile: %s\n", paths.TrainProfilePath)
+	return nil
+}
+
+func runInitMirage(args []string) error {
+	fs := flag.NewFlagSet("init-mirage", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var name string
+	var imageHeight int
+	var imageWidth int
+	var latentChannels int
+	var bits int
+	fs.StringVar(&name, "name", "", "model name")
+	fs.IntVar(&imageHeight, "height", 0, "image height")
+	fs.IntVar(&imageWidth, "width", 0, "image width")
+	fs.IntVar(&latentChannels, "latent-channels", 0, "latent channels")
+	fs.IntVar(&bits, "bits", 0, "TurboQuant bits: 2, 4, or 8")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || fs.Arg(0) == "" {
+		return fmt.Errorf("usage: manta init-mirage [flags] <artifact.mll>")
+	}
+	cfg := models.MirageV1Config{
+		Name:           name,
+		ImageHeight:    imageHeight,
+		ImageWidth:     imageWidth,
+		LatentChannels: latentChannels,
+		BitWidth:       bits,
+	}
+	if err := models.InitMirageV1Artifact(fs.Arg(0), cfg); err != nil {
+		return err
+	}
+	mod, err := mantaartifact.ReadFile(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("initialized Mirage Image v1 module %q\n", mod.Name)
+	fmt.Printf("artifact: %s\n", fs.Arg(0))
+	fmt.Printf("entrypoints: %d, steps: %d, kernels: %d\n", len(mod.EntryPoints), len(mod.Steps), len(mod.Kernels))
+	if len(mod.Requirements.Capabilities) > 0 {
+		fmt.Printf("capabilities: %s\n", strings.Join(mod.Requirements.Capabilities, ", "))
+	}
 	return nil
 }
 
@@ -1265,6 +1345,7 @@ func printUsage() {
 	fmt.Println("  manta export-mll <artifact.mll> [output.mll]")
 	fmt.Println("  manta embed-text <artifact.mll> <text...>")
 	fmt.Println("  manta init-model [flags] <artifact.mll>")
+	fmt.Println("  manta init-mirage [flags] <artifact.mll>")
 	fmt.Println("  manta init-train [flags] <artifact.mll>")
 	fmt.Println("  manta rename-embed --name <model-name> <input.mll> <output.mll>")
 	fmt.Println("  manta train-tokenizer [flags] <artifact.mll> <corpus.txt>")
@@ -1279,6 +1360,7 @@ func printUsage() {
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Manta metadata in XMTA.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("init-model creates the Manta-owned default quantized embedding training package.")
+	fmt.Println("init-mirage creates the Manta-owned Mirage Image v1 smoke artifact.")
 	fmt.Println("init-train creates a native training package next to an artifact.")
 	fmt.Println("rename-embed rewrites a training package under a new embedding model identity.")
 	fmt.Println("train-tokenizer builds a sibling .tokenizer.mll from a raw text corpus, using embedding-manifest vocab_size by default.")
@@ -1549,6 +1631,9 @@ func stubTensorForInput(name string, typ mantaartifact.ValueType, sizes map[stri
 		return backend.NewTensorI32(shape, values)
 	}
 	if name == "x" {
+		if product(shape) != 4 {
+			return fillTensor(typ, shape, 0)
+		}
 		return backend.NewTensorF16(shape, []float32{
 			1, 0,
 			0, 1,
@@ -1629,10 +1714,16 @@ func fillTensor(typ mantaartifact.ValueType, shape []int, offset float32) *backe
 			values[i] = offset + float32(i+1)/10
 		}
 		return backend.NewTensorF16(shape, values)
-	case "q4":
+	case "q2", "q4", "q_norm":
 		values := make([]float32, n)
 		for i := range values {
 			values[i] = offset + float32(i+1)/10
+		}
+		if typ.Tensor.DType == "q2" {
+			return backend.NewTensorQ2(shape, values)
+		}
+		if typ.Tensor.DType == "q_norm" {
+			return backend.NewTensorQNorm(shape, values)
 		}
 		return backend.NewTensorQ4(shape, values)
 	case "q8":
@@ -1656,6 +1747,10 @@ func concreteShape(typ mantaartifact.ValueType, sizes map[string]int) []int {
 	}
 	shape := make([]int, len(typ.Tensor.Shape))
 	for i, dim := range typ.Tensor.Shape {
+		if literal, err := strconv.Atoi(dim); err == nil {
+			shape[i] = literal
+			continue
+		}
 		n, ok := sizes[dim]
 		if !ok {
 			n = 2

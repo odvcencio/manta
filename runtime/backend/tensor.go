@@ -54,9 +54,25 @@ func NewTensorQ4(shape []int, data []float32) *Tensor {
 	}
 }
 
+func NewTensorQ2(shape []int, data []float32) *Tensor {
+	return &Tensor{
+		DType: "q2",
+		Shape: append([]int(nil), shape...),
+		F32:   append([]float32(nil), data...),
+	}
+}
+
 func NewTensorQ8(shape []int, data []float32) *Tensor {
 	return &Tensor{
 		DType: "q8",
+		Shape: append([]int(nil), shape...),
+		F32:   append([]float32(nil), data...),
+	}
+}
+
+func NewTensorQNorm(shape []int, data []float32) *Tensor {
+	return &Tensor{
+		DType: "q_norm",
 		Shape: append([]int(nil), shape...),
 		F32:   append([]float32(nil), data...),
 	}

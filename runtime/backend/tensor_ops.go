@@ -146,6 +146,142 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 			out.DType = "f16"
 		}
 		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", nil)}, "", nil
+	case mantaartifact.StepConv2D:
+		if len(step.Inputs) < 2 || len(step.Outputs) != 1 {
+			return nil, "", fmt.Errorf("conv2d step %q expects at least 2 inputs and 1 output", step.Name)
+		}
+		input, err := requireTensor(env[step.Inputs[0]], step.Inputs[0])
+		if err != nil {
+			return nil, "", err
+		}
+		weight, err := requireTensor(env[step.Inputs[1]], step.Inputs[1])
+		if err != nil {
+			return nil, "", err
+		}
+		bias, err := optionalTensorInput(env, step.Inputs, 2)
+		if err != nil {
+			return nil, "", err
+		}
+		out, err := conv2DTensor(input, weight, bias, step.Attributes)
+		if err != nil {
+			return nil, "", err
+		}
+		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata("conv2d"))}, "", nil
+	case mantaartifact.StepConv2DTrans:
+		if len(step.Inputs) < 2 || len(step.Outputs) != 1 {
+			return nil, "", fmt.Errorf("conv2d_transpose step %q expects at least 2 inputs and 1 output", step.Name)
+		}
+		input, err := requireTensor(env[step.Inputs[0]], step.Inputs[0])
+		if err != nil {
+			return nil, "", err
+		}
+		weight, err := requireTensor(env[step.Inputs[1]], step.Inputs[1])
+		if err != nil {
+			return nil, "", err
+		}
+		bias, err := optionalTensorInput(env, step.Inputs, 2)
+		if err != nil {
+			return nil, "", err
+		}
+		out, err := conv2DTransposeTensor(input, weight, bias, step.Attributes)
+		if err != nil {
+			return nil, "", err
+		}
+		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata("conv2d_transpose"))}, "", nil
+	case mantaartifact.StepGDN, mantaartifact.StepIGDN:
+		if len(step.Inputs) < 1 || len(step.Outputs) != 1 {
+			return nil, "", fmt.Errorf("%s step %q expects at least 1 input and 1 output", step.Kind, step.Name)
+		}
+		input, err := requireTensor(env[step.Inputs[0]], step.Inputs[0])
+		if err != nil {
+			return nil, "", err
+		}
+		beta, err := optionalTensorInput(env, step.Inputs, 1)
+		if err != nil {
+			return nil, "", err
+		}
+		gamma, err := optionalTensorInput(env, step.Inputs, 2)
+		if err != nil {
+			return nil, "", err
+		}
+		out, err := gdnTensor(input, beta, gamma, step.Kind == mantaartifact.StepIGDN)
+		if err != nil {
+			return nil, "", err
+		}
+		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata(string(step.Kind)))}, "", nil
+	case mantaartifact.StepTurboQEncode:
+		if len(step.Inputs) != 1 || len(step.Outputs) != 2 {
+			return nil, "", fmt.Errorf("turboquant_encode step %q expects 1 input and 2 outputs", step.Name)
+		}
+		input, err := requireTensor(env[step.Inputs[0]], step.Inputs[0])
+		if err != nil {
+			return nil, "", err
+		}
+		coords, norms, err := turboQuantEncodeTensor(input, step.Attributes)
+		if err != nil {
+			return nil, "", err
+		}
+		meta := hostReferenceMetadata("turboquant_encode")
+		return []Value{
+			makeTensorValue(mod, entry, step, 0, coords, bindings, kind, "", "", meta),
+			makeTensorValue(mod, entry, step, 1, norms, bindings, kind, "", "", meta),
+		}, "", nil
+	case mantaartifact.StepTurboQDecode:
+		if len(step.Inputs) != 2 || len(step.Outputs) != 1 {
+			return nil, "", fmt.Errorf("turboquant_decode step %q expects 2 inputs and 1 output", step.Name)
+		}
+		coords, err := requireTensor(env[step.Inputs[0]], step.Inputs[0])
+		if err != nil {
+			return nil, "", err
+		}
+		norms, err := requireTensor(env[step.Inputs[1]], step.Inputs[1])
+		if err != nil {
+			return nil, "", err
+		}
+		out, err := turboQuantDecodeTensor(coords, norms, step.Attributes)
+		if err != nil {
+			return nil, "", err
+		}
+		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata("turboquant_decode"))}, "", nil
+	case mantaartifact.StepCrossEntropy:
+		if len(step.Inputs) < 1 || len(step.Outputs) != 1 {
+			return nil, "", fmt.Errorf("cross_entropy_factorized step %q expects at least 1 input and 1 output", step.Name)
+		}
+		codes, err := requireTensor(env[step.Inputs[0]], step.Inputs[0])
+		if err != nil {
+			return nil, "", err
+		}
+		logits, err := optionalTensorInput(env, step.Inputs, 1)
+		if err != nil {
+			return nil, "", err
+		}
+		out, err := crossEntropyFactorizedTensor(codes, logits, step.Attributes)
+		if err != nil {
+			return nil, "", err
+		}
+		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata("cross_entropy_factorized"))}, "", nil
+	case mantaartifact.StepMSELoss, mantaartifact.StepMSSSIMLoss:
+		if len(step.Inputs) != 2 || len(step.Outputs) != 1 {
+			return nil, "", fmt.Errorf("%s step %q expects 2 inputs and 1 output", step.Kind, step.Name)
+		}
+		lhs, err := requireTensor(env[step.Inputs[0]], step.Inputs[0])
+		if err != nil {
+			return nil, "", err
+		}
+		rhs, err := requireTensor(env[step.Inputs[1]], step.Inputs[1])
+		if err != nil {
+			return nil, "", err
+		}
+		var out *Tensor
+		if step.Kind == mantaartifact.StepMSELoss {
+			out, err = mseLossTensor(lhs, rhs)
+		} else {
+			out, err = msSSIMLossTensor(lhs, rhs)
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata(string(step.Kind)))}, "", nil
 	case mantaartifact.StepKVRead:
 		if len(step.Inputs) != 1 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("kv_read step %q expects 1 input and 1 output", step.Name)
@@ -296,6 +432,88 @@ func executeKernelOp(op mantaartifact.KernelOp, locals map[string]*Tensor) (*Ten
 		out := in.Clone()
 		out.DType = "f16"
 		return out, nil
+	case "conv2d":
+		input, err := tensorByName(locals, op.Inputs, 0)
+		if err != nil {
+			return nil, err
+		}
+		weight, err := tensorByName(locals, op.Inputs, 1)
+		if err != nil {
+			return nil, err
+		}
+		bias, err := optionalLocalTensor(locals, op.Inputs, 2)
+		if err != nil {
+			return nil, err
+		}
+		return conv2DTensor(input, weight, bias, op.Attributes)
+	case "conv2d_transpose":
+		input, err := tensorByName(locals, op.Inputs, 0)
+		if err != nil {
+			return nil, err
+		}
+		weight, err := tensorByName(locals, op.Inputs, 1)
+		if err != nil {
+			return nil, err
+		}
+		bias, err := optionalLocalTensor(locals, op.Inputs, 2)
+		if err != nil {
+			return nil, err
+		}
+		return conv2DTransposeTensor(input, weight, bias, op.Attributes)
+	case "gdn", "igdn":
+		input, err := tensorByName(locals, op.Inputs, 0)
+		if err != nil {
+			return nil, err
+		}
+		beta, err := optionalLocalTensor(locals, op.Inputs, 1)
+		if err != nil {
+			return nil, err
+		}
+		gamma, err := optionalLocalTensor(locals, op.Inputs, 2)
+		if err != nil {
+			return nil, err
+		}
+		return gdnTensor(input, beta, gamma, op.Op == "igdn")
+	case "turboquant_decode":
+		coords, err := tensorByName(locals, op.Inputs, 0)
+		if err != nil {
+			return nil, err
+		}
+		norms, err := tensorByName(locals, op.Inputs, 1)
+		if err != nil {
+			return nil, err
+		}
+		return turboQuantDecodeTensor(coords, norms, op.Attributes)
+	case "cross_entropy_factorized":
+		codes, err := tensorByName(locals, op.Inputs, 0)
+		if err != nil {
+			return nil, err
+		}
+		logits, err := optionalLocalTensor(locals, op.Inputs, 1)
+		if err != nil {
+			return nil, err
+		}
+		return crossEntropyFactorizedTensor(codes, logits, op.Attributes)
+	case "mse_loss":
+		lhs, err := tensorByName(locals, op.Inputs, 0)
+		if err != nil {
+			return nil, err
+		}
+		rhs, err := tensorByName(locals, op.Inputs, 1)
+		if err != nil {
+			return nil, err
+		}
+		return mseLossTensor(lhs, rhs)
+	case "ms_ssim_loss":
+		lhs, err := tensorByName(locals, op.Inputs, 0)
+		if err != nil {
+			return nil, err
+		}
+		rhs, err := tensorByName(locals, op.Inputs, 1)
+		if err != nil {
+			return nil, err
+		}
+		return msSSIMLossTensor(lhs, rhs)
 	case "mean_pool":
 		in, err := tensorByName(locals, op.Inputs, 0)
 		if err != nil {
@@ -357,6 +575,29 @@ func tensorByName(locals map[string]*Tensor, names []string, idx int) (*Tensor, 
 		return nil, fmt.Errorf("unknown local %q", names[idx])
 	}
 	return t, nil
+}
+
+func optionalTensorInput(env map[string]Value, names []string, idx int) (*Tensor, error) {
+	if idx >= len(names) {
+		return nil, nil
+	}
+	return requireTensor(env[names[idx]], names[idx])
+}
+
+func optionalLocalTensor(locals map[string]*Tensor, names []string, idx int) (*Tensor, error) {
+	if idx >= len(names) {
+		return nil, nil
+	}
+	return tensorByName(locals, names, idx)
+}
+
+func hostReferenceMetadata(op string) map[string]any {
+	return map[string]any{
+		"dispatch_mode":  "host_reference",
+		"execution_mode": "host_reference",
+		"launch_api":     "host_reference",
+		"op":             op,
+	}
 }
 
 func binaryTensorOp(locals map[string]*Tensor, names []string, fn func(float32, float32) float32) (*Tensor, error) {
@@ -917,10 +1158,14 @@ func tensorForDType(dtype string, shape []int, elements int) *Tensor {
 		return NewTensorF32(shape, make([]float32, elements))
 	case "f16":
 		return NewTensorF16(shape, make([]float32, elements))
+	case "q2":
+		return NewTensorQ2(shape, make([]float32, elements))
 	case "q4":
 		return NewTensorQ4(shape, make([]float32, elements))
 	case "q8":
 		return NewTensorQ8(shape, make([]float32, elements))
+	case "q_norm":
+		return NewTensorQNorm(shape, make([]float32, elements))
 	default:
 		return &Tensor{DType: dtype, Shape: append([]int(nil), shape...), F32: make([]float32, elements)}
 	}

@@ -2,5 +2,7 @@ github.com/klauspost/cpuid/v2 v2.0.9 h1:lgaqFMSdTdQYdZ04uHyN2d/eKdOMyi2YLSvlQIBF
 github.com/klauspost/cpuid/v2 v2.0.9/go.mod h1:FInQzS24/EEf25PyTYn52gqo7WaD8xa0213Md/qVLRg=
 github.com/odvcencio/mll v0.0.1 h1:rmsQoXQu3EnKLsoeX+q/w2XaPxoSKIZq2QJhG4lUO8E=
 github.com/odvcencio/mll v0.0.1/go.mod h1:Yjspjp/u0/Yap+hoDkJyJxjuyhFWcmLLJksgLi4WTWA=
+github.com/odvcencio/turboquant v0.1.0 h1:4dk7zt+T3Lu+jhqzTVQvFj77mrgDZ+ZzYIY5sUaz+qo=
+github.com/odvcencio/turboquant v0.1.0/go.mod h1:ty5h3EkX85p64iBnvWzUGvDuRr6kplOcCE2KBZLtAf8=
 lukechampine.com/blake3 v1.4.1 h1:I3Smz7gso8w4/TunLKec6K2fn+kyKtDxr/xcQEN84Wg=
 lukechampine.com/blake3 v1.4.1/go.mod h1:QFosUxmjB8mnrWFSNwKmvxHpfY72bmD2tQ0kBMM3kwo=

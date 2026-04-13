@@ -489,6 +489,8 @@ func mantaDTypeToMLL(dtype string) (mll.DType, error) {
 		return mll.DTypeQ4, nil
 	case "q8":
 		return mll.DTypeQ8, nil
+	case "q2", "q_norm":
+		return mll.DTypeU8, nil
 	default:
 		return mll.DTypeInvalid, fmt.Errorf("unsupported Manta dtype %q", dtype)
 	}

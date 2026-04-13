@@ -42,6 +42,9 @@ func (b *Backend) Capabilities() []string {
 		mantaartifact.CapabilityKVCache,
 		mantaartifact.CapabilityMaskedMeanPool,
 		mantaartifact.CapabilityHostFallback,
+		mantaartifact.CapabilityImageOps,
+		mantaartifact.CapabilityTrainingLosses,
+		mantaartifact.CapabilityTurboQuant,
 	}
 }
 
