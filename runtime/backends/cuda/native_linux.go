@@ -446,6 +446,16 @@ static int mantaCudaLaunchGDN(MantaCudaRuntime* rt, MantaCudaKernel* kernel, uns
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
+static int mantaCudaLaunchConv2D(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr weight, CUdeviceptr bias, CUdeviceptr out0, int elements, int inChannels, int inHeight, int inWidth, int outChannels, int outHeight, int outWidth, int inPerGroup, int outPerGroup, int kernelH, int kernelW, int strideH, int strideW, int padH, int padW, int dilationH, int dilationW, int hasBias, char** err) {
+	void* args[] = {&input, &weight, &bias, &out0, &elements, &inChannels, &inHeight, &inWidth, &outChannels, &outHeight, &outWidth, &inPerGroup, &outPerGroup, &kernelH, &kernelW, &strideH, &strideW, &padH, &padW, &dilationH, &dilationW, &hasBias};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
+static int mantaCudaLaunchConv2DTranspose(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr weight, CUdeviceptr bias, CUdeviceptr out0, int elements, int inChannels, int inHeight, int inWidth, int outChannels, int outHeight, int outWidth, int inPerGroup, int outPerGroup, int kernelH, int kernelW, int strideH, int strideW, int padH, int padW, int dilationH, int dilationW, int hasBias, char** err) {
+	void* args[] = {&input, &weight, &bias, &out0, &elements, &inChannels, &inHeight, &inWidth, &outChannels, &outHeight, &outWidth, &inPerGroup, &outPerGroup, &kernelH, &kernelW, &strideH, &strideW, &padH, &padW, &dilationH, &dilationW, &hasBias};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
 static int mantaCudaLaunchMSEPartials(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr partials, int elements, char** err) {
 	void* args[] = {&lhs, &rhs, &partials, &elements};
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
@@ -669,6 +679,131 @@ extern "C" __global__ void manta_gdn_forward(
     } else {
         out[idx] = input[idx] / scale;
     }
+}
+`
+
+const convKernelSource = `
+extern "C" __global__ void manta_conv2d_forward(
+    const float* input,
+    const float* weight,
+    const float* bias,
+    float* out,
+    int elements,
+    int inChannels,
+    int inHeight,
+    int inWidth,
+    int outChannels,
+    int outHeight,
+    int outWidth,
+    int inPerGroup,
+    int outPerGroup,
+    int kernelH,
+    int kernelW,
+    int strideH,
+    int strideW,
+    int padH,
+    int padW,
+    int dilationH,
+    int dilationW,
+    int hasBias
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= elements) {
+        return;
+    }
+    int ox = idx % outWidth;
+    int rem = idx / outWidth;
+    int oy = rem % outHeight;
+    rem /= outHeight;
+    int oc = rem % outChannels;
+    int n = rem / outChannels;
+    int group = oc / outPerGroup;
+    float sum = hasBias ? bias[oc] : 0.0f;
+    for (int icg = 0; icg < inPerGroup; ++icg) {
+        int ic = group * inPerGroup + icg;
+        for (int ky = 0; ky < kernelH; ++ky) {
+            int iy = oy * strideH + ky * dilationH - padH;
+            if (iy < 0 || iy >= inHeight) {
+                continue;
+            }
+            for (int kx = 0; kx < kernelW; ++kx) {
+                int ix = ox * strideW + kx * dilationW - padW;
+                if (ix < 0 || ix >= inWidth) {
+                    continue;
+                }
+                int inputIdx = ((n * inChannels + ic) * inHeight + iy) * inWidth + ix;
+                int weightIdx = ((oc * inPerGroup + icg) * kernelH + ky) * kernelW + kx;
+                sum += input[inputIdx] * weight[weightIdx];
+            }
+        }
+    }
+    out[idx] = sum;
+}
+
+extern "C" __global__ void manta_conv2d_transpose_forward(
+    const float* input,
+    const float* weight,
+    const float* bias,
+    float* out,
+    int elements,
+    int inChannels,
+    int inHeight,
+    int inWidth,
+    int outChannels,
+    int outHeight,
+    int outWidth,
+    int inPerGroup,
+    int outPerGroup,
+    int kernelH,
+    int kernelW,
+    int strideH,
+    int strideW,
+    int padH,
+    int padW,
+    int dilationH,
+    int dilationW,
+    int hasBias
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= elements) {
+        return;
+    }
+    int ox = idx % outWidth;
+    int rem = idx / outWidth;
+    int oy = rem % outHeight;
+    rem /= outHeight;
+    int oc = rem % outChannels;
+    int n = rem / outChannels;
+    int group = oc / outPerGroup;
+    int ocg = oc - group * outPerGroup;
+    float sum = hasBias ? bias[oc] : 0.0f;
+    for (int icg = 0; icg < inPerGroup; ++icg) {
+        int ic = group * inPerGroup + icg;
+        for (int ky = 0; ky < kernelH; ++ky) {
+            int yNumerator = oy + padH - ky * dilationH;
+            if (yNumerator % strideH != 0) {
+                continue;
+            }
+            int iy = yNumerator / strideH;
+            if (iy < 0 || iy >= inHeight) {
+                continue;
+            }
+            for (int kx = 0; kx < kernelW; ++kx) {
+                int xNumerator = ox + padW - kx * dilationW;
+                if (xNumerator % strideW != 0) {
+                    continue;
+                }
+                int ix = xNumerator / strideW;
+                if (ix < 0 || ix >= inWidth) {
+                    continue;
+                }
+                int inputIdx = ((n * inChannels + ic) * inHeight + iy) * inWidth + ix;
+                int weightIdx = ((ic * outPerGroup + ocg) * kernelH + ky) * kernelW + kx;
+                sum += input[inputIdx] * weight[weightIdx];
+            }
+        }
+    }
+    out[idx] = sum;
 }
 `
 
@@ -980,6 +1115,8 @@ type deviceRuntime struct {
 	matMulScratch      map[string]deviceScratchBuffer
 	quantizeKernel     *auxKernel
 	gdnKernel          *auxKernel
+	conv2DKernel       *auxKernel
+	conv2DTransKernel  *auxKernel
 	mseLossKernel      *auxKernel
 	scalarAddKernel    *auxKernel
 	rdLossKernel       *auxKernel
@@ -1043,6 +1180,10 @@ func (rt *deviceRuntime) close() {
 	rt.quantizeKernel = nil
 	rt.destroyAuxKernel(rt.gdnKernel)
 	rt.gdnKernel = nil
+	rt.destroyAuxKernel(rt.conv2DKernel)
+	rt.conv2DKernel = nil
+	rt.destroyAuxKernel(rt.conv2DTransKernel)
+	rt.conv2DTransKernel = nil
 	rt.destroyAuxKernel(rt.mseLossKernel)
 	rt.mseLossKernel = nil
 	rt.destroyAuxKernel(rt.scalarAddKernel)
@@ -1485,6 +1626,36 @@ func (rt *deviceRuntime) ensureGDNKernel() (*auxKernel, error) {
 	return kernel, nil
 }
 
+func (rt *deviceRuntime) ensureConv2DKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.conv2DKernel != nil {
+		return rt.conv2DKernel, nil
+	}
+	kernel, err := rt.compileAuxKernel(convKernelSource, "manta_conv2d_forward")
+	if err != nil {
+		return nil, err
+	}
+	rt.conv2DKernel = kernel
+	return kernel, nil
+}
+
+func (rt *deviceRuntime) ensureConv2DTransposeKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.conv2DTransKernel != nil {
+		return rt.conv2DTransKernel, nil
+	}
+	kernel, err := rt.compileAuxKernel(convKernelSource, "manta_conv2d_transpose_forward")
+	if err != nil {
+		return nil, err
+	}
+	rt.conv2DTransKernel = kernel
+	return kernel, nil
+}
+
 func (rt *deviceRuntime) ensureMSELossKernel() (*auxKernel, error) {
 	if rt == nil {
 		return nil, fmt.Errorf("cuda runtime is not initialized")
@@ -1616,6 +1787,108 @@ func (rt *deviceRuntime) runGDNStep(inputs []*backend.Tensor, outputType mantaar
 			"op":               op,
 		},
 	}, nil
+}
+
+func (rt *deviceRuntime) runConv2DStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaConv2DConfig) (backend.StepDispatchResult, error) {
+	if rt == nil || rt.ptr == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if len(inputs) < 2 || inputs[0] == nil || inputs[1] == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda conv2d expects input and weight")
+	}
+	kernel, err := rt.ensureConv2DKernel()
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	outShape := []int{cfg.batches, cfg.outChannels, cfg.outHeight, cfg.outWidth}
+	outputElements := cfg.batches * cfg.outChannels * cfg.outHeight * cfg.outWidth
+	if outputElements == 0 {
+		return cudaConvStepResult(outputType, "__builtin_cuda_conv2d", "conv2d", outShape, nil, cfgMetadata(cfg)), nil
+	}
+	inputBuf, err := rt.uploadFloat32(inputs[0].F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(inputBuf)
+	weightBuf, err := rt.uploadFloat32(inputs[1].F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(weightBuf)
+	var biasBuf C.CUdeviceptr
+	if cfg.hasBias {
+		biasBuf, err = rt.uploadFloat32(inputs[2].F32[:cfg.outChannels])
+		if err != nil {
+			return backend.StepDispatchResult{}, err
+		}
+		defer rt.freeBuffer(biasBuf)
+	}
+	outBuf, err := rt.allocFloat32(outputElements)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(outBuf)
+	block := uint(128)
+	grid := uint((outputElements + int(block) - 1) / int(block))
+	if err := rt.launchConv2D(kernel, grid, block, inputBuf, weightBuf, biasBuf, outBuf, outputElements, cfg); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	outHost := make([]float32, outputElements)
+	if err := rt.downloadFloat32(outHost, outBuf); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	return cudaConvStepResult(outputType, "__builtin_cuda_conv2d", "conv2d", outShape, outHost, cfgMetadata(cfg)), nil
+}
+
+func (rt *deviceRuntime) runConv2DTransposeStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaConv2DTransposeConfig) (backend.StepDispatchResult, error) {
+	if rt == nil || rt.ptr == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if len(inputs) < 2 || inputs[0] == nil || inputs[1] == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda conv2d_transpose expects input and weight")
+	}
+	kernel, err := rt.ensureConv2DTransposeKernel()
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	outShape := []int{cfg.batches, cfg.outChannels, cfg.outHeight, cfg.outWidth}
+	outputElements := cfg.batches * cfg.outChannels * cfg.outHeight * cfg.outWidth
+	if outputElements == 0 {
+		return cudaConvStepResult(outputType, "__builtin_cuda_conv2d_transpose", "conv2d_transpose", outShape, nil, cfgTransposeMetadata(cfg)), nil
+	}
+	inputBuf, err := rt.uploadFloat32(inputs[0].F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(inputBuf)
+	weightBuf, err := rt.uploadFloat32(inputs[1].F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(weightBuf)
+	var biasBuf C.CUdeviceptr
+	if cfg.hasBias {
+		biasBuf, err = rt.uploadFloat32(inputs[2].F32[:cfg.outChannels])
+		if err != nil {
+			return backend.StepDispatchResult{}, err
+		}
+		defer rt.freeBuffer(biasBuf)
+	}
+	outBuf, err := rt.allocFloat32(outputElements)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(outBuf)
+	block := uint(128)
+	grid := uint((outputElements + int(block) - 1) / int(block))
+	if err := rt.launchConv2DTranspose(kernel, grid, block, inputBuf, weightBuf, biasBuf, outBuf, outputElements, cfg); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	outHost := make([]float32, outputElements)
+	if err := rt.downloadFloat32(outHost, outBuf); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	return cudaConvStepResult(outputType, "__builtin_cuda_conv2d_transpose", "conv2d_transpose", outShape, outHost, cfgTransposeMetadata(cfg)), nil
 }
 
 func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
@@ -1901,6 +2174,92 @@ func (rt *deviceRuntime) launchGDN(kernel *auxKernel, grid, block uint, input, b
 	}
 	var errStr *C.char
 	if C.mantaCudaLaunchGDN(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), input, beta, gamma, out0, C.int(elements), C.int(channels), C.int(height), C.int(width), C.int(inverse), &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchConv2D(kernel *auxKernel, grid, block uint, input, weight, bias, out0 C.CUdeviceptr, elements int, cfg cudaConv2DConfig) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda conv2d kernel is not initialized")
+	}
+	hasBias := 0
+	if cfg.hasBias {
+		hasBias = 1
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchConv2D(
+		rt.ptr,
+		kernel.ptr,
+		C.uint(grid),
+		C.uint(block),
+		input,
+		weight,
+		bias,
+		out0,
+		C.int(elements),
+		C.int(cfg.inChannels),
+		C.int(cfg.inHeight),
+		C.int(cfg.inWidth),
+		C.int(cfg.outChannels),
+		C.int(cfg.outHeight),
+		C.int(cfg.outWidth),
+		C.int(cfg.inPerGroup),
+		C.int(cfg.outPerGroup),
+		C.int(cfg.kernelH),
+		C.int(cfg.kernelW),
+		C.int(cfg.strideH),
+		C.int(cfg.strideW),
+		C.int(cfg.padH),
+		C.int(cfg.padW),
+		C.int(cfg.dilationH),
+		C.int(cfg.dilationW),
+		C.int(hasBias),
+		&errStr,
+	) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchConv2DTranspose(kernel *auxKernel, grid, block uint, input, weight, bias, out0 C.CUdeviceptr, elements int, cfg cudaConv2DTransposeConfig) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda conv2d_transpose kernel is not initialized")
+	}
+	hasBias := 0
+	if cfg.hasBias {
+		hasBias = 1
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchConv2DTranspose(
+		rt.ptr,
+		kernel.ptr,
+		C.uint(grid),
+		C.uint(block),
+		input,
+		weight,
+		bias,
+		out0,
+		C.int(elements),
+		C.int(cfg.inChannels),
+		C.int(cfg.inHeight),
+		C.int(cfg.inWidth),
+		C.int(cfg.outChannels),
+		C.int(cfg.outHeight),
+		C.int(cfg.outWidth),
+		C.int(cfg.inPerGroup),
+		C.int(cfg.outPerGroup),
+		C.int(cfg.kernelH),
+		C.int(cfg.kernelW),
+		C.int(cfg.strideH),
+		C.int(cfg.strideW),
+		C.int(cfg.padH),
+		C.int(cfg.padW),
+		C.int(cfg.dilationH),
+		C.int(cfg.dilationW),
+		C.int(hasBias),
+		&errStr,
+	) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -2978,6 +3337,53 @@ func reductionLaunchConfig(elements int) (grid, block uint) {
 		blocks = cudaMaxReductionBlocks
 	}
 	return uint(blocks), cudaReductionBlockSize
+}
+
+func cudaConvStepResult(outputType mantaartifact.ValueType, variant, op string, shape []int, data []float32, extra map[string]any) backend.StepDispatchResult {
+	metadata := map[string]any{
+		"dispatch_mode":    "backend_step",
+		"device_execution": true,
+		"execution_mode":   "cuda_device",
+		"launch_api":       "cuda_driver",
+		"launch_compiler":  "nvrtc",
+		"op":               op,
+	}
+	for key, value := range extra {
+		metadata[key] = value
+	}
+	return backend.StepDispatchResult{
+		Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, shape, data)},
+		VariantEntry: variant,
+		Metadata:     metadata,
+	}
+}
+
+func cfgMetadata(cfg cudaConv2DConfig) map[string]any {
+	return map[string]any{
+		"groups":     cfg.groups,
+		"stride_h":   cfg.strideH,
+		"stride_w":   cfg.strideW,
+		"pad_h":      cfg.padH,
+		"pad_w":      cfg.padW,
+		"dilation_h": cfg.dilationH,
+		"dilation_w": cfg.dilationW,
+		"has_bias":   cfg.hasBias,
+	}
+}
+
+func cfgTransposeMetadata(cfg cudaConv2DTransposeConfig) map[string]any {
+	return map[string]any{
+		"groups":           cfg.groups,
+		"stride_h":         cfg.strideH,
+		"stride_w":         cfg.strideW,
+		"pad_h":            cfg.padH,
+		"pad_w":            cfg.padW,
+		"dilation_h":       cfg.dilationH,
+		"dilation_w":       cfg.dilationW,
+		"output_padding_h": cfg.outPadH,
+		"output_padding_w": cfg.outPadW,
+		"has_bias":         cfg.hasBias,
+	}
 }
 
 func cudaScalarStepResult(outputType mantaartifact.ValueType, variant, op, launchAPI string, value float32) backend.StepDispatchResult {

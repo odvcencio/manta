@@ -40,6 +40,14 @@ func (rt *deviceRuntime) runGDNStep(inputs []*backend.Tensor, outputType mantaar
 	return backend.StepDispatchResult{}, nil
 }
 
+func (rt *deviceRuntime) runConv2DStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaConv2DConfig) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+
+func (rt *deviceRuntime) runConv2DTransposeStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaConv2DTransposeConfig) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+
 func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }

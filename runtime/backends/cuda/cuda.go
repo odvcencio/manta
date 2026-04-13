@@ -175,6 +175,32 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
+	case mantaartifact.StepConv2D:
+		if e.device == nil {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		cfg, ok := planBuiltinConv2D(step, inputs)
+		if !ok {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		result, err := e.device.runConv2DStep(inputs, outputType, cfg)
+		if err != nil {
+			return backend.StepDispatchResult{}, false, err
+		}
+		return result, true, nil
+	case mantaartifact.StepConv2DTrans:
+		if e.device == nil {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		cfg, ok := planBuiltinConv2DTranspose(step, inputs)
+		if !ok {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		result, err := e.device.runConv2DTransposeStep(inputs, outputType, cfg)
+		if err != nil {
+			return backend.StepDispatchResult{}, false, err
+		}
+		return result, true, nil
 	case mantaartifact.StepGDN, mantaartifact.StepIGDN:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
@@ -281,6 +307,170 @@ func supportsBuiltinGDN(inputs []*backend.Tensor) bool {
 		return false
 	}
 	return true
+}
+
+type cudaConv2DConfig struct {
+	batches     int
+	inChannels  int
+	inHeight    int
+	inWidth     int
+	outChannels int
+	outHeight   int
+	outWidth    int
+	inPerGroup  int
+	outPerGroup int
+	kernelH     int
+	kernelW     int
+	groups      int
+	strideH     int
+	strideW     int
+	padH        int
+	padW        int
+	dilationH   int
+	dilationW   int
+	hasBias     bool
+}
+
+type cudaConv2DTransposeConfig struct {
+	batches     int
+	inChannels  int
+	inHeight    int
+	inWidth     int
+	outChannels int
+	outHeight   int
+	outWidth    int
+	outPerGroup int
+	inPerGroup  int
+	kernelH     int
+	kernelW     int
+	groups      int
+	strideH     int
+	strideW     int
+	padH        int
+	padW        int
+	dilationH   int
+	dilationW   int
+	outPadH     int
+	outPadW     int
+	hasBias     bool
+}
+
+func planBuiltinConv2D(step mantaartifact.Step, inputs []*backend.Tensor) (cudaConv2DConfig, bool) {
+	if len(inputs) < 2 || len(inputs) > 3 || inputs[0] == nil || inputs[1] == nil {
+		return cudaConv2DConfig{}, false
+	}
+	input, weight := inputs[0], inputs[1]
+	if len(input.Shape) != 4 || len(weight.Shape) != 4 || len(input.F32) != input.Elements() || len(weight.F32) != weight.Elements() {
+		return cudaConv2DConfig{}, false
+	}
+	n, inC, inH, inW := input.Shape[0], input.Shape[1], input.Shape[2], input.Shape[3]
+	outC, inPerGroup, kH, kW := weight.Shape[0], weight.Shape[1], weight.Shape[2], weight.Shape[3]
+	groups := stepAttrInt(step.Attributes, "groups", 1)
+	if groups <= 0 || inPerGroup*groups != inC || outC%groups != 0 {
+		return cudaConv2DConfig{}, false
+	}
+	strideH := stepAttrInt(step.Attributes, "stride_h", stepAttrInt(step.Attributes, "stride", 1))
+	strideW := stepAttrInt(step.Attributes, "stride_w", stepAttrInt(step.Attributes, "stride", 1))
+	padH := stepAttrInt(step.Attributes, "pad_h", stepAttrInt(step.Attributes, "padding", 0))
+	padW := stepAttrInt(step.Attributes, "pad_w", stepAttrInt(step.Attributes, "padding", 0))
+	dilationH := stepAttrInt(step.Attributes, "dilation_h", stepAttrInt(step.Attributes, "dilation", 1))
+	dilationW := stepAttrInt(step.Attributes, "dilation_w", stepAttrInt(step.Attributes, "dilation", 1))
+	if strideH <= 0 || strideW <= 0 || dilationH <= 0 || dilationW <= 0 {
+		return cudaConv2DConfig{}, false
+	}
+	outH := (inH+2*padH-dilationH*(kH-1)-1)/strideH + 1
+	outW := (inW+2*padW-dilationW*(kW-1)-1)/strideW + 1
+	if outH <= 0 || outW <= 0 {
+		return cudaConv2DConfig{}, false
+	}
+	hasBias := len(inputs) == 3 && inputs[2] != nil
+	if hasBias && len(inputs[2].F32) < outC {
+		return cudaConv2DConfig{}, false
+	}
+	return cudaConv2DConfig{
+		batches:     n,
+		inChannels:  inC,
+		inHeight:    inH,
+		inWidth:     inW,
+		outChannels: outC,
+		outHeight:   outH,
+		outWidth:    outW,
+		inPerGroup:  inPerGroup,
+		outPerGroup: outC / groups,
+		kernelH:     kH,
+		kernelW:     kW,
+		groups:      groups,
+		strideH:     strideH,
+		strideW:     strideW,
+		padH:        padH,
+		padW:        padW,
+		dilationH:   dilationH,
+		dilationW:   dilationW,
+		hasBias:     hasBias,
+	}, true
+}
+
+func planBuiltinConv2DTranspose(step mantaartifact.Step, inputs []*backend.Tensor) (cudaConv2DTransposeConfig, bool) {
+	if len(inputs) < 2 || len(inputs) > 3 || inputs[0] == nil || inputs[1] == nil {
+		return cudaConv2DTransposeConfig{}, false
+	}
+	input, weight := inputs[0], inputs[1]
+	if len(input.Shape) != 4 || len(weight.Shape) != 4 || len(input.F32) != input.Elements() || len(weight.F32) != weight.Elements() {
+		return cudaConv2DTransposeConfig{}, false
+	}
+	n, inC, inH, inW := input.Shape[0], input.Shape[1], input.Shape[2], input.Shape[3]
+	weightInC, outPerGroup, kH, kW := weight.Shape[0], weight.Shape[1], weight.Shape[2], weight.Shape[3]
+	if weightInC != inC {
+		return cudaConv2DTransposeConfig{}, false
+	}
+	groups := stepAttrInt(step.Attributes, "groups", 1)
+	if groups <= 0 || inC%groups != 0 {
+		return cudaConv2DTransposeConfig{}, false
+	}
+	strideH := stepAttrInt(step.Attributes, "stride_h", stepAttrInt(step.Attributes, "stride", 1))
+	strideW := stepAttrInt(step.Attributes, "stride_w", stepAttrInt(step.Attributes, "stride", 1))
+	padH := stepAttrInt(step.Attributes, "pad_h", stepAttrInt(step.Attributes, "padding", 0))
+	padW := stepAttrInt(step.Attributes, "pad_w", stepAttrInt(step.Attributes, "padding", 0))
+	dilationH := stepAttrInt(step.Attributes, "dilation_h", stepAttrInt(step.Attributes, "dilation", 1))
+	dilationW := stepAttrInt(step.Attributes, "dilation_w", stepAttrInt(step.Attributes, "dilation", 1))
+	outPadH := stepAttrInt(step.Attributes, "output_padding_h", stepAttrInt(step.Attributes, "output_padding", 0))
+	outPadW := stepAttrInt(step.Attributes, "output_padding_w", stepAttrInt(step.Attributes, "output_padding", 0))
+	if strideH <= 0 || strideW <= 0 || dilationH <= 0 || dilationW <= 0 {
+		return cudaConv2DTransposeConfig{}, false
+	}
+	outC := outPerGroup * groups
+	outH := (inH-1)*strideH - 2*padH + dilationH*(kH-1) + outPadH + 1
+	outW := (inW-1)*strideW - 2*padW + dilationW*(kW-1) + outPadW + 1
+	if outH <= 0 || outW <= 0 {
+		return cudaConv2DTransposeConfig{}, false
+	}
+	hasBias := len(inputs) == 3 && inputs[2] != nil
+	if hasBias && len(inputs[2].F32) < outC {
+		return cudaConv2DTransposeConfig{}, false
+	}
+	return cudaConv2DTransposeConfig{
+		batches:     n,
+		inChannels:  inC,
+		inHeight:    inH,
+		inWidth:     inW,
+		outChannels: outC,
+		outHeight:   outH,
+		outWidth:    outW,
+		outPerGroup: outPerGroup,
+		inPerGroup:  inC / groups,
+		kernelH:     kH,
+		kernelW:     kW,
+		groups:      groups,
+		strideH:     strideH,
+		strideW:     strideW,
+		padH:        padH,
+		padW:        padW,
+		dilationH:   dilationH,
+		dilationW:   dilationW,
+		outPadH:     outPadH,
+		outPadW:     outPadW,
+		hasBias:     hasBias,
+	}, true
 }
 
 func supportsBuiltinMSELoss(inputs []*backend.Tensor) bool {

@@ -35,6 +35,37 @@ func TestSupportsBuiltinGDNRequiresNCHWAndParameters(t *testing.T) {
 	}
 }
 
+func TestPlansBuiltinConvImageSteps(t *testing.T) {
+	input := backend.NewTensorF32([]int{1, 2, 4, 4}, make([]float32, 32))
+	weight := backend.NewTensorF32([]int{3, 2, 3, 3}, make([]float32, 54))
+	bias := backend.NewTensorF32([]int{3}, []float32{0.1, 0.2, 0.3})
+	step := mantaartifact.Step{Kind: mantaartifact.StepConv2D, Attributes: map[string]string{"stride": "2", "padding": "1"}}
+	cfg, ok := planBuiltinConv2D(step, []*backend.Tensor{input, weight, bias})
+	if !ok {
+		t.Fatal("valid NCHW/OIHW conv2d should be supported")
+	}
+	if cfg.outHeight != 2 || cfg.outWidth != 2 || !cfg.hasBias {
+		t.Fatalf("unexpected conv2d config: %+v", cfg)
+	}
+	if _, ok := planBuiltinConv2D(step, []*backend.Tensor{input, backend.NewTensorF32([]int{3, 1, 3, 3}, make([]float32, 27)), bias}); ok {
+		t.Fatal("conv2d input/weight channel mismatch should not be supported")
+	}
+
+	transWeight := backend.NewTensorF32([]int{2, 3, 3, 3}, make([]float32, 54))
+	transBias := backend.NewTensorF32([]int{3}, []float32{0.1, 0.2, 0.3})
+	transStep := mantaartifact.Step{Kind: mantaartifact.StepConv2DTrans, Attributes: map[string]string{"stride": "2", "padding": "1", "output_padding": "1"}}
+	transCfg, ok := planBuiltinConv2DTranspose(transStep, []*backend.Tensor{input, transWeight, transBias})
+	if !ok {
+		t.Fatal("valid NCHW/IOHW conv2d_transpose should be supported")
+	}
+	if transCfg.outHeight != 8 || transCfg.outWidth != 8 || transCfg.outChannels != 3 || !transCfg.hasBias {
+		t.Fatalf("unexpected conv2d_transpose config: %+v", transCfg)
+	}
+	if _, ok := planBuiltinConv2DTranspose(transStep, []*backend.Tensor{input, backend.NewTensorF32([]int{3, 3, 3, 3}, make([]float32, 81)), transBias}); ok {
+		t.Fatal("conv2d_transpose input/weight channel mismatch should not be supported")
+	}
+}
+
 func TestSupportsBuiltinMirageScalarLossSteps(t *testing.T) {
 	lhs := backend.NewTensorF32([]int{2, 2}, []float32{1, 2, 3, 4})
 	rhs := backend.NewTensorF32([]int{2, 2}, []float32{1, 1, 1, 1})
