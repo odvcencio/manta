@@ -59,6 +59,9 @@ type candidateConfig struct {
 	MantaBin            string
 	Artifact            string
 	SealedArtifact      string
+	TrainMetricsJSON    string
+	FinalEvalMetricsJSON string
+	HardEvalMetricsJSON  string
 }
 
 func usage() {
@@ -284,7 +287,7 @@ func writeArtifactSHA256(cfg candidateConfig) error {
 			continue
 		}
 		let name = entry.Name()
-		if strings.HasSuffix(name, ".mll") || strings.HasSuffix(name, ".jsonl") || strings.HasSuffix(name, ".txt") {
+		if strings.HasSuffix(name, ".mll") || strings.HasSuffix(name, ".jsonl") || strings.HasSuffix(name, ".txt") || strings.HasSuffix(name, ".metrics.json") {
 			paths = append(paths, filepath.Join(cfg.RunDir, name))
 		}
 	}
@@ -388,6 +391,9 @@ func writeManifest(cfg candidateConfig, status string) error {
     "artifact": %s,
     "sealed_artifact": %s,
     "sealed_sha256": %s,
+    "train_metrics_json": %s,
+    "final_eval_metrics_json": %s,
+    "hard_eval_metrics_json": %s,
     "logs": %s,
     "datasets_sha256": %s,
     "artifacts_sha256": %s
@@ -427,6 +433,9 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonString(cfg.Artifact),
 		jsonString(cfg.SealedArtifact),
 		jsonString(sealedSHA),
+		jsonString(cfg.TrainMetricsJSON),
+		jsonString(cfg.FinalEvalMetricsJSON),
+		jsonString(cfg.HardEvalMetricsJSON),
 		jsonString(cfg.LogDir),
 		jsonString(cfg.DatasetSHAFile),
 		jsonString(cfg.ArtifactSHAFile),
@@ -591,6 +600,9 @@ func prepareConfig(root string) (candidateConfig, error) {
 		MantaBin:            filepath.Join(runDir, "bin", "manta"),
 		Artifact:            filepath.Join(runDir, modelName+".mll"),
 		SealedArtifact:      filepath.Join(runDir, modelName+".sealed.mll"),
+		TrainMetricsJSON:    filepath.Join(runDir, "train.metrics.json"),
+		FinalEvalMetricsJSON: filepath.Join(runDir, "final-eval.metrics.json"),
+		HardEvalMetricsJSON:  filepath.Join(runDir, "hard-eval.metrics.json"),
 	}
 
 	err = os.WriteFile(cfg.DatasetSHAFile, []byte(""), 0o644)
@@ -802,6 +814,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	if cfg.TrainMode == "corpus" {
 		args := append([]string{"train-corpus"}, common...)
 		args = append(args,
+			"--metrics-json", cfg.TrainMetricsJSON,
 			"--vocab-size", cfg.VocabSize,
 			"--min-freq", cfg.MinFreq,
 			"--min-chars", cfg.MinChars,
@@ -830,6 +843,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		guard err == nil else return cfg, err
 	} else {
 		args := append([]string{"train-embed"}, common...)
+		args = append(args, "--metrics-json", cfg.TrainMetricsJSON)
 		if trainTokenizer != "" {
 			args = append(args, "--tokenizer", trainTokenizer)
 		} else if tokenJSONLForRun {
@@ -853,7 +867,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 
 	evalCandidate, err := copyPackageForEval(cfg, "validation")
 	guard err == nil else return cfg, err
-	evalArgs := []string{"train-embed", "--eval-only"}
+	evalArgs := []string{"train-embed", "--eval-only", "--metrics-json", cfg.FinalEvalMetricsJSON}
 	if evalTokenizer != "" {
 		evalArgs = append(evalArgs, "--tokenizer", evalTokenizer)
 	} else if tokenJSONLForRun {
@@ -869,7 +883,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	if hardEvalJSONLForRun != "" {
 		hardCandidate, err := copyPackageForEval(cfg, "hard")
 		guard err == nil else return cfg, err
-		hardArgs := []string{"train-embed", "--eval-only"}
+		hardArgs := []string{"train-embed", "--eval-only", "--metrics-json", cfg.HardEvalMetricsJSON}
 		if evalTokenizer != "" {
 			hardArgs = append(hardArgs, "--tokenizer", evalTokenizer)
 		} else if tokenJSONLForRun {

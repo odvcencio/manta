@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -439,6 +440,77 @@ func TestRunTrainEmbedEvalOnlyUsesSingleTextPairDataset(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("eval-only text output missing %q\noutput:\n%s", want, output)
 		}
+	}
+}
+
+func TestRunTrainEmbedEvalOnlyWritesMetricsJSON(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	evalPath := filepath.Join(t.TempDir(), "eval.jsonl")
+	examples := []mantaruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
+	}
+	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
+		t.Fatalf("write eval dataset: %v", err)
+	}
+	metricsPath := filepath.Join(t.TempDir(), "metrics.json")
+
+	output := captureRunOutput(t, []string{"train-embed", "--eval-only", "--metrics-json", metricsPath, path, evalPath})
+	if !strings.Contains(output, "metrics: "+metricsPath) {
+		t.Fatalf("eval-only output missing metrics path %q\noutput:\n%s", metricsPath, output)
+	}
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics json: %v", err)
+	}
+	var got struct {
+		Schema  string `json:"schema"`
+		Command string `json:"command"`
+		Mode    string `json:"mode"`
+		Summary struct {
+			StepsRun int `json:"steps_run"`
+		} `json:"summary"`
+		FinalEval *struct {
+			PairCount int     `json:"pair_count"`
+			Top1      float32 `json:"top1_accuracy"`
+			MRR       float32 `json:"mean_reciprocal_rank"`
+		} `json:"final_eval"`
+		Workload struct {
+			ActualEvalPairs int64 `json:"actual_eval_pairs"`
+		} `json:"workload"`
+		Throughput struct {
+			EvalPairsPerSecond float64 `json:"eval_pairs_per_second"`
+		} `json:"throughput"`
+		ProfileDelta struct {
+			OptimizerUpdates int64 `json:"optimizer_updates"`
+		} `json:"profile_delta"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("decode metrics json: %v\n%s", err, string(data))
+	}
+	if got.Schema != "manta.embedding_train_metrics.v1" || got.Command != "train-embed" || got.Mode != "eval" {
+		t.Fatalf("unexpected metrics identity: %+v", got)
+	}
+	if got.Summary.StepsRun != 0 {
+		t.Fatalf("steps_run = %d, want 0", got.Summary.StepsRun)
+	}
+	if got.FinalEval == nil || got.FinalEval.PairCount != 4 {
+		t.Fatalf("final_eval = %+v, want pair_count=4", got.FinalEval)
+	}
+	if got.FinalEval.Top1 <= 0 || got.FinalEval.MRR <= 0 {
+		t.Fatalf("expected ranking metrics in JSON, got final_eval %+v", *got.FinalEval)
+	}
+	if got.Workload.ActualEvalPairs != 4 {
+		t.Fatalf("actual_eval_pairs = %d, want 4", got.Workload.ActualEvalPairs)
+	}
+	if got.Throughput.EvalPairsPerSecond <= 0 {
+		t.Fatalf("eval_pairs_per_second = %f, want positive", got.Throughput.EvalPairsPerSecond)
+	}
+	if got.ProfileDelta.OptimizerUpdates != 0 {
+		t.Fatalf("optimizer_updates = %d, want 0", got.ProfileDelta.OptimizerUpdates)
 	}
 }
 

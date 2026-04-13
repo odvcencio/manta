@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -721,6 +722,7 @@ func runTrainEmbed(args []string) error {
 	var noTokenizer bool
 	var planOnly bool
 	var evalOnly bool
+	var metricsJSONPath string
 	var learningRate float64
 	var contrastiveLoss string
 	var temperature float64
@@ -740,6 +742,7 @@ func runTrainEmbed(args []string) error {
 	fs.BoolVar(&noTokenizer, "no-tokenizer", false, "disable sibling tokenizer discovery and treat JSONL as tokenized")
 	fs.BoolVar(&planOnly, "plan-only", false, "print planned workload and exit without training")
 	fs.BoolVar(&evalOnly, "eval-only", false, "evaluate the package without running optimizer steps")
+	fs.StringVar(&metricsJSONPath, "metrics-json", "", "write machine-readable run metrics JSON to this path")
 	fs.Float64Var(&learningRate, "lr", 0, "override package learning rate for this run")
 	fs.StringVar(&contrastiveLoss, "contrastive-loss", "", "override package contrastive loss: pair_mse or infonce")
 	fs.Float64Var(&temperature, "temperature", 0, "override package contrastive softmax temperature")
@@ -856,6 +859,16 @@ func runTrainEmbed(args []string) error {
 	)
 	fmt.Printf("checkpoint: %s\n", paths.CheckpointPath)
 	fmt.Printf("profile: %s\n", paths.TrainProfilePath)
+	if metricsJSONPath != "" {
+		mode := "train"
+		if evalOnly {
+			mode = "eval"
+		}
+		if err := writeTrainMetricsJSON(metricsJSONPath, "train-embed", mode, path, tokenizerPath, summary, paths, nil); err != nil {
+			return err
+		}
+		fmt.Printf("metrics: %s\n", metricsJSONPath)
+	}
 	return nil
 }
 
@@ -1058,6 +1071,7 @@ func runTrainCorpus(args []string) error {
 	var minChars int
 	var maxPairs int
 	var evalPairs int
+	var metricsJSONPath string
 	var learningRate float64
 	var contrastiveLoss string
 	var temperature float64
@@ -1081,6 +1095,7 @@ func runTrainCorpus(args []string) error {
 	fs.IntVar(&minChars, "min-chars", 8, "minimum normalized text length for mined segments")
 	fs.IntVar(&maxPairs, "max-pairs", 0, "maximum number of positive training pairs to keep (0 = all)")
 	fs.IntVar(&evalPairs, "eval-pairs", 32, "number of positive pairs to hold out for eval")
+	fs.StringVar(&metricsJSONPath, "metrics-json", "", "write machine-readable run metrics JSON to this path")
 	fs.Float64Var(&learningRate, "lr", 0, "override package learning rate for this run")
 	fs.StringVar(&contrastiveLoss, "contrastive-loss", "", "override package contrastive loss: pair_mse or infonce")
 	fs.Float64Var(&temperature, "temperature", 0, "override package contrastive softmax temperature")
@@ -1171,7 +1186,340 @@ func runTrainCorpus(args []string) error {
 	)
 	fmt.Printf("checkpoint: %s\n", paths.Package.CheckpointPath)
 	fmt.Printf("profile: %s\n", paths.Package.TrainProfilePath)
+	if metricsJSONPath != "" {
+		extra := map[string]string{
+			"tokenizer":   paths.TokenizerPath,
+			"train_pairs": paths.TrainPairsPath,
+		}
+		if paths.EvalPairsPath != "" {
+			extra["eval_pairs"] = paths.EvalPairsPath
+		}
+		if err := writeTrainMetricsJSON(metricsJSONPath, "train-corpus", "train", path, paths.TokenizerPath, summary, paths.Package, extra); err != nil {
+			return err
+		}
+		fmt.Printf("metrics: %s\n", metricsJSONPath)
+	}
 	return nil
+}
+
+type trainMetricsJSON struct {
+	Schema       string                `json:"schema"`
+	Command      string                `json:"command"`
+	Mode         string                `json:"mode"`
+	Artifact     string                `json:"artifact"`
+	Tokenizer    string                `json:"tokenizer,omitempty"`
+	Summary      trainRunSummaryJSON   `json:"summary"`
+	Config       trainRunConfigJSON    `json:"config"`
+	FinalTrain   trainBatchMetricsJSON `json:"final_train"`
+	LastEval     *evalMetricsJSON      `json:"last_eval,omitempty"`
+	BestEval     *evalMetricsJSON      `json:"best_eval,omitempty"`
+	FinalEval    *evalMetricsJSON      `json:"final_eval,omitempty"`
+	Workload     trainWorkloadJSON     `json:"workload"`
+	Throughput   trainThroughputJSON   `json:"throughput"`
+	Accelerators trainAcceleratorsJSON `json:"accelerators"`
+	ProfileDelta trainProfileDeltaJSON `json:"profile_delta"`
+	Package      trainPackagePathsJSON `json:"package"`
+	Artifacts    map[string]string     `json:"artifacts,omitempty"`
+}
+
+type trainRunSummaryJSON struct {
+	EpochsCompleted int  `json:"epochs_completed"`
+	StepsCompleted  int  `json:"steps_completed"`
+	StepsRun        int  `json:"steps_run"`
+	BestEpoch       int  `json:"best_epoch"`
+	BestStep        int  `json:"best_step"`
+	RestoredBest    bool `json:"restored_best"`
+	StoppedEarly    bool `json:"stopped_early"`
+}
+
+type trainRunConfigJSON struct {
+	Epochs              int     `json:"epochs"`
+	BatchSize           int     `json:"batch_size"`
+	Shuffle             bool    `json:"shuffle"`
+	Seed                int64   `json:"seed"`
+	EvalEveryEpoch      int     `json:"eval_every_epoch"`
+	EvalEverySteps      int     `json:"eval_every_steps"`
+	Patience            int     `json:"patience"`
+	SelectMetric        string  `json:"select_metric"`
+	MinDelta            float32 `json:"min_delta"`
+	RestoreBest         bool    `json:"restore_best"`
+	LengthBucketBatches bool    `json:"length_bucket_batches"`
+	LearningRate        float32 `json:"learning_rate"`
+	ContrastiveLoss     string  `json:"contrastive_loss,omitempty"`
+	Temperature         float32 `json:"temperature"`
+	ProgressEverySteps  int     `json:"progress_every_steps"`
+	EvalOnly            bool    `json:"eval_only"`
+}
+
+type trainBatchMetricsJSON struct {
+	Loss         float32 `json:"loss"`
+	AverageScore float32 `json:"average_score"`
+	BatchSize    int     `json:"batch_size"`
+}
+
+type evalMetricsJSON struct {
+	Loss               float32 `json:"loss"`
+	AverageScore       float32 `json:"average_score"`
+	PositiveMeanScore  float32 `json:"positive_mean_score"`
+	NegativeMeanScore  float32 `json:"negative_mean_score"`
+	PairAccuracy       float32 `json:"pair_accuracy"`
+	ThresholdAccuracy  float32 `json:"threshold_accuracy"`
+	ScoreThreshold     float32 `json:"score_threshold"`
+	ROCAUC             float32 `json:"roc_auc"`
+	ScoreMargin        float32 `json:"score_margin"`
+	Top1Accuracy       float32 `json:"top1_accuracy"`
+	Top5Accuracy       float32 `json:"top5_accuracy"`
+	Top10Accuracy      float32 `json:"top10_accuracy"`
+	MeanReciprocalRank float32 `json:"mean_reciprocal_rank"`
+	MeanPositiveRank   float32 `json:"mean_positive_rank"`
+	PairCount          int     `json:"pair_count"`
+	PositiveCount      int     `json:"positive_count"`
+	NegativeCount      int     `json:"negative_count"`
+}
+
+type trainWorkloadJSON struct {
+	TrainMode            string `json:"train_mode"`
+	EvalMode             string `json:"eval_mode,omitempty"`
+	TrainExamples        int    `json:"train_examples"`
+	EvalExamples         int    `json:"eval_examples"`
+	BatchSize            int    `json:"batch_size"`
+	PlannedEpochs        int    `json:"planned_epochs"`
+	CompletedEpochs      int    `json:"completed_epochs"`
+	TrainBatchesPerEpoch int    `json:"train_batches_per_epoch"`
+	TrainPairsPerEpoch   int64  `json:"train_pairs_per_epoch"`
+	EvalPairsPerPass     int64  `json:"eval_pairs_per_pass"`
+	PlannedEvalPasses    int    `json:"planned_eval_passes"`
+	ActualEvalPasses     int    `json:"actual_eval_passes"`
+	PlannedTrainPairs    int64  `json:"planned_train_pairs"`
+	ActualTrainPairs     int64  `json:"actual_train_pairs"`
+	ActualTrainExamples  int64  `json:"actual_train_examples"`
+	PlannedEvalPairs     int64  `json:"planned_eval_pairs"`
+	ActualEvalPairs      int64  `json:"actual_eval_pairs"`
+	ActualEvalExamples   int64  `json:"actual_eval_examples"`
+	PlannedTotalPairs    int64  `json:"planned_total_pairs"`
+	ActualTotalPairs     int64  `json:"actual_total_pairs"`
+	ActualTotalExamples  int64  `json:"actual_total_examples"`
+}
+
+type trainThroughputJSON struct {
+	ElapsedSeconds          float64 `json:"elapsed_seconds"`
+	TrainSeconds            float64 `json:"train_seconds"`
+	EvalSeconds             float64 `json:"eval_seconds"`
+	ExamplesPerSecond       float64 `json:"examples_per_second"`
+	PairsPerSecond          float64 `json:"pairs_per_second"`
+	TrainExamplesPerSecond  float64 `json:"train_examples_per_second"`
+	TrainPairsPerSecond     float64 `json:"train_pairs_per_second"`
+	EvalExamplesPerSecond   float64 `json:"eval_examples_per_second"`
+	EvalPairsPerSecond      float64 `json:"eval_pairs_per_second"`
+	OptimizerStepsPerSecond float64 `json:"optimizer_steps_per_second"`
+}
+
+type trainAcceleratorsJSON struct {
+	Forward     string `json:"forward"`
+	Optimizer   string `json:"optimizer"`
+	Activation  string `json:"activation"`
+	Contrastive string `json:"contrastive"`
+}
+
+type trainProfileDeltaJSON struct {
+	MatMulBindCalls     int64   `json:"matmul_bind_calls"`
+	MatMulRuns          int64   `json:"matmul_runs"`
+	MatMulRunUploadMB   float64 `json:"matmul_run_upload_mb"`
+	MatMulRunDownloadMB float64 `json:"matmul_run_download_mb"`
+	OptimizerUpdates    int64   `json:"optimizer_updates"`
+	OptimizerSyncs      int64   `json:"optimizer_syncs"`
+	ActivationCalls     int64   `json:"activation_calls"`
+	ContrastiveCalls    int64   `json:"contrastive_calls"`
+}
+
+type trainPackagePathsJSON struct {
+	Artifact     string `json:"artifact"`
+	Checkpoint   string `json:"checkpoint"`
+	TrainProfile string `json:"train_profile"`
+	Manifest     string `json:"manifest,omitempty"`
+	Weights      string `json:"weights,omitempty"`
+	MemoryPlan   string `json:"memory_plan,omitempty"`
+	Package      string `json:"package,omitempty"`
+}
+
+func writeTrainMetricsJSON(outputPath, command, mode, artifactPath, tokenizerPath string, summary mantaruntime.EmbeddingTrainRunSummary, paths mantaruntime.EmbeddingTrainPackagePaths, extraArtifacts map[string]string) error {
+	payload := trainMetricsPayload(command, mode, artifactPath, tokenizerPath, summary, paths, extraArtifacts)
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode metrics JSON: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+		return fmt.Errorf("write metrics JSON %q: %w", outputPath, err)
+	}
+	return nil
+}
+
+func trainMetricsPayload(command, mode, artifactPath, tokenizerPath string, summary mantaruntime.EmbeddingTrainRunSummary, paths mantaruntime.EmbeddingTrainPackagePaths, extraArtifacts map[string]string) trainMetricsJSON {
+	return trainMetricsJSON{
+		Schema:       "manta.embedding_train_metrics.v1",
+		Command:      command,
+		Mode:         mode,
+		Artifact:     artifactPath,
+		Tokenizer:    tokenizerPath,
+		Summary:      trainRunSummaryPayload(summary),
+		Config:       trainRunConfigPayload(summary.Config),
+		FinalTrain:   trainBatchMetricsPayload(summary.FinalTrain),
+		LastEval:     evalMetricsPayload(summary.LastEval),
+		BestEval:     evalMetricsPayload(summary.BestEval),
+		FinalEval:    evalMetricsPayload(summary.FinalEval),
+		Workload:     trainWorkloadPayload(summary.Workload),
+		Throughput:   trainThroughputPayload(summary),
+		Accelerators: trainAcceleratorsPayload(summary.EndProfile),
+		ProfileDelta: trainProfileDeltaPayload(summary.DeltaProfile),
+		Package:      trainPackagePathsPayload(paths),
+		Artifacts:    extraArtifacts,
+	}
+}
+
+func trainRunSummaryPayload(summary mantaruntime.EmbeddingTrainRunSummary) trainRunSummaryJSON {
+	return trainRunSummaryJSON{
+		EpochsCompleted: summary.EpochsCompleted,
+		StepsCompleted:  summary.StepsCompleted,
+		StepsRun:        summary.StepsRun,
+		BestEpoch:       summary.BestEpoch,
+		BestStep:        summary.BestStep,
+		RestoredBest:    summary.RestoredBest,
+		StoppedEarly:    summary.StoppedEarly,
+	}
+}
+
+func trainRunConfigPayload(cfg mantaruntime.EmbeddingTrainRunConfig) trainRunConfigJSON {
+	return trainRunConfigJSON{
+		Epochs:              cfg.Epochs,
+		BatchSize:           cfg.BatchSize,
+		Shuffle:             cfg.Shuffle,
+		Seed:                cfg.Seed,
+		EvalEveryEpoch:      cfg.EvalEveryEpoch,
+		EvalEverySteps:      cfg.EvalEverySteps,
+		Patience:            cfg.EarlyStoppingPatience,
+		SelectMetric:        cfg.SelectMetric,
+		MinDelta:            cfg.MinDelta,
+		RestoreBest:         cfg.RestoreBest,
+		LengthBucketBatches: cfg.LengthBucketBatches,
+		LearningRate:        cfg.LearningRate,
+		ContrastiveLoss:     cfg.ContrastiveLoss,
+		Temperature:         cfg.Temperature,
+		ProgressEverySteps:  cfg.ProgressEverySteps,
+		EvalOnly:            cfg.EvalOnly,
+	}
+}
+
+func trainBatchMetricsPayload(metrics mantaruntime.EmbeddingTrainMetrics) trainBatchMetricsJSON {
+	return trainBatchMetricsJSON{
+		Loss:         metrics.Loss,
+		AverageScore: metrics.AverageScore,
+		BatchSize:    metrics.BatchSize,
+	}
+}
+
+func evalMetricsPayload(metrics *mantaruntime.EmbeddingEvalMetrics) *evalMetricsJSON {
+	if metrics == nil {
+		return nil
+	}
+	return &evalMetricsJSON{
+		Loss:               metrics.Loss,
+		AverageScore:       metrics.AverageScore,
+		PositiveMeanScore:  metrics.PositiveMeanScore,
+		NegativeMeanScore:  metrics.NegativeMeanScore,
+		PairAccuracy:       metrics.PairAccuracy,
+		ThresholdAccuracy:  metrics.ThresholdAccuracy,
+		ScoreThreshold:     metrics.ScoreThreshold,
+		ROCAUC:             metrics.ROCAUC,
+		ScoreMargin:        metrics.ScoreMargin,
+		Top1Accuracy:       metrics.Top1Accuracy,
+		Top5Accuracy:       metrics.Top5Accuracy,
+		Top10Accuracy:      metrics.Top10Accuracy,
+		MeanReciprocalRank: metrics.MeanReciprocalRank,
+		MeanPositiveRank:   metrics.MeanPositiveRank,
+		PairCount:          metrics.PairCount,
+		PositiveCount:      metrics.PositiveCount,
+		NegativeCount:      metrics.NegativeCount,
+	}
+}
+
+func trainWorkloadPayload(workload mantaruntime.EmbeddingTrainWorkload) trainWorkloadJSON {
+	return trainWorkloadJSON{
+		TrainMode:            workload.TrainMode,
+		EvalMode:             workload.EvalMode,
+		TrainExamples:        workload.TrainExamples,
+		EvalExamples:         workload.EvalExamples,
+		BatchSize:            workload.BatchSize,
+		PlannedEpochs:        workload.PlannedEpochs,
+		CompletedEpochs:      workload.CompletedEpochs,
+		TrainBatchesPerEpoch: workload.TrainBatchesPerEpoch,
+		TrainPairsPerEpoch:   workload.TrainPairsPerEpoch,
+		EvalPairsPerPass:     workload.EvalPairsPerPass,
+		PlannedEvalPasses:    workload.PlannedEvalPasses,
+		ActualEvalPasses:     workload.ActualEvalPasses,
+		PlannedTrainPairs:    workload.PlannedTrainPairs,
+		ActualTrainPairs:     workload.ActualTrainPairs,
+		ActualTrainExamples:  workload.ActualTrainExamples,
+		PlannedEvalPairs:     workload.PlannedEvalPairs,
+		ActualEvalPairs:      workload.ActualEvalPairs,
+		ActualEvalExamples:   workload.ActualEvalExamples,
+		PlannedTotalPairs:    workload.PlannedTotalPairs,
+		ActualTotalPairs:     workload.ActualTotalPairs,
+		ActualTotalExamples:  workload.ActualTotalExamples,
+	}
+}
+
+func trainThroughputPayload(summary mantaruntime.EmbeddingTrainRunSummary) trainThroughputJSON {
+	return trainThroughputJSON{
+		ElapsedSeconds:          summary.Elapsed.Seconds(),
+		TrainSeconds:            summary.TrainDuration.Seconds(),
+		EvalSeconds:             summary.EvalDuration.Seconds(),
+		ExamplesPerSecond:       itemsPerSecond(summary.Workload.ActualTotalExamples, summary.Elapsed),
+		PairsPerSecond:          pairsPerSecond(summary.Workload.ActualTotalPairs, summary.Elapsed),
+		TrainExamplesPerSecond:  itemsPerSecond(summary.Workload.ActualTrainExamples, summary.TrainDuration),
+		TrainPairsPerSecond:     pairsPerSecond(summary.Workload.ActualTrainPairs, summary.TrainDuration),
+		EvalExamplesPerSecond:   itemsPerSecond(summary.Workload.ActualEvalExamples, summary.EvalDuration),
+		EvalPairsPerSecond:      pairsPerSecond(summary.Workload.ActualEvalPairs, summary.EvalDuration),
+		OptimizerStepsPerSecond: itemsPerSecond(int64(summary.StepsRun), summary.TrainDuration),
+	}
+}
+
+func trainAcceleratorsPayload(profile mantaruntime.EmbeddingTrainProfile) trainAcceleratorsJSON {
+	return trainAcceleratorsJSON{
+		Forward:     displayTrainBackend(profile.ForwardBackend),
+		Optimizer:   displayTrainBackend(profile.OptimizerBackend),
+		Activation:  displayTrainBackend(profile.ActivationBackend),
+		Contrastive: displayTrainBackend(profile.ContrastiveBackend),
+	}
+}
+
+func trainProfileDeltaPayload(profile mantaruntime.EmbeddingTrainProfile) trainProfileDeltaJSON {
+	return trainProfileDeltaJSON{
+		MatMulBindCalls:     profile.ForwardResidency.MatMul.BindCalls,
+		MatMulRuns:          profile.ForwardResidency.MatMul.RunCalls,
+		MatMulRunUploadMB:   bytesToMiB(profile.ForwardResidency.MatMul.RunUploadedBytes),
+		MatMulRunDownloadMB: bytesToMiB(profile.ForwardResidency.MatMul.RunDownloadedBytes),
+		OptimizerUpdates:    profile.Optimizer.UpdateCalls,
+		OptimizerSyncs:      profile.Optimizer.SyncCalls,
+		ActivationCalls:     profile.Activation.GELUBackwardCalls + profile.Activation.SoftmaxBackwardCalls + profile.Activation.LayerNormBackwardCalls,
+		ContrastiveCalls:    profile.Contrastive.RunCalls,
+	}
+}
+
+func trainPackagePathsPayload(paths mantaruntime.EmbeddingTrainPackagePaths) trainPackagePathsJSON {
+	return trainPackagePathsJSON{
+		Artifact:     paths.ArtifactPath,
+		Checkpoint:   paths.CheckpointPath,
+		TrainProfile: paths.TrainProfilePath,
+		Manifest:     paths.EmbeddingManifestPath,
+		Weights:      paths.WeightFilePath,
+		MemoryPlan:   paths.MemoryPlanPath,
+		Package:      paths.PackageManifestPath,
+	}
+}
+
+func bytesToMiB(bytes int64) float64 {
+	return float64(bytes) / (1024 * 1024)
 }
 
 func runTrainTokenizer(args []string) error {
