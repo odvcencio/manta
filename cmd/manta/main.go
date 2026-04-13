@@ -96,6 +96,8 @@ func run(args []string) error {
 		return runCompile(args[1:])
 	case "run":
 		return runArtifact(args[1:])
+	case "embed-text":
+		return runEmbedText(args[1:])
 	case "demo":
 		return runDemo(args[1:])
 	case "inspect":
@@ -254,6 +256,36 @@ func runArtifact(args []string) error {
 	fmt.Printf("outputs: %s\n", strings.Join(sortedValueKeys(result.Outputs), ", "))
 	fmt.Printf("output summary: %s\n", strings.Join(outputSummaries(result.Outputs), "; "))
 	fmt.Printf("trace steps: %d\n", len(result.Trace))
+	return nil
+}
+
+func runEmbedText(args []string) error {
+	if len(args) < 2 || args[0] == "" {
+		return fmt.Errorf("usage: manta embed-text <artifact.mll> <text...>")
+	}
+	path := args[0]
+	text := strings.Join(args[1:], " ")
+	rt := mantaruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), path)
+	if err != nil {
+		return err
+	}
+	tokens, _, err := model.TokenizeText(text)
+	if err != nil {
+		return err
+	}
+	result, err := model.EmbedText(context.Background(), text)
+	if err != nil {
+		return err
+	}
+	if result.Embeddings == nil {
+		return fmt.Errorf("embedding output tensor is nil")
+	}
+	manifest := model.Manifest()
+	fmt.Printf("loaded embedding %q for backend %q\n", displayManifestName(manifest.Name), model.Backend())
+	fmt.Printf("tokens: %d\n", len(tokens))
+	fmt.Printf("output: %s\n", displayManifestName(result.OutputName))
+	fmt.Printf("embedding: %s%v\n", result.Embeddings.DType, result.Embeddings.Shape)
 	return nil
 }
 
@@ -1231,6 +1263,7 @@ func printUsage() {
 	fmt.Println("  manta compile <source.manta> [output.mll]")
 	fmt.Println("  manta inspect <artifact.mll>")
 	fmt.Println("  manta export-mll <artifact.mll> [output.mll]")
+	fmt.Println("  manta embed-text <artifact.mll> <text...>")
 	fmt.Println("  manta init-model [flags] <artifact.mll>")
 	fmt.Println("  manta init-train [flags] <artifact.mll>")
 	fmt.Println("  manta rename-embed --name <model-name> <input.mll> <output.mll>")
@@ -1244,6 +1277,7 @@ func printUsage() {
 	fmt.Println("compile lowers a Manta source file into an .mll artifact.")
 	fmt.Println("inspect summarizes an artifact and verifies its sibling package manifest when present.")
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Manta metadata in XMTA.")
+	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("init-model creates the Manta-owned default quantized embedding training package.")
 	fmt.Println("init-train creates a native training package next to an artifact.")
 	fmt.Println("rename-embed rewrites a training package under a new embedding model identity.")

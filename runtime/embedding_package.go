@@ -60,6 +60,11 @@ func (rt *Runtime) tryLoadSealedEmbeddingPackage(ctx context.Context, path strin
 	if err != nil {
 		return nil, true, err
 	}
+	if pkg.Tokenizer != nil {
+		if err := model.attachTokenizer(*pkg.Tokenizer); err != nil {
+			return nil, true, err
+		}
+	}
 	return model, true, nil
 }
 
@@ -112,5 +117,30 @@ func (rt *Runtime) LoadEmbeddingPackageWithPaths(ctx context.Context, paths Embe
 			opts = append(opts, WithMemoryPlan(plan))
 		}
 	}
-	return rt.LoadEmbedding(ctx, mod, manifest, opts...)
+	model, err := rt.LoadEmbedding(ctx, mod, manifest, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if tokenizerFile, ok, err := readOptionalTokenizerFile(paths.TokenizerPath); err != nil {
+		return nil, err
+	} else if ok {
+		if err := model.attachTokenizer(tokenizerFile); err != nil {
+			return nil, err
+		}
+	}
+	return model, nil
+}
+
+func readOptionalTokenizerFile(path string) (TokenizerFile, bool, error) {
+	if path == "" {
+		return TokenizerFile{}, false, nil
+	}
+	tokenizer, err := ReadTokenizerFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return TokenizerFile{}, false, nil
+		}
+		return TokenizerFile{}, false, err
+	}
+	return tokenizer, true, nil
 }

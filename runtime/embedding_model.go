@@ -46,8 +46,10 @@ type EmbeddingManifest struct {
 
 // EmbeddingModel is a manifest-backed embedding serving handle.
 type EmbeddingModel struct {
-	program  *Program
-	manifest EmbeddingManifest
+	program       *Program
+	manifest      EmbeddingManifest
+	tokenizerFile *TokenizerFile
+	tokenizer     *BPETokenizer
 }
 
 // ReadEmbeddingManifestFile decodes an authored MLL embedding manifest.
@@ -308,6 +310,58 @@ func (m *EmbeddingModel) MemoryPlan() *MemoryPlan {
 	return m.program.MemoryPlan()
 }
 
+// HasTokenizer reports whether this model can tokenize text directly.
+func (m *EmbeddingModel) HasTokenizer() bool {
+	return m != nil && m.tokenizer != nil
+}
+
+// TokenizerFile returns the tokenizer metadata attached to this model.
+func (m *EmbeddingModel) TokenizerFile() (TokenizerFile, bool) {
+	if m == nil || m.tokenizerFile == nil {
+		return TokenizerFile{}, false
+	}
+	return cloneTokenizerFile(*m.tokenizerFile), true
+}
+
+// TokenizeText tokenizes text with the tokenizer packaged beside or inside the model.
+func (m *EmbeddingModel) TokenizeText(text string) ([]int32, []int32, error) {
+	if m == nil {
+		return nil, nil, fmt.Errorf("embedding model is not loaded")
+	}
+	if m.tokenizer == nil {
+		return nil, nil, fmt.Errorf("embedding model has no tokenizer")
+	}
+	return m.tokenizer.Encode(text)
+}
+
+// EmbedText tokenizes text and executes the pooled embedding entrypoint.
+func (m *EmbeddingModel) EmbedText(ctx context.Context, text string) (EmbeddingResult, error) {
+	tokens, _, err := m.TokenizeText(text)
+	if err != nil {
+		return EmbeddingResult{}, err
+	}
+	return m.Embed(ctx, tokens)
+}
+
+// EmbedTextBatch tokenizes text rows and executes the batched pooled embedding entrypoint.
+func (m *EmbeddingModel) EmbedTextBatch(ctx context.Context, texts []string) (EmbeddingResult, error) {
+	if m == nil {
+		return EmbeddingResult{}, fmt.Errorf("embedding model is not loaded")
+	}
+	if len(texts) == 0 {
+		return EmbeddingResult{}, fmt.Errorf("texts are empty")
+	}
+	batches := make([][]int32, 0, len(texts))
+	for i, text := range texts {
+		tokens, _, err := m.TokenizeText(text)
+		if err != nil {
+			return EmbeddingResult{}, fmt.Errorf("text %d: %w", i, err)
+		}
+		batches = append(batches, tokens)
+	}
+	return m.EmbedBatch(ctx, batches)
+}
+
 // Embed executes the pooled embedding entrypoint for one token sequence.
 func (m *EmbeddingModel) Embed(ctx context.Context, tokens []int32) (EmbeddingResult, error) {
 	if m == nil || m.program == nil {
@@ -495,6 +549,27 @@ func (m *EmbeddingModel) validateTokenSequence(tokens []int32) error {
 		}
 	}
 	return nil
+}
+
+func (m *EmbeddingModel) attachTokenizer(file TokenizerFile) error {
+	if m == nil {
+		return fmt.Errorf("embedding model is not loaded")
+	}
+	tokenizer, err := NewBPETokenizer(file, m.manifest.Tokenizer)
+	if err != nil {
+		return err
+	}
+	cloned := cloneTokenizerFile(file)
+	m.tokenizerFile = &cloned
+	m.tokenizer = tokenizer
+	return nil
+}
+
+func cloneTokenizerFile(in TokenizerFile) TokenizerFile {
+	out := in
+	out.Tokens = append([]string(nil), in.Tokens...)
+	out.Merges = append([]TokenizerMerge(nil), in.Merges...)
+	return out
 }
 
 func (m *EmbeddingModel) validateEmbeddingResult(result EmbeddingResult, batched bool) error {

@@ -28,6 +28,12 @@ func TestExportPackageToMLLWritesSealedContainer(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("initialize training package: %v", err)
 	}
+	if err := tinyEmbeddingTokenizerFile().WriteFile(DefaultTokenizerPath(path)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	if _, _, err := RebuildSiblingPackageManifest(path); err != nil {
+		t.Fatalf("rebuild package manifest with tokenizer: %v", err)
+	}
 
 	outPath, err := ExportPackageToMLL(path, "")
 	if err != nil {
@@ -110,6 +116,9 @@ func TestExportPackageToMLLWritesSealedContainer(t *testing.T) {
 	if _, ok := meta.JSONFiles["package_manifest"]; !ok {
 		t.Fatalf("expected package_manifest JSON metadata")
 	}
+	if _, ok := meta.JSONFiles["tokenizer"]; !ok {
+		t.Fatalf("expected tokenizer JSON metadata")
+	}
 
 	rt := New(cuda.New(), metal.New())
 	model, err := rt.LoadEmbeddingPackage(context.Background(), outPath)
@@ -121,6 +130,16 @@ func TestExportPackageToMLLWritesSealedContainer(t *testing.T) {
 	}
 	if model.MemoryPlan() == nil {
 		t.Fatal("expected sealed package to restore memory plan")
+	}
+	if !model.HasTokenizer() {
+		t.Fatal("expected sealed embedding package to restore tokenizer")
+	}
+	tokens, mask, err := model.TokenizeText("a")
+	if err != nil {
+		t.Fatalf("tokenize sealed text: %v", err)
+	}
+	if len(tokens) != 1 || tokens[0] != 2 || len(mask) != 1 || mask[0] != 1 {
+		t.Fatalf("sealed text tokens = %v mask = %v, want [2] [1]", tokens, mask)
 	}
 }
 

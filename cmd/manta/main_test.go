@@ -181,6 +181,48 @@ func TestRunInitModelTrainCorpusExportFlow(t *testing.T) {
 	}
 }
 
+func TestRunEmbedTextLoadsSealedMLLTokenizer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manta-embed-v1.mll")
+	if err := run([]string{
+		"init-model",
+		"--vocab-size", "8",
+		"--max-seq", "8",
+		"--embedding-dim", "4",
+		"--hidden-dim", "8",
+		path,
+	}); err != nil {
+		t.Fatalf("run init-model: %v", err)
+	}
+	tokenizer := mantaruntime.TokenizerFile{
+		Version:      mantaruntime.TokenizerFileVersion,
+		Tokens:       []string{"[PAD]", "[UNK]", "a"},
+		UnknownToken: "[UNK]",
+	}
+	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	if _, _, err := mantaruntime.RebuildSiblingPackageManifest(path); err != nil {
+		t.Fatalf("rebuild package manifest: %v", err)
+	}
+	sealedPath := filepath.Join(dir, "manta-embed-v1.sealed.mll")
+	if err := run([]string{"export-mll", path, sealedPath}); err != nil {
+		t.Fatalf("run export-mll: %v", err)
+	}
+
+	output := captureRunOutput(t, []string{"embed-text", sealedPath, "a"})
+	for _, want := range []string{
+		"loaded embedding \"manta-embed-v1\"",
+		"tokens: 1",
+		"output: result",
+		"embedding: f16[4]",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("embed-text output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
 func TestRunTrainEmbedFitsContrastivePackage(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {

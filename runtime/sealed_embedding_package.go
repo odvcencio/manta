@@ -14,6 +14,7 @@ import (
 type SealedEmbeddingPackage struct {
 	Module     *mantaartifact.Module
 	Manifest   EmbeddingManifest
+	Tokenizer  *TokenizerFile
 	Weights    WeightFile
 	MemoryPlan *MemoryPlan
 }
@@ -30,7 +31,16 @@ func (rt *Runtime) LoadSealedEmbeddingPackage(ctx context.Context, path string, 
 	if pkg.MemoryPlan != nil {
 		loadOpts = append(loadOpts, WithMemoryPlan(*pkg.MemoryPlan))
 	}
-	return rt.LoadEmbedding(ctx, pkg.Module, pkg.Manifest, loadOpts...)
+	model, err := rt.LoadEmbedding(ctx, pkg.Module, pkg.Manifest, loadOpts...)
+	if err != nil {
+		return nil, err
+	}
+	if pkg.Tokenizer != nil {
+		if err := model.attachTokenizer(*pkg.Tokenizer); err != nil {
+			return nil, err
+		}
+	}
+	return model, nil
 }
 
 // ReadSealedEmbeddingPackage decodes a single-file sealed MLL embedding package.
@@ -103,9 +113,21 @@ func sealedEmbeddingPackageFromReader(reader *mll.Reader, meta mantaartifact.MLL
 		}
 		plan = &decoded
 	}
+	var tokenizer *TokenizerFile
+	if body, ok := meta.JSONFiles["tokenizer"]; ok {
+		var decoded TokenizerFile
+		if err := json.Unmarshal(body, &decoded); err != nil {
+			return SealedEmbeddingPackage{}, false, fmt.Errorf("decode embedded tokenizer: %w", err)
+		}
+		if err := decoded.Validate(); err != nil {
+			return SealedEmbeddingPackage{}, false, err
+		}
+		tokenizer = &decoded
+	}
 	return SealedEmbeddingPackage{
 		Module:     mod,
 		Manifest:   manifest,
+		Tokenizer:  tokenizer,
 		Weights:    weights,
 		MemoryPlan: plan,
 	}, true, nil

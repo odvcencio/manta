@@ -234,6 +234,9 @@ func TestLoadEmbeddingPackageUsesSiblingWeights(t *testing.T) {
 	if err := weights.WriteFile(DefaultWeightFilePath(artifactPath)); err != nil {
 		t.Fatalf("write weights: %v", err)
 	}
+	if err := tinyEmbeddingTokenizerFile().WriteFile(DefaultTokenizerPath(artifactPath)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
 	plan := NewMemoryPlan(bundle.Artifact, weights.Weights, MemoryPlanOptions{
 		DeviceBudgetBytes: 6,
 		SharedHostWeights: true,
@@ -254,6 +257,32 @@ func TestLoadEmbeddingPackageUsesSiblingWeights(t *testing.T) {
 	assertTensorClose(t, result.Embeddings, []int{2}, []float32{
 		0.8535534, 0.35355338,
 	})
+	if !model.HasTokenizer() {
+		t.Fatal("expected packaged embedding model to load sibling tokenizer")
+	}
+	tokens, mask, err := model.TokenizeText("a")
+	if err != nil {
+		t.Fatalf("tokenize text: %v", err)
+	}
+	if !reflect.DeepEqual(tokens, []int32{2}) || !reflect.DeepEqual(mask, []int32{1}) {
+		t.Fatalf("tokenized text = tokens %v mask %v, want [2] [1]", tokens, mask)
+	}
+	textResult, err := model.EmbedText(context.Background(), "a")
+	if err != nil {
+		t.Fatalf("embed text: %v", err)
+	}
+	tokenResult, err := model.Embed(context.Background(), []int32{2})
+	if err != nil {
+		t.Fatalf("embed tokenized text: %v", err)
+	}
+	assertTensorClose(t, textResult.Embeddings, tokenResult.Embeddings.Shape, tokenResult.Embeddings.F32)
+	batchTextResult, err := model.EmbedTextBatch(context.Background(), []string{"a", "a"})
+	if err != nil {
+		t.Fatalf("embed text batch: %v", err)
+	}
+	if !reflect.DeepEqual(batchTextResult.Embeddings.Shape, []int{2, 2}) {
+		t.Fatalf("text batch embedding shape = %v, want [2 2]", batchTextResult.Embeddings.Shape)
+	}
 	if got := model.MemoryPlan(); got == nil {
 		t.Fatal("expected memory plan on loaded embedding package")
 	} else if got.ModuleName != bundle.Artifact.Name {
@@ -343,6 +372,14 @@ func tinyEmbeddingManifest() EmbeddingManifest {
 			MaxSequence: 2,
 			PadID:       0,
 		},
+	}
+}
+
+func tinyEmbeddingTokenizerFile() TokenizerFile {
+	return TokenizerFile{
+		Version:      TokenizerFileVersion,
+		Tokens:       []string{"[PAD]", "[UNK]", "a"},
+		UnknownToken: "[UNK]",
 	}
 }
 
