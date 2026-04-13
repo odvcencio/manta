@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -240,6 +239,49 @@ func runCmd(cfg candidateConfig, label string, logName string, name string, args
 	return nil
 }
 
+func hasAnyEnv(names []string) bool {
+	for name in names {
+		if os.Getenv(name) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasQualityGateThresholds() bool {
+	return hasAnyEnv([]string{
+		"MANTA_MIN_MRR",
+		"MANTA_MIN_TOP1",
+		"MANTA_MIN_TOP5",
+		"MANTA_MIN_TOP10",
+		"MANTA_MAX_MEAN_RANK",
+		"MANTA_MIN_AUC",
+		"MANTA_MIN_THRESHOLD_ACCURACY",
+		"MANTA_MIN_SCORE_MARGIN",
+		"MANTA_MIN_PAIR_ACCURACY",
+		"MANTA_MAX_LOSS",
+	})
+}
+
+func hasEfficiencyGateThresholds() bool {
+	return hasAnyEnv([]string{
+		"MANTA_MIN_TRAIN_PAIRS_PER_SEC",
+		"MANTA_MIN_OPTIMIZER_STEPS_PER_SEC",
+		"MANTA_MAX_MATMUL_RUNS",
+		"MANTA_MAX_MATMUL_RUN_UPLOAD_MB",
+		"MANTA_MAX_MATMUL_RUN_DOWNLOAD_MB",
+	})
+}
+
+func runMetricsGate(cfg candidateConfig, label string, logName string, scope string, metricsPath string) error {
+	args := []string{"gate-train-metrics", "--scope", scope}
+	if cfg.ThresholdsEnv != "" {
+		args = append(args, "--thresholds", cfg.ThresholdsEnv)
+	}
+	args = append(args, metricsPath)
+	return runCmd(cfg, label, logName, cfg.MantaBin, args)
+}
+
 func renderCommand(name string, args []string) string {
 	parts := []string{shellQuote(name)}
 	for arg in args {
@@ -442,132 +484,6 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonString(cfg.ArtifactSHAFile),
 	)
 	return os.WriteFile(filepath.Join(cfg.RunDir, "manifest.json"), []byte(body), 0o644)
-}
-
-func metricValue(metricsPath string, metric string) (float64, error) {
-	data, err := os.ReadFile(metricsPath)
-	guard err == nil else return 0, err
-	var payload map[string]any
-	err = json.Unmarshal(data, &payload)
-	guard err == nil else return 0, fmt.Errorf("parse metrics JSON %s: %w", metricsPath, err)
-	value, ok := metricJSONValue(payload, metric)
-	guard ok else return 0, fmt.Errorf("metric %s not found in %s", metric, metricsPath)
-	return value, nil
-}
-
-func metricJSONValue(payload map[string]any, metric string) (float64, bool) {
-	switch metric {
-	case "train_pairs/s":
-		return nestedFloat(payload, "throughput", "train_pairs_per_second")
-	case "optimizer_steps/s":
-		return nestedFloat(payload, "throughput", "optimizer_steps_per_second")
-	case "matmul_runs":
-		return nestedFloat(payload, "profile_delta", "matmul_runs")
-	case "matmul_run_upload_mb":
-		return nestedFloat(payload, "profile_delta", "matmul_run_upload_mb")
-	case "matmul_run_download_mb":
-		return nestedFloat(payload, "profile_delta", "matmul_run_download_mb")
-	case "optimizer_updates":
-		return nestedFloat(payload, "profile_delta", "optimizer_updates")
-	case "mrr":
-		return nestedFloat(payload, "final_eval", "mean_reciprocal_rank")
-	case "top1":
-		return nestedFloat(payload, "final_eval", "top1_accuracy")
-	case "top5":
-		return nestedFloat(payload, "final_eval", "top5_accuracy")
-	case "top10":
-		return nestedFloat(payload, "final_eval", "top10_accuracy")
-	case "accuracy":
-		return nestedFloat(payload, "final_eval", "pair_accuracy")
-	case "threshold_accuracy":
-		return nestedFloat(payload, "final_eval", "threshold_accuracy")
-	case "auc":
-		return nestedFloat(payload, "final_eval", "roc_auc")
-	case "margin":
-		return nestedFloat(payload, "final_eval", "score_margin")
-	case "loss":
-		return nestedFloat(payload, "final_eval", "loss")
-	case "mean_rank":
-		return nestedFloat(payload, "final_eval", "mean_positive_rank")
-	default:
-		return 0, false
-	}
-}
-
-func nestedFloat(payload map[string]any, objectKey string, valueKey string) (float64, bool) {
-	rawObject, ok := payload[objectKey]
-	if !ok {
-		return 0, false
-	}
-	object, ok := rawObject.(map[string]any)
-	if !ok {
-		return 0, false
-	}
-	rawValue, ok := object[valueKey]
-	if !ok {
-		return 0, false
-	}
-	return numberValue(rawValue)
-}
-
-func numberValue(value any) (float64, bool) {
-	switch v := value.(type) {
-	case float64:
-		return v, true
-	case int:
-		return float64(v), true
-	case int64:
-		return float64(v), true
-	default:
-		return 0, false
-	}
-}
-
-func requireMetricMin(metricsPath string, metric string, minimum string) error {
-	if minimum == "" {
-		return nil
-	}
-	got, err := metricValue(metricsPath, metric)
-	guard err == nil else return err
-	var minFloat float64
-	_, err = fmt.Sscanf(minimum, "%f", &minFloat)
-	guard err == nil else return err
-	guard got >= minFloat else return fmt.Errorf("metric %s=%g is below required minimum %s", metric, got, minimum)
-	return nil
-}
-
-func requireMetricMax(metricsPath string, metric string, maximum string) error {
-	if maximum == "" {
-		return nil
-	}
-	got, err := metricValue(metricsPath, metric)
-	guard err == nil else return err
-	var maxFloat float64
-	_, err = fmt.Sscanf(maximum, "%f", &maxFloat)
-	guard err == nil else return err
-	guard got <= maxFloat else return fmt.Errorf("metric %s=%g is above allowed maximum %s", metric, got, maximum)
-	return nil
-}
-
-func requireEvalOnlyZeroUpdates(metricsPath string) error {
-	updates, err := metricValue(metricsPath, "optimizer_updates")
-	guard err == nil else return err
-	guard updates == 0 else return fmt.Errorf("eval-only run updated optimizer state: optimizer_updates=%g in %s", updates, metricsPath)
-	return nil
-}
-
-func requireTrainingEfficiencyGates(metricsPath string) error {
-	err := requireMetricMin(metricsPath, "train_pairs/s", os.Getenv("MANTA_MIN_TRAIN_PAIRS_PER_SEC"))
-	guard err == nil else return err
-	err = requireMetricMin(metricsPath, "optimizer_steps/s", os.Getenv("MANTA_MIN_OPTIMIZER_STEPS_PER_SEC"))
-	guard err == nil else return err
-	err = requireMetricMax(metricsPath, "matmul_runs", os.Getenv("MANTA_MAX_MATMUL_RUNS"))
-	guard err == nil else return err
-	err = requireMetricMax(metricsPath, "matmul_run_upload_mb", os.Getenv("MANTA_MAX_MATMUL_RUN_UPLOAD_MB"))
-	guard err == nil else return err
-	err = requireMetricMax(metricsPath, "matmul_run_download_mb", os.Getenv("MANTA_MAX_MATMUL_RUN_DOWNLOAD_MB"))
-	guard err == nil else return err
-	return nil
 }
 
 func copyFile(src string, dst string) error {
@@ -921,8 +837,10 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		err = runCmd(cfg, "Train "+cfg.ModelName+" from prepared JSONL", "train.log", cfg.MantaBin, args)
 		guard err == nil else return cfg, err
 	}
-	err = requireTrainingEfficiencyGates(cfg.TrainMetricsJSON)
-	guard err == nil else return cfg, err
+	if hasEfficiencyGateThresholds() {
+		err = runMetricsGate(cfg, "Training efficiency metrics gate", "train-efficiency-gate.log", "efficiency", cfg.TrainMetricsJSON)
+		guard err == nil else return cfg, err
+	}
 
 	evalCandidate, err := copyPackageForEval(cfg, "validation")
 	guard err == nil else return cfg, err
@@ -935,7 +853,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	evalArgs = append(evalArgs, evalCandidate, evalJSONLForRun)
 	err = runCmd(cfg, "Final validation eval-only", "final-eval.log", cfg.MantaBin, evalArgs)
 	guard err == nil else return cfg, err
-	err = requireEvalOnlyZeroUpdates(cfg.FinalEvalMetricsJSON)
+	err = runMetricsGate(cfg, "Final validation eval-only metrics gate", "final-eval-gate.log", "eval-only", cfg.FinalEvalMetricsJSON)
 	guard err == nil else return cfg, err
 
 	gateMetrics := cfg.FinalEvalMetricsJSON
@@ -952,30 +870,14 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		err = runCmd(cfg, "Hard holdout eval-only", "hard-eval.log", cfg.MantaBin, hardArgs)
 		guard err == nil else return cfg, err
 		gateMetrics = cfg.HardEvalMetricsJSON
-		err = requireEvalOnlyZeroUpdates(gateMetrics)
+		err = runMetricsGate(cfg, "Hard holdout eval-only metrics gate", "hard-eval-gate.log", "eval-only", gateMetrics)
 		guard err == nil else return cfg, err
 	}
 
-	err = requireMetricMin(gateMetrics, "mrr", os.Getenv("MANTA_MIN_MRR"))
-	guard err == nil else return cfg, err
-	err = requireMetricMin(gateMetrics, "top1", os.Getenv("MANTA_MIN_TOP1"))
-	guard err == nil else return cfg, err
-	err = requireMetricMin(gateMetrics, "top5", os.Getenv("MANTA_MIN_TOP5"))
-	guard err == nil else return cfg, err
-	err = requireMetricMin(gateMetrics, "top10", os.Getenv("MANTA_MIN_TOP10"))
-	guard err == nil else return cfg, err
-	err = requireMetricMin(gateMetrics, "accuracy", os.Getenv("MANTA_MIN_PAIR_ACCURACY"))
-	guard err == nil else return cfg, err
-	err = requireMetricMin(gateMetrics, "threshold_accuracy", os.Getenv("MANTA_MIN_THRESHOLD_ACCURACY"))
-	guard err == nil else return cfg, err
-	err = requireMetricMin(gateMetrics, "auc", os.Getenv("MANTA_MIN_AUC"))
-	guard err == nil else return cfg, err
-	err = requireMetricMin(gateMetrics, "margin", os.Getenv("MANTA_MIN_SCORE_MARGIN"))
-	guard err == nil else return cfg, err
-	err = requireMetricMax(gateMetrics, "loss", os.Getenv("MANTA_MAX_LOSS"))
-	guard err == nil else return cfg, err
-	err = requireMetricMax(gateMetrics, "mean_rank", os.Getenv("MANTA_MAX_MEAN_RANK"))
-	guard err == nil else return cfg, err
+	if hasQualityGateThresholds() {
+		err = runMetricsGate(cfg, "Candidate quality metrics gate", "quality-gate.log", "quality", gateMetrics)
+		guard err == nil else return cfg, err
+	}
 
 	err = runCmd(cfg, "Inspect training package", "inspect-package.log", cfg.MantaBin, []string{"inspect", cfg.Artifact})
 	guard err == nil else return cfg, err

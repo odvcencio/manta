@@ -125,6 +125,8 @@ func run(args []string) error {
 		return runTrainCorpus(args[1:])
 	case "compare-train-metrics":
 		return runCompareTrainMetrics(args[1:])
+	case "gate-train-metrics":
+		return runGateTrainMetrics(args[1:])
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
@@ -1639,6 +1641,223 @@ func formatTrainMetricsReport(currentPath string, current trainMetricsJSON, base
 	return b.String()
 }
 
+type trainMetricThreshold struct {
+	Env    string
+	Metric string
+	Op     string
+	Scope  string
+}
+
+var trainMetricThresholds = []trainMetricThreshold{
+	{Env: "MANTA_MIN_MRR", Metric: "mrr", Op: ">=", Scope: "quality"},
+	{Env: "MANTA_MIN_TOP1", Metric: "top1", Op: ">=", Scope: "quality"},
+	{Env: "MANTA_MIN_TOP5", Metric: "top5", Op: ">=", Scope: "quality"},
+	{Env: "MANTA_MIN_TOP10", Metric: "top10", Op: ">=", Scope: "quality"},
+	{Env: "MANTA_MAX_MEAN_RANK", Metric: "mean_rank", Op: "<=", Scope: "quality"},
+	{Env: "MANTA_MIN_AUC", Metric: "auc", Op: ">=", Scope: "quality"},
+	{Env: "MANTA_MIN_THRESHOLD_ACCURACY", Metric: "threshold_accuracy", Op: ">=", Scope: "quality"},
+	{Env: "MANTA_MIN_SCORE_MARGIN", Metric: "margin", Op: ">=", Scope: "quality"},
+	{Env: "MANTA_MIN_PAIR_ACCURACY", Metric: "accuracy", Op: ">=", Scope: "quality"},
+	{Env: "MANTA_MAX_LOSS", Metric: "loss", Op: "<=", Scope: "quality"},
+	{Env: "MANTA_MIN_TRAIN_PAIRS_PER_SEC", Metric: "train_pairs/s", Op: ">=", Scope: "efficiency"},
+	{Env: "MANTA_MIN_OPTIMIZER_STEPS_PER_SEC", Metric: "optimizer_steps/s", Op: ">=", Scope: "efficiency"},
+	{Env: "MANTA_MAX_MATMUL_RUNS", Metric: "matmul_runs", Op: "<=", Scope: "efficiency"},
+	{Env: "MANTA_MAX_MATMUL_RUN_UPLOAD_MB", Metric: "matmul_run_upload_mb", Op: "<=", Scope: "efficiency"},
+	{Env: "MANTA_MAX_MATMUL_RUN_DOWNLOAD_MB", Metric: "matmul_run_download_mb", Op: "<=", Scope: "efficiency"},
+	{Env: "MANTA_MAX_OPTIMIZER_UPDATES", Metric: "optimizer_updates", Op: "<=", Scope: "eval-only"},
+}
+
+func runGateTrainMetrics(args []string) error {
+	fs := flag.NewFlagSet("gate-train-metrics", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var thresholdsPath string
+	var scope string
+	fs.StringVar(&thresholdsPath, "thresholds", "", "optional KEY=VALUE threshold env file")
+	fs.StringVar(&scope, "scope", "all", "gate scope: all, quality, efficiency, or eval-only")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || fs.Arg(0) == "" {
+		return fmt.Errorf("usage: manta gate-train-metrics [--thresholds thresholds.env] [--scope all|quality|efficiency|eval-only] <metrics.json>")
+	}
+	scope = strings.ToLower(scope)
+	if !validTrainMetricsGateScope(scope) {
+		return fmt.Errorf("unsupported gate scope %q", scope)
+	}
+	metricsPath := fs.Arg(0)
+	metrics, err := readTrainMetricsJSON(metricsPath)
+	if err != nil {
+		return err
+	}
+	thresholds, err := trainMetricThresholdValues(thresholdsPath)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("metrics: %s\n", metricsPath)
+	if thresholdsPath != "" {
+		fmt.Printf("thresholds: %s\n", thresholdsPath)
+	}
+	fmt.Printf("scope: %s\n", scope)
+	checked := 0
+	failed := 0
+	for _, threshold := range trainMetricThresholds {
+		if !trainMetricThresholdInScope(threshold.Scope, scope) {
+			continue
+		}
+		limitText := thresholds[threshold.Env]
+		if limitText == "" {
+			continue
+		}
+		limit, err := strconv.ParseFloat(limitText, 64)
+		if err != nil {
+			return fmt.Errorf("%s=%q is not numeric: %w", threshold.Env, limitText, err)
+		}
+		got, ok := trainMetricValue(metrics, threshold.Metric)
+		if !ok {
+			return fmt.Errorf("metric %s is unavailable in %s", threshold.Metric, metricsPath)
+		}
+		checked++
+		passed := trainMetricThresholdPassed(got, limit, threshold.Op)
+		status := "pass"
+		if !passed {
+			status = "fail"
+			failed++
+		}
+		fmt.Printf("%s: %s=%.6g %s %.6g (%s)\n", status, threshold.Metric, got, threshold.Op, limit, threshold.Env)
+	}
+	if scope == "eval-only" {
+		got, ok := trainMetricValue(metrics, "optimizer_updates")
+		if !ok {
+			return fmt.Errorf("metric optimizer_updates is unavailable in %s", metricsPath)
+		}
+		checked++
+		if got == 0 {
+			fmt.Printf("pass: optimizer_updates=%.6g == 0 (eval-only)\n", got)
+		} else {
+			fmt.Printf("fail: optimizer_updates=%.6g == 0 (eval-only)\n", got)
+			failed++
+		}
+	}
+	if checked == 0 {
+		return fmt.Errorf("no thresholds selected for scope %q", scope)
+	}
+	if failed > 0 {
+		fmt.Printf("gate: FAIL checks=%d failed=%d\n", checked, failed)
+		return fmt.Errorf("metrics gate failed")
+	}
+	fmt.Printf("gate: PASS checks=%d\n", checked)
+	return nil
+}
+
+func validTrainMetricsGateScope(scope string) bool {
+	switch scope {
+	case "all", "quality", "efficiency", "eval-only":
+		return true
+	default:
+		return false
+	}
+}
+
+func trainMetricThresholdInScope(thresholdScope, requestedScope string) bool {
+	switch requestedScope {
+	case "all":
+		return thresholdScope == "quality" || thresholdScope == "efficiency"
+	default:
+		return thresholdScope == requestedScope
+	}
+}
+
+func trainMetricThresholdValues(path string) (map[string]string, error) {
+	values := map[string]string{}
+	for _, env := range os.Environ() {
+		key, value, ok := strings.Cut(env, "=")
+		if ok && strings.HasPrefix(key, "MANTA_") {
+			values[key] = value
+		}
+	}
+	if path == "" {
+		return values, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	for i, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return nil, fmt.Errorf("%s:%d: expected KEY=VALUE", path, i+1)
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if !strings.HasPrefix(key, "MANTA_") {
+			return nil, fmt.Errorf("%s:%d: threshold key must start with MANTA_: %s", path, i+1, key)
+		}
+		if values[key] == "" {
+			values[key] = value
+		}
+	}
+	return values, nil
+}
+
+func trainMetricValue(metrics trainMetricsJSON, metric string) (float64, bool) {
+	switch metric {
+	case "train_pairs/s":
+		return metrics.Throughput.TrainPairsPerSecond, true
+	case "optimizer_steps/s":
+		return metrics.Throughput.OptimizerStepsPerSecond, true
+	case "matmul_runs":
+		return float64(metrics.ProfileDelta.MatMulRuns), true
+	case "matmul_run_upload_mb":
+		return metrics.ProfileDelta.MatMulRunUploadMB, true
+	case "matmul_run_download_mb":
+		return metrics.ProfileDelta.MatMulRunDownloadMB, true
+	case "optimizer_updates":
+		return float64(metrics.ProfileDelta.OptimizerUpdates), true
+	}
+	if metrics.FinalEval == nil {
+		return 0, false
+	}
+	switch metric {
+	case "mrr":
+		return float64(metrics.FinalEval.MeanReciprocalRank), true
+	case "top1":
+		return float64(metrics.FinalEval.Top1Accuracy), true
+	case "top5":
+		return float64(metrics.FinalEval.Top5Accuracy), true
+	case "top10":
+		return float64(metrics.FinalEval.Top10Accuracy), true
+	case "mean_rank":
+		return float64(metrics.FinalEval.MeanPositiveRank), true
+	case "auc":
+		return float64(metrics.FinalEval.ROCAUC), true
+	case "threshold_accuracy":
+		return float64(metrics.FinalEval.ThresholdAccuracy), true
+	case "margin":
+		return float64(metrics.FinalEval.ScoreMargin), true
+	case "accuracy":
+		return float64(metrics.FinalEval.PairAccuracy), true
+	case "loss":
+		return float64(metrics.FinalEval.Loss), true
+	default:
+		return 0, false
+	}
+}
+
+func trainMetricThresholdPassed(got, limit float64, op string) bool {
+	switch op {
+	case ">=":
+		return got >= limit
+	case "<=":
+		return got <= limit
+	default:
+		return false
+	}
+}
+
 func runTrainTokenizer(args []string) error {
 	fs := flag.NewFlagSet("train-tokenizer", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -1827,6 +2046,7 @@ func printUsage() {
 	fmt.Println("  manta train-corpus [flags] <artifact.mll> <corpus.txt>")
 	fmt.Println("  manta train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]")
 	fmt.Println("  manta compare-train-metrics <current.metrics.json> [baseline.metrics.json]")
+	fmt.Println("  manta gate-train-metrics [flags] <metrics.json>")
 	fmt.Println("  manta run <artifact.mll> [entry]")
 	fmt.Println("  manta demo [module-name]")
 	fmt.Println()
@@ -1843,6 +2063,7 @@ func printUsage() {
 	fmt.Println("train-corpus trains tokenizer + mined text pairs + embedder in one Manta job from a raw text corpus.")
 	fmt.Println("train-embed reloads a training package, fits or --eval-only evaluates token JSONL or text JSONL (with --tokenizer or a sibling .tokenizer.mll; use --no-tokenizer for token JSONL beside a tokenizer), and writes it back.")
 	fmt.Println("compare-train-metrics summarizes metrics JSON and prints deltas against a baseline metrics JSON when provided.")
+	fmt.Println("gate-train-metrics checks metrics JSON against MANTA_* thresholds from the environment or a thresholds env file.")
 	fmt.Println("run loads an artifact, binds stub weights and inputs, and executes one entrypoint.")
 	fmt.Println("demo creates a tiny inference-style module and loads it through the runtime.")
 }

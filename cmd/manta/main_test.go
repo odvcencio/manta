@@ -587,6 +587,129 @@ func TestRunCompareTrainMetricsReportsCurrentAndBaselineDeltas(t *testing.T) {
 	}
 }
 
+func TestRunGateTrainMetricsChecksThresholdFile(t *testing.T) {
+	clearTrainMetricGateEnv(t)
+	dir := t.TempDir()
+	metricsPath := filepath.Join(dir, "current.metrics.json")
+	thresholdsPath := filepath.Join(dir, "thresholds.env")
+	metrics := trainMetricsJSON{
+		Schema:   "manta.embedding_train_metrics.v1",
+		Command:  "train-embed",
+		Mode:     "eval",
+		Artifact: "current.mll",
+		FinalEval: &evalMetricsJSON{
+			Top1Accuracy:       0.9,
+			Top5Accuracy:       0.98,
+			Top10Accuracy:      1,
+			MeanReciprocalRank: 0.95,
+			ROCAUC:             0.73,
+			ScoreMargin:        0.12,
+			Loss:               0.11,
+			MeanPositiveRank:   1.1,
+		},
+		Throughput: trainThroughputJSON{
+			TrainPairsPerSecond:     120000,
+			OptimizerStepsPerSecond: 0.15,
+		},
+		ProfileDelta: trainProfileDeltaJSON{
+			MatMulRuns:          1000,
+			MatMulRunUploadMB:   100,
+			MatMulRunDownloadMB: 80,
+			OptimizerUpdates:    0,
+		},
+	}
+	writeMetricsJSONForTest(t, metricsPath, metrics)
+	thresholds := "" +
+		"MANTA_MIN_MRR=0.90\n" +
+		"MANTA_MIN_TOP1=0.80\n" +
+		"MANTA_MAX_MEAN_RANK=1.20\n" +
+		"MANTA_MIN_TRAIN_PAIRS_PER_SEC=100000\n" +
+		"MANTA_MAX_MATMUL_RUNS=2000\n"
+	if err := os.WriteFile(thresholdsPath, []byte(thresholds), 0o644); err != nil {
+		t.Fatalf("write thresholds: %v", err)
+	}
+
+	output := captureRunOutput(t, []string{"gate-train-metrics", "--thresholds", thresholdsPath, metricsPath})
+	for _, want := range []string{
+		"metrics: " + metricsPath,
+		"thresholds: " + thresholdsPath,
+		"scope: all",
+		"pass: mrr=0.95 >= 0.9",
+		"pass: train_pairs/s=120000 >= 100000",
+		"pass: matmul_runs=1000 <= 2000",
+		"gate: PASS checks=5",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("gate output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunGateTrainMetricsChecksEvalOnlyOptimizerUpdates(t *testing.T) {
+	clearTrainMetricGateEnv(t)
+	dir := t.TempDir()
+	metricsPath := filepath.Join(dir, "eval.metrics.json")
+	metrics := trainMetricsJSON{
+		Schema:       "manta.embedding_train_metrics.v1",
+		Command:      "train-embed",
+		Mode:         "eval",
+		Artifact:     "current.mll",
+		ProfileDelta: trainProfileDeltaJSON{OptimizerUpdates: 0},
+	}
+	writeMetricsJSONForTest(t, metricsPath, metrics)
+
+	output := captureRunOutput(t, []string{"gate-train-metrics", "--scope", "eval-only", metricsPath})
+	for _, want := range []string{
+		"scope: eval-only",
+		"pass: optimizer_updates=0 == 0 (eval-only)",
+		"gate: PASS checks=1",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("eval-only gate output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunGateTrainMetricsFailsMissedThreshold(t *testing.T) {
+	clearTrainMetricGateEnv(t)
+	dir := t.TempDir()
+	metricsPath := filepath.Join(dir, "current.metrics.json")
+	thresholdsPath := filepath.Join(dir, "thresholds.env")
+	metrics := trainMetricsJSON{
+		Schema:   "manta.embedding_train_metrics.v1",
+		Command:  "train-embed",
+		Mode:     "eval",
+		Artifact: "current.mll",
+		FinalEval: &evalMetricsJSON{
+			MeanReciprocalRank: 0.5,
+		},
+	}
+	writeMetricsJSONForTest(t, metricsPath, metrics)
+	if err := os.WriteFile(thresholdsPath, []byte("MANTA_MIN_MRR=0.90\n"), 0o644); err != nil {
+		t.Fatalf("write thresholds: %v", err)
+	}
+
+	output, err := captureRunOutputAndError(t, []string{"gate-train-metrics", "--thresholds", thresholdsPath, metricsPath})
+	if err == nil {
+		t.Fatalf("gate unexpectedly passed\noutput:\n%s", output)
+	}
+	for _, want := range []string{
+		"fail: mrr=0.5 >= 0.9",
+		"gate: FAIL checks=1 failed=1",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("failed gate output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func clearTrainMetricGateEnv(t *testing.T) {
+	t.Helper()
+	for _, threshold := range trainMetricThresholds {
+		t.Setenv(threshold.Env, "")
+	}
+}
+
 func writeMetricsJSONForTest(t *testing.T, path string, metrics trainMetricsJSON) {
 	t.Helper()
 	data, err := json.Marshal(metrics)
@@ -1080,6 +1203,15 @@ func copyExampleFile(t *testing.T, dir, name string) string {
 
 func captureRunOutput(t *testing.T, args []string) string {
 	t.Helper()
+	output, runErr := captureRunOutputAndError(t, args)
+	if runErr != nil {
+		t.Fatalf("run %v: %v\noutput:\n%s", args, runErr, output)
+	}
+	return output
+}
+
+func captureRunOutputAndError(t *testing.T, args []string) (string, error) {
+	t.Helper()
 	origStdout := os.Stdout
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -1100,8 +1232,5 @@ func captureRunOutput(t *testing.T, args []string) string {
 	if err := reader.Close(); err != nil {
 		t.Fatalf("close stdout reader: %v", err)
 	}
-	if runErr != nil {
-		t.Fatalf("run %v: %v\noutput:\n%s", args, runErr, string(data))
-	}
-	return string(data)
+	return string(data), runErr
 }
