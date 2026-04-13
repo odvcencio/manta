@@ -60,6 +60,83 @@ func TestFlattenFixedFloat32MatricesScratchCopiesNonContiguousViews(t *testing.T
 	}
 }
 
+func TestNewEmbeddingSequenceStateCopiesLayerInput(t *testing.T) {
+	projection := backend.NewTensorF32([]int{2, 2}, []float32{1, 0, 0, 1})
+	input := []float32{1, 2, 3, 4}
+	state, err := newEmbeddingSequenceState([]int32{0, 1}, []int32{1, 1}, input, nil, projection)
+	if err != nil {
+		t.Fatalf("new sequence state: %v", err)
+	}
+	input[0] = 99
+	if state.input[0] == 99 {
+		t.Fatal("sequence state retained caller input backing storage")
+	}
+}
+
+func TestBatchedForwardQKVCopiesAcceleratorOutputs(t *testing.T) {
+	accel := &aliasingMultiBoundRightMatMulAccelerator{}
+	trainer := &EmbeddingTrainer{
+		forwardMatMul: accel,
+		attnQParam:    mantaartifact.Param{Name: "q"},
+		attnKParam:    mantaartifact.Param{Name: "k"},
+		attnVParam:    mantaartifact.Param{Name: "v"},
+	}
+	projection := backend.NewTensorF32([]int{2, 2}, []float32{1, 0, 0, 1})
+	states := make([]*embeddingSequenceState, 2)
+	for i := range states {
+		state, err := newEmbeddingSequenceState([]int32{0}, []int32{1}, []float32{float32(i + 1), float32(i + 2)}, nil, projection)
+		if err != nil {
+			t.Fatalf("new sequence state %d: %v", i, err)
+		}
+		states[i] = state
+	}
+	weight := backend.NewTensorF32([]int{2, 2}, []float32{1, 0, 0, 1})
+	if !trainer.fillBatchedForwardQKVMatMul(states, 1, 2, weight, weight, weight) {
+		t.Fatal("batched qkv matmul did not run")
+	}
+	if got, want := states[0].attnQ[0], float32(10); got != want {
+		t.Fatalf("attnQ[0] before output mutation = %v, want %v", got, want)
+	}
+	accel.outputs[0][0] = 99
+	accel.outputs[1][2] = 88
+	accel.outputs[2][3] = 77
+	if got, want := states[0].attnQ[0], float32(10); got != want {
+		t.Fatalf("attnQ[0] aliases accelerator output, got %v want %v", got, want)
+	}
+	if got, want := states[1].attnK[0], float32(22); got != want {
+		t.Fatalf("attnK[0] aliases accelerator output, got %v want %v", got, want)
+	}
+	if got, want := states[1].attnV[1], float32(33); got != want {
+		t.Fatalf("attnV[1] aliases accelerator output, got %v want %v", got, want)
+	}
+}
+
+type aliasingMultiBoundRightMatMulAccelerator struct {
+	countingMatMulAccelerator
+	outputs [][]float32
+}
+
+func (a *aliasingMultiBoundRightMatMulAccelerator) RunMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+	if lhs == nil || len(lhs.Shape) != 2 || len(rightNames) == 0 {
+		return nil, nil
+	}
+	rows, cols := lhs.Shape[0], lhs.Shape[1]
+	a.outputs = make([][]float32, len(rightNames))
+	results := make([]backend.StepDispatchResult, len(rightNames))
+	for i := range rightNames {
+		out := make([]float32, rows*cols)
+		base := float32((i + 1) * 10)
+		for j := range out {
+			out[j] = base + float32(j)
+		}
+		a.outputs[i] = out
+		results[i] = backend.StepDispatchResult{Outputs: []*backend.Tensor{
+			backend.NewTensorF32([]int{rows, cols}, out),
+		}}
+	}
+	return results, nil
+}
+
 type countingMatMulAccelerator struct {
 	bindCalls         int
 	runCalls          int
