@@ -72,6 +72,12 @@ type embeddingEvalScore struct {
 	Positive bool
 }
 
+type embeddingEvalRankScore struct {
+	QueryKey string
+	Score    float32
+	Positive bool
+}
+
 // EmbeddingTrainer trains a pooled embedding model with quantization-aware forward passes.
 type EmbeddingTrainer struct {
 	module               *mantaartifact.Module
@@ -691,7 +697,8 @@ func (t *EmbeddingTrainer) EvaluatePairs(batch []EmbeddingPairExample) (Embeddin
 
 	metrics := EmbeddingEvalMetrics{PairCount: len(batch)}
 	scores := make([]embeddingEvalScore, 0, len(batch))
-	if ok, err := t.evaluatePairsBatchedForward(batch, forward, &metrics, &scores); err != nil {
+	rankScores := make([]embeddingEvalRankScore, 0, len(batch))
+	if ok, err := t.evaluatePairsBatchedForward(batch, forward, &metrics, &scores, &rankScores); err != nil {
 		return EmbeddingEvalMetrics{}, err
 	} else if !ok {
 		for i, example := range batch {
@@ -700,6 +707,7 @@ func (t *EmbeddingTrainer) EvaluatePairs(batch []EmbeddingPairExample) (Embeddin
 				return EmbeddingEvalMetrics{}, fmt.Errorf("batch %d: %w", i, err)
 			}
 			accumulateEvalPairScore(&metrics, &scores, example.Target, score, loss)
+			appendEvalRankScore(&rankScores, example, score)
 		}
 	}
 	invPairs := float32(1) / float32(len(batch))
@@ -714,11 +722,12 @@ func (t *EmbeddingTrainer) EvaluatePairs(batch []EmbeddingPairExample) (Embeddin
 	}
 	metrics.ScoreMargin = metrics.PositiveMeanScore - metrics.NegativeMeanScore
 	finalizeEvalScoreMetrics(&metrics, scores)
+	finalizeEvalRankMetrics(&metrics, rankScores)
 	return metrics, nil
 }
 
-func (t *EmbeddingTrainer) evaluatePairsBatchedForward(batch []EmbeddingPairExample, forward *embeddingForwardWeights, metrics *EmbeddingEvalMetrics, scores *[]embeddingEvalScore) (bool, error) {
-	if t == nil || t.forwardMatMul == nil || forward == nil || metrics == nil || scores == nil || len(batch) == 0 || !batchedPairwiseEvalEnabled() {
+func (t *EmbeddingTrainer) evaluatePairsBatchedForward(batch []EmbeddingPairExample, forward *embeddingForwardWeights, metrics *EmbeddingEvalMetrics, scores *[]embeddingEvalScore, rankScores *[]embeddingEvalRankScore) (bool, error) {
+	if t == nil || t.forwardMatMul == nil || forward == nil || metrics == nil || scores == nil || rankScores == nil || len(batch) == 0 || !batchedPairwiseEvalEnabled() {
 		return false, nil
 	}
 	chunkSize := pairwiseEvalBatchSize(len(batch))
@@ -744,6 +753,7 @@ func (t *EmbeddingTrainer) evaluatePairsBatchedForward(batch []EmbeddingPairExam
 			score, _, _ := cosineGrad(lefts[i].pooled, rights[i].pooled)
 			scale := score - example.Target
 			accumulateEvalPairScore(metrics, scores, example.Target, score, 0.5*scale*scale)
+			appendEvalRankScore(rankScores, example, score)
 		}
 		t.releaseEncodedSequences(lefts)
 		t.releaseEncodedSequences(rights)
@@ -783,6 +793,74 @@ func finalizeEvalScoreMetrics(metrics *EmbeddingEvalMetrics, scores []embeddingE
 	}
 	metrics.ThresholdAccuracy, metrics.ScoreThreshold = bestEvalScoreThresholdAccuracy(scores, metrics.PositiveCount, metrics.NegativeCount)
 	metrics.ROCAUC = evalScoreROCAUC(scores, metrics.PositiveCount, metrics.NegativeCount)
+}
+
+func appendEvalRankScore(scores *[]embeddingEvalRankScore, example EmbeddingPairExample, score float32) {
+	if scores == nil || len(example.LeftTokens) == 0 {
+		return
+	}
+	*scores = append(*scores, embeddingEvalRankScore{
+		QueryKey: embeddingBatchSequenceKey(example.LeftTokens, example.LeftMask),
+		Score:    score,
+		Positive: example.Target > 0,
+	})
+}
+
+func finalizeEvalRankMetrics(metrics *EmbeddingEvalMetrics, scores []embeddingEvalRankScore) {
+	if metrics == nil || len(scores) == 0 {
+		return
+	}
+	groups := make(map[string][]embeddingEvalRankScore)
+	for _, score := range scores {
+		if score.QueryKey == "" {
+			continue
+		}
+		groups[score.QueryKey] = append(groups[score.QueryKey], score)
+	}
+	queryCount := 0
+	for _, group := range groups {
+		if len(group) == 0 {
+			continue
+		}
+		bestPositive := float32(math.Inf(-1))
+		hasPositive := false
+		for _, score := range group {
+			if score.Positive && (!hasPositive || score.Score > bestPositive) {
+				bestPositive = score.Score
+				hasPositive = true
+			}
+		}
+		if !hasPositive {
+			continue
+		}
+		rank := 1
+		for _, score := range group {
+			if !score.Positive && score.Score > bestPositive {
+				rank++
+			}
+		}
+		if rank == 1 {
+			metrics.Top1Accuracy++
+		}
+		if rank <= 5 {
+			metrics.Top5Accuracy++
+		}
+		if rank <= 10 {
+			metrics.Top10Accuracy++
+		}
+		metrics.MeanReciprocalRank += 1 / float32(rank)
+		metrics.MeanPositiveRank += float32(rank)
+		queryCount++
+	}
+	if queryCount == 0 {
+		return
+	}
+	invQueries := float32(1) / float32(queryCount)
+	metrics.Top1Accuracy *= invQueries
+	metrics.Top5Accuracy *= invQueries
+	metrics.Top10Accuracy *= invQueries
+	metrics.MeanReciprocalRank *= invQueries
+	metrics.MeanPositiveRank *= invQueries
 }
 
 func bestEvalScoreThresholdAccuracy(scores []embeddingEvalScore, positiveCount, negativeCount int) (float32, float32) {

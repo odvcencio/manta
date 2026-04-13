@@ -625,9 +625,14 @@ func acquireDataset(cfg acquireConfig, spec datasetSpec) ([]trainRecord, []evalR
 
 func writeThresholds(path string) error {
 	body := strings.Join([]string{
-		"# Initial release gates for pairwise hard-eval logs.",
-		"# These are intentionally above random-pair chance and should be tightened after the first stable candidate.",
-		"MANTA_SELECT_METRIC=score_margin",
+		"# Initial release gates for retrieval hard-eval logs.",
+		"# These are intentionally below the first stable candidate and should tighten as the base embedder improves.",
+		"MANTA_SELECT_METRIC=mrr",
+		"MANTA_MIN_MRR=0.90",
+		"MANTA_MIN_TOP1=0.85",
+		"MANTA_MIN_TOP5=0.95",
+		"MANTA_MIN_TOP10=0.98",
+		"MANTA_MAX_MEAN_RANK=1.50",
 		"MANTA_MIN_AUC=0.70",
 		"MANTA_MIN_THRESHOLD_ACCURACY=0.65",
 		"MANTA_MIN_SCORE_MARGIN=0.05",

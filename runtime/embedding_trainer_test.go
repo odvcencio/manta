@@ -792,6 +792,87 @@ func TestEvalScoreMetricsCalibratePositiveScoreShift(t *testing.T) {
 	assertClose(t, metrics.ROCAUC, 1, 0.000001)
 }
 
+func TestEvalRankMetricsTrackGroupedPairwiseRetrieval(t *testing.T) {
+	metrics := EmbeddingEvalMetrics{}
+	finalizeEvalRankMetrics(&metrics, []embeddingEvalRankScore{
+		{QueryKey: "q1", Score: 0.8, Positive: true},
+		{QueryKey: "q1", Score: 0.2, Positive: false},
+		{QueryKey: "q1", Score: 0.1, Positive: false},
+		{QueryKey: "q2", Score: 0.3, Positive: true},
+		{QueryKey: "q2", Score: 0.9, Positive: false},
+		{QueryKey: "q2", Score: 0.4, Positive: false},
+		{QueryKey: "q3", Score: 0.9, Positive: false},
+	})
+
+	assertClose(t, metrics.Top1Accuracy, 0.5, 0.000001)
+	assertClose(t, metrics.Top5Accuracy, 1, 0.000001)
+	assertClose(t, metrics.Top10Accuracy, 1, 0.000001)
+	assertClose(t, metrics.MeanReciprocalRank, 2.0/3.0, 0.000001)
+	assertClose(t, metrics.MeanPositiveRank, 2, 0.000001)
+}
+
+func TestEmbeddingTrainerEvaluatePairsTracksGroupedRankingMetrics(t *testing.T) {
+	src := []byte(`
+param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
+param projection: q8[D, E] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_ranked_eval_embed_q8"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := tinyMaskedEmbeddingManifest()
+	manifest.Name = "tiny_ranked_eval_embed_q8"
+	trainer, err := NewEmbeddingTrainer(bundle.Artifact, manifest, map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			1, 0,
+		}),
+		"projection": backend.NewTensorF32([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+	}, EmbeddingTrainConfig{LearningRate: 0.05})
+	if err != nil {
+		t.Fatalf("new trainer: %v", err)
+	}
+
+	got, err := trainer.EvaluatePairs([]EmbeddingPairExample{
+		{LeftTokens: []int32{0}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+		{LeftTokens: []int32{0}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: -1},
+		{LeftTokens: []int32{1}, RightTokens: []int32{0}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: -1},
+		{LeftTokens: []int32{1}, RightTokens: []int32{1}, LeftMask: []int32{1}, RightMask: []int32{1}, Target: 1},
+	})
+	if err != nil {
+		t.Fatalf("evaluate pairs: %v", err)
+	}
+
+	assertClose(t, got.Top1Accuracy, 1, 0.000001)
+	assertClose(t, got.Top5Accuracy, 1, 0.000001)
+	assertClose(t, got.Top10Accuracy, 1, 0.000001)
+	assertClose(t, got.MeanReciprocalRank, 1, 0.000001)
+	assertClose(t, got.MeanPositiveRank, 1, 0.000001)
+}
+
 func TestDefaultEmbeddingCheckpointPath(t *testing.T) {
 	got := DefaultEmbeddingCheckpointPath("/tmp/tiny_train_embed_q8.mll")
 	if want := "/tmp/tiny_train_embed_q8.embed-train.mll"; got != want {
