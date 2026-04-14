@@ -15,6 +15,7 @@ type RetrievalHardNegativeMiningConfig struct {
 	QrelsPath            string
 	NegativesPerPositive int
 	CandidateTopK        int
+	MaxExamples          int
 	MaxDocs              int
 	MaxQueries           int
 }
@@ -92,8 +93,10 @@ func MineBM25TextHardNegatives(ctx context.Context, cfg RetrievalHardNegativeMin
 			summary.SkippedQueriesNoNegative++
 			continue
 		}
-		summary.PositivePairs += len(positives)
 		for _, positive := range positives {
+			if cfg.MaxExamples > 0 && len(out) >= cfg.MaxExamples {
+				break
+			}
 			exampleNegatives := negativeTexts
 			if len(exampleNegatives) > cfg.NegativesPerPositive {
 				exampleNegatives = exampleNegatives[:cfg.NegativesPerPositive]
@@ -103,7 +106,11 @@ func MineBM25TextHardNegatives(ctx context.Context, cfg RetrievalHardNegativeMin
 				Positive:  positive.Text,
 				Negatives: append([]string(nil), exampleNegatives...),
 			})
+			summary.PositivePairs++
 			summary.Negatives += len(exampleNegatives)
+		}
+		if cfg.MaxExamples > 0 && len(out) >= cfg.MaxExamples {
+			break
 		}
 	}
 	summary.Examples = len(out)

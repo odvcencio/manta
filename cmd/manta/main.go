@@ -477,6 +477,7 @@ func runMineRetrievalHardNegatives(args []string) error {
 	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
 	negatives := fs.Int("negatives", 1, "BM25 hard negatives per positive qrel")
 	candidateTopK := fs.Int("candidate-top-k", 100, "BM25 candidate depth to mine negatives from")
+	maxExamples := fs.Int("max-examples", 0, "limit mined hard-negative examples")
 	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
 	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
 	if err := fs.Parse(args); err != nil {
@@ -490,6 +491,9 @@ func runMineRetrievalHardNegatives(args []string) error {
 	}
 	if *candidateTopK <= 0 {
 		return fmt.Errorf("candidate-top-k must be positive")
+	}
+	if *maxExamples < 0 {
+		return fmt.Errorf("max-examples must be non-negative")
 	}
 	datasetDir := fs.Arg(0)
 	outputPath := fs.Arg(1)
@@ -507,6 +511,7 @@ func runMineRetrievalHardNegatives(args []string) error {
 		QrelsPath:            *qrelsPath,
 		NegativesPerPositive: *negatives,
 		CandidateTopK:        *candidateTopK,
+		MaxExamples:          *maxExamples,
 		MaxDocs:              *maxDocs,
 		MaxQueries:           *maxQueries,
 	})

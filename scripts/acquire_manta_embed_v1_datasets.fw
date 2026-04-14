@@ -83,6 +83,7 @@ type acquireConfig struct {
 	SHAPath        string
 	Datasets       []datasetSpec
 	MaxTrain       int
+	MaxHardTrain   int
 	MaxEval        int
 	MaxHard        int
 	Negatives      int
@@ -105,7 +106,8 @@ Run:
 Defaults:
   MANTA_DATASET_ROOT=$PWD/datasets/manta-embed-v1
   MANTA_BEIR_DATASETS=scifact,nfcorpus,fiqa
-  MANTA_DATASET_BM25_CANDIDATE_TOP_K=100
+  MANTA_DATASET_MAX_HARD_TRAIN=6000
+  MANTA_DATASET_BM25_CANDIDATE_TOP_K=25
 
 Outputs:
   processed/train.jsonl
@@ -229,6 +231,9 @@ func prepareConfig(root string) (acquireConfig, error) {
 	guard err == nil else return acquireConfig{}, err
 	maxTrain, err := parseIntEnv("MANTA_DATASET_MAX_TRAIN", 50000)
 	guard err == nil else return acquireConfig{}, err
+	maxHardTrain, err := parseIntEnv("MANTA_DATASET_MAX_HARD_TRAIN", 6000)
+	guard err == nil else return acquireConfig{}, err
+	guard maxHardTrain >= 0 else return acquireConfig{}, fmt.Errorf("MANTA_DATASET_MAX_HARD_TRAIN must be non-negative")
 	maxEval, err := parseIntEnv("MANTA_DATASET_MAX_EVAL", 2000)
 	guard err == nil else return acquireConfig{}, err
 	maxHard, err := parseIntEnv("MANTA_DATASET_MAX_HARD", 2000)
@@ -236,7 +241,7 @@ func prepareConfig(root string) (acquireConfig, error) {
 	negatives, err := parseIntEnv("MANTA_DATASET_NEGATIVES_PER_POSITIVE", 1)
 	guard err == nil else return acquireConfig{}, err
 	guard negatives > 0 else return acquireConfig{}, fmt.Errorf("MANTA_DATASET_NEGATIVES_PER_POSITIVE must be positive")
-	bm25CandidateTopK, err := parseIntEnv("MANTA_DATASET_BM25_CANDIDATE_TOP_K", 100)
+	bm25CandidateTopK, err := parseIntEnv("MANTA_DATASET_BM25_CANDIDATE_TOP_K", 25)
 	guard err == nil else return acquireConfig{}, err
 	guard bm25CandidateTopK > 0 else return acquireConfig{}, fmt.Errorf("MANTA_DATASET_BM25_CANDIDATE_TOP_K must be positive")
 	specs, err := parseDatasets()
@@ -250,6 +255,7 @@ func prepareConfig(root string) (acquireConfig, error) {
 		SHAPath:        filepath.Join(outRoot, "SHA256SUMS"),
 		Datasets:       specs,
 		MaxTrain:       maxTrain,
+		MaxHardTrain:   maxHardTrain,
 		MaxEval:        maxEval,
 		MaxHard:        maxHard,
 		Negatives:      negatives,
@@ -497,7 +503,7 @@ func mineBM25HardNegativeRecords(cfg acquireConfig, dataset string, dir string, 
 		"--candidate-top-k", strconv.Itoa(cfg.BM25CandidateTopK),
 	}
 	if limit > 0 {
-		args = append(args, "--max-queries", strconv.Itoa(limit))
+		args = append(args, "--max-examples", strconv.Itoa(limit))
 	}
 	args = append(args, dir, outPath)
 	output, err := commandOutput(cfg.Root, "go", args)
@@ -759,16 +765,21 @@ func acquireDataset(cfg acquireConfig, spec datasetSpec) ([]trainRecord, []evalR
 	trainQrels, evalQrels, hardQrels, err := positiveSplits(dir, spec.Name)
 	guard err == nil else return nil, nil, nil, nil, nil, 0, err
 	trainLimit := cfg.MaxTrain
+	hardTrainLimit := cfg.MaxHardTrain
 	evalLimit := cfg.MaxEval
 	hardLimit := cfg.MaxHard
 	if len(cfg.Datasets) > 0 {
 		trainLimit = cfg.MaxTrain / len(cfg.Datasets)
+		hardTrainLimit = cfg.MaxHardTrain / len(cfg.Datasets)
+		if cfg.MaxHardTrain > 0 && hardTrainLimit == 0 {
+			hardTrainLimit = 1
+		}
 		evalLimit = cfg.MaxEval / len(cfg.Datasets)
 		hardLimit = cfg.MaxHard / len(cfg.Datasets)
 	}
 	train := textTrainRecords(spec.Name, trainQrels, queries, corpus, trainLimit)
 	trainPairs := textTrainPairRecords(spec.Name, trainQrels, queries, corpus, ids, cfg.Negatives, trainLimit)
-	hardTrain, err := mineBM25HardNegativeRecords(cfg, spec.Name, dir, trainLimit)
+	hardTrain, err := mineBM25HardNegativeRecords(cfg, spec.Name, dir, hardTrainLimit)
 	guard err == nil else return nil, nil, nil, nil, nil, 0, err
 	eval := textEvalRecords(spec.Name, evalQrels, queries, corpus, ids, cfg.Negatives, evalLimit)
 	hard := textEvalRecords(spec.Name, hardQrels, queries, corpus, ids, cfg.Negatives, hardLimit)

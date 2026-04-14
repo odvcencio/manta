@@ -136,7 +136,7 @@ func TestReadBEIRRetrievalFiles(t *testing.T) {
 			`{"_id":"q2","text":"unused query"}`+"\n"), 0o644); err != nil {
 		t.Fatalf("write queries: %v", err)
 	}
-	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\nq1\td3\t1\n"), 0o644); err != nil {
 		t.Fatalf("write qrels: %v", err)
 	}
 
@@ -253,6 +253,7 @@ func TestMineBM25TextHardNegativesUsesTopLexicalNonPositive(t *testing.T) {
 		QrelsPath:            qrelsPath,
 		NegativesPerPositive: 1,
 		CandidateTopK:        2,
+		MaxExamples:          1,
 	})
 	if err != nil {
 		t.Fatalf("mine hard negatives: %v", err)
