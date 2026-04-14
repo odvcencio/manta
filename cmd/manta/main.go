@@ -99,6 +99,8 @@ func run(args []string) error {
 		return runArtifact(args[1:])
 	case "embed-text":
 		return runEmbedText(args[1:])
+	case "eval-retrieval":
+		return runEvalRetrieval(args[1:])
 	case "demo":
 		return runDemo(args[1:])
 	case "inspect":
@@ -331,6 +333,73 @@ func runEmbedText(args []string) error {
 	fmt.Printf("tokens: %d\n", len(tokens))
 	fmt.Printf("output: %s\n", displayManifestName(result.OutputName))
 	fmt.Printf("embedding: %s%v\n", result.Embeddings.DType, result.Embeddings.Shape)
+	return nil
+}
+
+func runEvalRetrieval(args []string) error {
+	fs := flag.NewFlagSet("eval-retrieval", flag.ContinueOnError)
+	datasetName := fs.String("dataset", "", "dataset name for metrics output")
+	split := fs.String("split", "test", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
+	batchSize := fs.Int("batch-size", 64, "embedding batch size")
+	topK := fs.Int("top-k", 100, "retrieval depth for scoring")
+	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
+	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	metricsPath := fs.String("metrics-json", "", "write retrieval metrics JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
+		return fmt.Errorf("usage: manta eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
+	}
+	artifactPath := fs.Arg(0)
+	datasetDir := fs.Arg(1)
+	corpusPath, queriesPath, defaultQrelsPath := mantaruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+
+	rt := mantaruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), artifactPath)
+	if err != nil {
+		return err
+	}
+	metrics, err := mantaruntime.EvaluateEmbeddingRetrieval(context.Background(), model, mantaruntime.RetrievalEvalConfig{
+		DatasetName:  *datasetName,
+		ArtifactPath: artifactPath,
+		CorpusPath:   corpusPath,
+		QueriesPath:  queriesPath,
+		QrelsPath:    *qrelsPath,
+		BatchSize:    *batchSize,
+		TopK:         *topK,
+		MaxDocs:      *maxDocs,
+		MaxQueries:   *maxQueries,
+	})
+	if err != nil {
+		return err
+	}
+	if *metricsPath != "" {
+		data, err := json.MarshalIndent(metrics, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		if err := os.WriteFile(*metricsPath, data, 0o644); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("retrieval eval: dataset=%s backend=%s docs=%d queries=%d relevant_pairs=%d scored_pairs=%d\n",
+		metrics.Dataset, metrics.Backend, metrics.Inputs.Documents, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredPairs)
+	fmt.Printf("quality: ndcg@10=%.6f mrr@10=%.6f recall@10=%.6f recall@100=%.6f\n",
+		metrics.Quality.NDCGAt10, metrics.Quality.MRRAt10, metrics.Quality.RecallAt10, metrics.Quality.RecallAt100)
+	fmt.Printf("throughput: elapsed=%.3fs docs/s=%.2f queries/s=%.2f scores/s=%.2f\n",
+		metrics.Throughput.ElapsedSeconds, metrics.Throughput.DocumentsPerSecond, metrics.Throughput.QueriesPerSecond, metrics.Throughput.ScoresPerSecond)
+	if *metricsPath != "" {
+		fmt.Printf("metrics: %s\n", *metricsPath)
+	}
 	return nil
 }
 
@@ -2184,6 +2253,7 @@ func printUsage() {
 	fmt.Println("  manta inspect <artifact.mll>")
 	fmt.Println("  manta export-mll <artifact.mll> [output.mll]")
 	fmt.Println("  manta embed-text <artifact.mll> <text...>")
+	fmt.Println("  manta eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
 	fmt.Println("  manta init-model [flags] <artifact.mll>")
 	fmt.Println("  manta init-mirage [flags] <artifact.mll>")
 	fmt.Println("  manta init-train [flags] <artifact.mll>")
@@ -2202,6 +2272,7 @@ func printUsage() {
 	fmt.Println("inspect summarizes an artifact and verifies its sibling package manifest when present.")
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Manta metadata in XMTA.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
+	fmt.Println("eval-retrieval scores a sealed embedding .mll on BEIR-style corpus/query/qrels files with nDCG/MRR/Recall metrics.")
 	fmt.Println("init-model creates the Manta-owned default quantized embedding training package.")
 	fmt.Println("init-mirage creates the Manta-owned Mirage Image v1 host-reference artifact.")
 	fmt.Println("init-train creates a native training package next to an artifact.")

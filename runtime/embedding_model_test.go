@@ -357,6 +357,74 @@ func TestEmbeddingModelEmbedBatchPadsRaggedWithMask(t *testing.T) {
 	})
 }
 
+func TestEmbeddingModelEmbedBatchGroupsRaggedAttentionInputs(t *testing.T) {
+	src := []byte(`
+param token_embedding: f16[V, D] @weight("weights/token_embedding")
+param attn_q: f16[D, D] @weight("weights/attn_q")
+param attn_k: f16[D, D] @weight("weights/attn_k")
+param attn_v: f16[D, D] @weight("weights/attn_v")
+param attn_o: f16[D, D] @weight("weights/attn_o")
+param projection: f16[D, E] @weight("weights/projection")
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden = gather(token_embedding, tokens)
+    let q = @matmul(hidden, attn_q)
+    let k = @matmul(hidden, attn_k)
+    let v = @matmul(hidden, attn_v)
+    let kt = transpose(k)
+    let scores = @matmul(q, kt)
+    let probs = softmax(scores)
+    let mixed = @matmul(probs, v)
+    let attended = @matmul(mixed, attn_o)
+    let projected = @matmul(attended, projection)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let hidden = gather(token_embedding, tokens)
+    let q = @matmul(hidden, attn_q)
+    let k = @matmul(hidden, attn_k)
+    let v = @matmul(hidden, attn_v)
+    let kt = transpose(k)
+    let scores = @matmul(q, kt)
+    let probs = softmax(scores)
+    let mixed = @matmul(probs, v)
+    let attended = @matmul(mixed, attn_o)
+    let projected = @matmul(attended, projection)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_attention_embed"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	rt := New(cuda.New(), metal.New())
+	model, err := rt.LoadEmbedding(context.Background(), bundle.Artifact, tinyAttentionEmbeddingManifest(), tinyAttentionEmbedWeights()...)
+	if err != nil {
+		t.Fatalf("load embedding: %v", err)
+	}
+
+	longResult, err := model.Embed(context.Background(), []int32{0, 1})
+	if err != nil {
+		t.Fatalf("embed long: %v", err)
+	}
+	shortResult, err := model.Embed(context.Background(), []int32{1})
+	if err != nil {
+		t.Fatalf("embed short: %v", err)
+	}
+	batchResult, err := model.EmbedBatch(context.Background(), [][]int32{
+		{0, 1},
+		{1},
+	})
+	if err != nil {
+		t.Fatalf("embed batch: %v", err)
+	}
+	want := append(append([]float32(nil), longResult.Embeddings.F32...), shortResult.Embeddings.F32...)
+	assertTensorClose(t, batchResult.Embeddings, []int{2, 2}, want)
+}
+
 func tinyEmbeddingManifest() EmbeddingManifest {
 	return EmbeddingManifest{
 		Name:                "tiny_embed_pooled",
@@ -388,4 +456,33 @@ func tinyMaskedEmbeddingManifest() EmbeddingManifest {
 	manifest.Name = "tiny_embed_masked_pooled"
 	manifest.MaskInput = "attention_mask"
 	return manifest
+}
+
+func tinyAttentionEmbeddingManifest() EmbeddingManifest {
+	manifest := tinyMaskedEmbeddingManifest()
+	manifest.Name = "tiny_attention_embed"
+	manifest.AttentionQueryParam = "attn_q"
+	manifest.AttentionKeyParam = "attn_k"
+	manifest.AttentionValueParam = "attn_v"
+	manifest.AttentionOutputParam = "attn_o"
+	return manifest
+}
+
+func tinyAttentionEmbedWeights() []LoadOption {
+	identity := backend.NewTensorF16([]int{2, 2}, []float32{
+		1, 0,
+		0, 1,
+	})
+	return []LoadOption{
+		WithWeight("token_embedding", backend.NewTensorF16([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			1, 1,
+		})),
+		WithWeight("attn_q", identity),
+		WithWeight("attn_k", identity),
+		WithWeight("attn_v", identity),
+		WithWeight("attn_o", identity),
+		WithWeight("projection", identity),
+	}
 }

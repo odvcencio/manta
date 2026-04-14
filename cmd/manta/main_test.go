@@ -251,6 +251,82 @@ func TestRunEmbedTextLoadsSealedMLLTokenizer(t *testing.T) {
 	}
 }
 
+func TestRunEvalRetrievalWritesMetricsJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manta-embed-v1.mll")
+	if err := run([]string{
+		"init-model",
+		"--vocab-size", "8",
+		"--max-seq", "8",
+		"--embedding-dim", "4",
+		"--hidden-dim", "8",
+		path,
+	}); err != nil {
+		t.Fatalf("run init-model: %v", err)
+	}
+	tokenizer := mantaruntime.TokenizerFile{
+		Version:      mantaruntime.TokenizerFileVersion,
+		Tokens:       []string{"[PAD]", "[UNK]", "a", "b"},
+		UnknownToken: "[UNK]",
+	}
+	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	if _, _, err := mantaruntime.RebuildSiblingPackageManifest(path); err != nil {
+		t.Fatalf("rebuild package manifest: %v", err)
+	}
+	sealedPath := filepath.Join(dir, "manta-embed-v1.sealed.mll")
+	if err := run([]string{"export-mll", path, sealedPath}); err != nil {
+		t.Fatalf("run export-mll: %v", err)
+	}
+	datasetDir := filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "corpus.jsonl"), []byte(
+		`{"_id":"d1","text":"a"}`+"\n"+
+			`{"_id":"d2","text":"b"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(`{"_id":"q1","text":"a"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "test.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	metricsPath := filepath.Join(dir, "retrieval.metrics.json")
+
+	output := captureRunOutput(t, []string{"eval-retrieval", "--dataset", "tiny", "--batch-size", "2", "--metrics-json", metricsPath, sealedPath, datasetDir})
+	for _, want := range []string{
+		"retrieval eval: dataset=tiny",
+		"quality: ndcg@10=",
+		"recall@100=",
+		"metrics: " + metricsPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("eval-retrieval output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	var metrics struct {
+		Schema  string `json:"schema"`
+		Dataset string `json:"dataset"`
+		Inputs  struct {
+			Documents int `json:"documents"`
+			Queries   int `json:"queries"`
+		} `json:"inputs"`
+	}
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	if metrics.Schema != mantaruntime.RetrievalEvalMetricsSchema || metrics.Dataset != "tiny" || metrics.Inputs.Documents != 2 || metrics.Inputs.Queries != 1 {
+		t.Fatalf("metrics = %+v", metrics)
+	}
+}
+
 func TestRunTrainEmbedFitsContrastivePackage(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {

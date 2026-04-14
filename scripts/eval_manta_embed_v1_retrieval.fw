@@ -1,0 +1,301 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+type evalConfig struct {
+	Root        string
+	RunID       string
+	RunDir      string
+	LogDir      string
+	MantaBin    string
+	Artifact    string
+	DatasetRoot string
+	Datasets    []string
+	Split       string
+	BatchSize   string
+	TopK        string
+	MaxDocs     string
+	MaxQueries  string
+	Leaderboard string
+}
+
+type retrievalMetrics struct {
+	Dataset string `json:"dataset"`
+	Backend string `json:"backend"`
+	Inputs struct {
+		Documents int `json:"documents"`
+		Queries int `json:"queries"`
+		RelevantPairs int `json:"relevant_pairs"`
+		ScoredPairs int64 `json:"scored_pairs"`
+	} `json:"inputs"`
+	Quality struct {
+		NDCGAt10 float64 `json:"ndcg_at_10"`
+		MRRAt10 float64 `json:"mrr_at_10"`
+		RecallAt10 float64 `json:"recall_at_10"`
+		RecallAt100 float64 `json:"recall_at_100"`
+	} `json:"quality"`
+	Throughput struct {
+		ElapsedSeconds float64 `json:"elapsed_seconds"`
+		DocumentsPerSecond float64 `json:"documents_per_second"`
+		QueriesPerSecond float64 `json:"queries_per_second"`
+		ScoresPerSecond float64 `json:"scores_per_second"`
+	} `json:"throughput"`
+}
+
+func usage() {
+	fmt.Println(`Evaluate a sealed manta-embed-v1 .mll on BEIR-style retrieval metrics.
+
+Run:
+  MANTA_REPO_ROOT=$PWD \
+  MANTA_EVAL_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
+  ferrous-wheel run scripts/eval_manta_embed_v1_retrieval.fw
+
+Optional:
+  MANTA_EVAL_RUN_ROOT=$PWD/runs
+  MANTA_EVAL_RUN_ID=manta-embed-v1-retrieval-20260414
+  MANTA_DATASET_ROOT=$PWD/datasets/manta-embed-v1
+  MANTA_EVAL_DATASETS=scifact,nfcorpus,fiqa
+  MANTA_EVAL_SPLIT=test
+  MANTA_EVAL_BATCH_SIZE=64
+  MANTA_EVAL_TOP_K=100
+  MANTA_EVAL_MAX_DOCS=0
+  MANTA_EVAL_MAX_QUERIES=0`)
+}
+
+func getenv(name string, fallback string) string {
+	let value = os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func step(label string) {
+	fmt.Println(f"\n== {label} ==")
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+func findRoot() (string, error) {
+	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	if hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	let pwd = os.Getenv("PWD")
+	if hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(name string, args []string) string {
+	parts := []string{shellQuote(name)}
+	for arg in args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runCmd(cfg evalConfig, label string, logName string, name string, args []string) error {
+	step(label)
+	logPath := filepath.Join(cfg.LogDir, logName)
+	let rendered = renderCommand(name, args)
+	fmt.Println(f"+ {rendered}")
+	err := os.WriteFile(logPath+".cmd", []byte(rendered+"\n"), 0o644)
+	guard err == nil else return err
+	logFile, err := os.Create(logPath)
+	guard err == nil else return err
+	defer logFile.Close()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = cfg.Root
+	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+	err = cmd.Run()
+	guard err == nil else return fmt.Errorf("%s failed; see %s: %w", label, logPath, err)
+	return nil
+}
+
+func splitList(value string) []string {
+	out := []string{}
+	for _, raw := range strings.Split(value, ",") {
+		item := strings.TrimSpace(raw)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func prepareConfig(root string) (evalConfig, error) {
+	artifact := os.Getenv("MANTA_EVAL_ARTIFACT")
+	guard artifact != "" else return evalConfig{}, fmt.Errorf("MANTA_EVAL_ARTIFACT is required")
+	artifactAbs, err := filepath.Abs(artifact)
+	guard err == nil else return evalConfig{}, err
+	_, err = os.Stat(artifactAbs)
+	guard err == nil else return evalConfig{}, fmt.Errorf("MANTA_EVAL_ARTIFACT does not exist: %s", artifactAbs)
+	runID := getenv("MANTA_EVAL_RUN_ID", "manta-embed-v1-retrieval-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot := getenv("MANTA_EVAL_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir, err := filepath.Abs(filepath.Join(runRoot, runID))
+	guard err == nil else return evalConfig{}, err
+	if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
+		return evalConfig{}, fmt.Errorf("run directory already exists and is not empty: %s", runDir)
+	}
+	err = os.MkdirAll(filepath.Join(runDir, "bin"), 0o755)
+	guard err == nil else return evalConfig{}, err
+	err = os.MkdirAll(filepath.Join(runDir, "logs"), 0o755)
+	guard err == nil else return evalConfig{}, err
+	datasetRoot, err := filepath.Abs(getenv("MANTA_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
+	guard err == nil else return evalConfig{}, err
+	datasets := splitList(getenv("MANTA_EVAL_DATASETS", "scifact,nfcorpus,fiqa"))
+	guard len(datasets) > 0 else return evalConfig{}, fmt.Errorf("MANTA_EVAL_DATASETS is empty")
+	return evalConfig{
+		Root:        root,
+		RunID:       runID,
+		RunDir:      runDir,
+		LogDir:      filepath.Join(runDir, "logs"),
+		MantaBin:    filepath.Join(runDir, "bin", "manta"),
+		Artifact:    artifactAbs,
+		DatasetRoot: datasetRoot,
+		Datasets:    datasets,
+		Split:       getenv("MANTA_EVAL_SPLIT", "test"),
+		BatchSize:   getenv("MANTA_EVAL_BATCH_SIZE", "64"),
+		TopK:        getenv("MANTA_EVAL_TOP_K", "100"),
+		MaxDocs:     getenv("MANTA_EVAL_MAX_DOCS", "0"),
+		MaxQueries:  getenv("MANTA_EVAL_MAX_QUERIES", "0"),
+		Leaderboard: filepath.Join(runDir, "leaderboard.tsv"),
+	}, nil
+}
+
+func datasetDir(cfg evalConfig, dataset string) string {
+	return filepath.Join(cfg.DatasetRoot, "raw", dataset, dataset)
+}
+
+func readMetrics(path string) (retrievalMetrics, error) {
+	data, err := os.ReadFile(path)
+	guard err == nil else return retrievalMetrics{}, err
+	var metrics retrievalMetrics
+	err = json.Unmarshal(data, &metrics)
+	guard err == nil else return retrievalMetrics{}, err
+	return metrics, nil
+}
+
+func appendLeaderboard(path string, metrics retrievalMetrics) error {
+	line := fmt.Sprintf("%s\t%s\t%d\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.3f\t%.2f\t%.2f\t%.2f\n",
+		metrics.Dataset,
+		metrics.Backend,
+		metrics.Inputs.Documents,
+		metrics.Inputs.Queries,
+		metrics.Inputs.RelevantPairs,
+		metrics.Inputs.ScoredPairs,
+		metrics.Quality.NDCGAt10,
+		metrics.Quality.MRRAt10,
+		metrics.Quality.RecallAt10,
+		metrics.Quality.RecallAt100,
+		metrics.Throughput.ElapsedSeconds,
+		metrics.Throughput.DocumentsPerSecond,
+		metrics.Throughput.QueriesPerSecond,
+		metrics.Throughput.ScoresPerSecond)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	guard err == nil else return err
+	defer file.Close()
+	_, err = file.WriteString(line)
+	return err
+}
+
+func runEval(cfg evalConfig) error {
+	err := runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/manta"})
+	guard err == nil else return err
+	header := "dataset\tbackend\tdocuments\tqueries\trelevant_pairs\tscored_pairs\tndcg_at_10\tmrr_at_10\trecall_at_10\trecall_at_100\telapsed_seconds\tdocuments_per_second\tqueries_per_second\tscores_per_second\n"
+	err = os.WriteFile(cfg.Leaderboard, []byte(header), 0o644)
+	guard err == nil else return err
+	for dataset in cfg.Datasets {
+		dir := datasetDir(cfg, dataset)
+		if _, err := os.Stat(dir); err != nil {
+			return fmt.Errorf("dataset directory missing for %s: %s", dataset, dir)
+		}
+		metricsPath := filepath.Join(cfg.RunDir, dataset+".retrieval.metrics.json")
+		args := []string{
+			"eval-retrieval",
+			"--dataset", dataset,
+			"--split", cfg.Split,
+			"--batch-size", cfg.BatchSize,
+			"--top-k", cfg.TopK,
+			"--metrics-json", metricsPath,
+		}
+		if cfg.MaxDocs != "" && cfg.MaxDocs != "0" {
+			args = append(args, "--max-docs", cfg.MaxDocs)
+		}
+		if cfg.MaxQueries != "" && cfg.MaxQueries != "0" {
+			args = append(args, "--max-queries", cfg.MaxQueries)
+		}
+		args = append(args, cfg.Artifact, dir)
+		err = runCmd(cfg, "Evaluate "+dataset, dataset+"-eval.log", cfg.MantaBin, args)
+		guard err == nil else return err
+		metrics, err := readMetrics(metricsPath)
+		guard err == nil else return err
+		err = appendLeaderboard(cfg.Leaderboard, metrics)
+		guard err == nil else return err
+	}
+	step("Retrieval leaderboard")
+	data, err := os.ReadFile(cfg.Leaderboard)
+	guard err == nil else return err
+	fmt.Print(string(data))
+	fmt.Println(f"run_dir={cfg.RunDir}")
+	fmt.Println(f"leaderboard={cfg.Leaderboard}")
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	cfg, err := prepareConfig(root)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if err := runEval(cfg); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}

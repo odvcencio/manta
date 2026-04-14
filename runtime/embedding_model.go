@@ -3,6 +3,8 @@ package mantaruntime
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strconv"
 
 	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
@@ -429,6 +431,9 @@ func (m *EmbeddingModel) EmbedBatch(ctx context.Context, batches [][]int32) (Emb
 			return EmbeddingResult{}, fmt.Errorf("batch %d: %w", i, err)
 		}
 	}
+	if m.manifest.MaskInput != "" && raggedTokenBatches(batches) {
+		return m.embedBatchByTokenLength(ctx, batches)
+	}
 	if m.manifest.MaskInput == "" {
 		result, err := m.program.RunEmbedBatch(ctx, m.manifest.BatchEntry, batches)
 		if err != nil {
@@ -473,6 +478,140 @@ func (m *EmbeddingModel) EmbedBatch(ctx context.Context, batches [][]int32) (Emb
 		return EmbeddingResult{}, err
 	}
 	return result, nil
+}
+
+type embeddingBatchSlot struct {
+	index  int
+	tokens []int32
+}
+
+func raggedTokenBatches(batches [][]int32) bool {
+	if len(batches) < 2 {
+		return false
+	}
+	n := len(batches[0])
+	for _, batch := range batches[1:] {
+		if len(batch) != n {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *EmbeddingModel) embedBatchByTokenLength(ctx context.Context, batches [][]int32) (EmbeddingResult, error) {
+	groups := map[int][]embeddingBatchSlot{}
+	lengths := []int{}
+	for i, batch := range batches {
+		n := len(batch)
+		if len(groups[n]) == 0 {
+			lengths = append(lengths, n)
+		}
+		groups[n] = append(groups[n], embeddingBatchSlot{index: i, tokens: batch})
+	}
+	slices.Sort(lengths)
+	var outputName string
+	var dtype string
+	var width int
+	rows := make([][]float32, len(batches))
+	trace := []backend.TraceStep{}
+	for _, n := range lengths {
+		slots := groups[n]
+		groupBatches := make([][]int32, len(slots))
+		for i, slot := range slots {
+			groupBatches[i] = slot.tokens
+		}
+		result, err := m.EmbedBatch(ctx, groupBatches)
+		if err != nil {
+			return EmbeddingResult{}, err
+		}
+		if result.Embeddings == nil {
+			return EmbeddingResult{}, fmt.Errorf("embedding output tensor is nil")
+		}
+		if outputName == "" {
+			outputName = result.OutputName
+			dtype = result.Embeddings.DType
+			if len(result.Embeddings.Shape) != 2 {
+				return EmbeddingResult{}, fmt.Errorf("grouped embedding shape = %v, want rank 2", result.Embeddings.Shape)
+			}
+			width = result.Embeddings.Shape[1]
+		} else if result.OutputName != outputName || result.Embeddings.DType != dtype || len(result.Embeddings.Shape) != 2 || result.Embeddings.Shape[1] != width {
+			return EmbeddingResult{}, fmt.Errorf("grouped embedding output changed from %s/%s/%d to %s/%s/%v", outputName, dtype, width, result.OutputName, result.Embeddings.DType, result.Embeddings.Shape)
+		}
+		groupRows, err := embeddingRows(result.Embeddings, len(slots))
+		if err != nil {
+			return EmbeddingResult{}, err
+		}
+		for i, slot := range slots {
+			rows[slot.index] = groupRows[i]
+		}
+		trace = append(trace, result.Raw.Trace...)
+	}
+	data := make([]float32, 0, len(batches)*width)
+	for i, row := range rows {
+		if len(row) != width {
+			return EmbeddingResult{}, fmt.Errorf("missing grouped embedding row %d", i)
+		}
+		data = append(data, row...)
+	}
+	tensor := &backend.Tensor{
+		DType: dtype,
+		Shape: []int{len(batches), width},
+		F32:   data,
+	}
+	result := EmbeddingResult{
+		OutputName: outputName,
+		Embeddings: tensor,
+		Raw: backend.Result{
+			Outputs: map[string]backend.Value{
+				outputName: {
+					Type: mantaartifact.ValueType{
+						Kind: mantaartifact.ValueTensor,
+						Tensor: &mantaartifact.TensorType{
+							DType: dtype,
+							Shape: []string{strconv.Itoa(len(batches)), strconv.Itoa(width)},
+						},
+					},
+					Data: tensor,
+				},
+			},
+			Trace: trace,
+		},
+	}
+	if err := m.validateEmbeddingResult(result, true); err != nil {
+		return EmbeddingResult{}, err
+	}
+	return result, nil
+}
+
+func embeddingRows(t *backend.Tensor, wantRows int) ([][]float32, error) {
+	if t == nil {
+		return nil, fmt.Errorf("embedding tensor is nil")
+	}
+	if len(t.F32) == 0 {
+		return nil, fmt.Errorf("embedding tensor has no float data")
+	}
+	switch len(t.Shape) {
+	case 1:
+		if wantRows != 1 {
+			return nil, fmt.Errorf("embedding tensor shape %v cannot provide %d rows", t.Shape, wantRows)
+		}
+		return [][]float32{append([]float32(nil), t.F32...)}, nil
+	case 2:
+		rows, cols := t.Shape[0], t.Shape[1]
+		if rows != wantRows {
+			return nil, fmt.Errorf("embedding tensor rows = %d, want %d", rows, wantRows)
+		}
+		if len(t.F32) < rows*cols {
+			return nil, fmt.Errorf("embedding tensor has %d values, want at least %d", len(t.F32), rows*cols)
+		}
+		out := make([][]float32, rows)
+		for i := 0; i < rows; i++ {
+			out[i] = append([]float32(nil), t.F32[i*cols:(i+1)*cols]...)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("embedding tensor shape %v is not rank 1 or 2", t.Shape)
+	}
 }
 
 func (m EmbeddingManifest) normalized() EmbeddingManifest {
