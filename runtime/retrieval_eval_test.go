@@ -1,6 +1,7 @@
 package mantaruntime
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,12 +22,45 @@ func TestComputeRetrievalQualityPerfectRanking(t *testing.T) {
 		"q2": {"d2": 1},
 	}
 
-	quality, queriesCount, relevantPairs, skippedDocs, skippedQueries := computeRetrievalQuality(queries, docs, qrels)
+	quality, queriesCount, relevantPairs, skippedDocs, skippedQueries := computeRetrievalQuality(queries, docs, qrels, 100)
 	if queriesCount != 2 || relevantPairs != 2 || skippedDocs != 0 || skippedQueries != 0 {
 		t.Fatalf("counts = queries:%d relevant:%d skippedDocs:%d skippedQueries:%d", queriesCount, relevantPairs, skippedDocs, skippedQueries)
 	}
 	if quality.NDCGAt10 != 1 || quality.MRRAt10 != 1 || quality.RecallAt10 != 1 || quality.RecallAt100 != 1 {
 		t.Fatalf("quality = %+v, want perfect ranking", quality)
+	}
+}
+
+func TestComputeRetrievalQualityUsesBoundedTopK(t *testing.T) {
+	queries := []retrievalVectorRecord{{ID: "q", Vector: []float32{1}}}
+	docs := make([]retrievalVectorRecord, 120)
+	for i := range docs {
+		docs[i] = retrievalVectorRecord{
+			ID:     fmt.Sprintf("d%03d", i),
+			Vector: []float32{float32(200 - i)},
+		}
+	}
+	qrels := retrievalQrels{
+		"q": {
+			"d000": 1,
+			"d009": 1,
+			"d099": 1,
+			"d100": 1,
+		},
+	}
+
+	quality, queriesCount, relevantPairs, skippedDocs, skippedQueries := computeRetrievalQuality(queries, docs, qrels, 100)
+	if queriesCount != 1 || relevantPairs != 4 || skippedDocs != 0 || skippedQueries != 0 {
+		t.Fatalf("counts = queries:%d relevant:%d skippedDocs:%d skippedQueries:%d", queriesCount, relevantPairs, skippedDocs, skippedQueries)
+	}
+	if quality.MRRAt10 != 1 {
+		t.Fatalf("mrr@10 = %v, want 1", quality.MRRAt10)
+	}
+	if quality.RecallAt10 != 0.5 {
+		t.Fatalf("recall@10 = %v, want 0.5", quality.RecallAt10)
+	}
+	if quality.RecallAt100 != 0.75 {
+		t.Fatalf("recall@100 = %v, want 0.75", quality.RecallAt100)
 	}
 }
 

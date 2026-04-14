@@ -2,6 +2,7 @@ package mantaruntime
 
 import (
 	"bufio"
+	"container/heap"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -146,7 +147,7 @@ func EvaluateEmbeddingRetrieval(ctx context.Context, model *EmbeddingModel, cfg 
 	queryDuration := time.Since(queryStart)
 
 	scoreStart := time.Now()
-	quality, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant := computeRetrievalQuality(queryVectors, docVectors, qrels)
+	quality, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant := computeRetrievalQuality(queryVectors, docVectors, qrels, cfg.TopK)
 	scoreDuration := time.Since(scoreStart)
 	if evaluatedQueries == 0 {
 		return RetrievalEvalMetrics{}, fmt.Errorf("no queries had relevant documents in the evaluated corpus")
@@ -372,17 +373,19 @@ type retrievalScoredDoc struct {
 	Score float32
 }
 
-func computeRetrievalQuality(queries, docs []retrievalVectorRecord, qrels retrievalQrels) (RetrievalEvalQualityMetrics, int, int, int, int) {
+func computeRetrievalQuality(queries, docs []retrievalVectorRecord, qrels retrievalQrels, topK int) (RetrievalEvalQualityMetrics, int, int, int, int) {
 	docIDSet := make(map[string]bool, len(docs))
 	for _, doc := range docs {
 		docIDSet[doc.ID] = true
+	}
+	if topK < 100 {
+		topK = 100
 	}
 	var totals RetrievalEvalQualityMetrics
 	evaluatedQueries := 0
 	relevantPairs := 0
 	skippedRelevantDocs := 0
 	skippedNoRelevant := 0
-	scores := make([]retrievalScoredDoc, len(docs))
 	for _, query := range queries {
 		rels := qrels[query.ID]
 		filteredRels := make(map[string]float64, len(rels))
@@ -397,18 +400,7 @@ func computeRetrievalQuality(queries, docs []retrievalVectorRecord, qrels retrie
 			skippedNoRelevant++
 			continue
 		}
-		for i, doc := range docs {
-			scores[i] = retrievalScoredDoc{ID: doc.ID, Score: dotRetrievalVectors(query.Vector, doc.Vector)}
-		}
-		slices.SortFunc(scores, func(a, b retrievalScoredDoc) int {
-			if a.Score > b.Score {
-				return -1
-			}
-			if a.Score < b.Score {
-				return 1
-			}
-			return strings.Compare(a.ID, b.ID)
-		})
+		scores := topRetrievalScores(query.Vector, docs, topK)
 		evaluatedQueries++
 		relevantPairs += len(filteredRels)
 		totals.NDCGAt10 += ndcgAt(scores, filteredRels, 10)
@@ -424,6 +416,71 @@ func computeRetrievalQuality(queries, docs []retrievalVectorRecord, qrels retrie
 		totals.RecallAt100 /= denom
 	}
 	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant
+}
+
+func topRetrievalScores(query []float32, docs []retrievalVectorRecord, topK int) []retrievalScoredDoc {
+	if topK <= 0 || topK > len(docs) {
+		topK = len(docs)
+	}
+	h := make(retrievalScoreHeap, 0, topK)
+	for _, doc := range docs {
+		score := retrievalScoredDoc{ID: doc.ID, Score: dotRetrievalVectors(query, doc.Vector)}
+		if len(h) < topK {
+			heap.Push(&h, score)
+			continue
+		}
+		if retrievalScoreBetter(score, h[0]) {
+			h[0] = score
+			heap.Fix(&h, 0)
+		}
+	}
+	scores := []retrievalScoredDoc(h)
+	slices.SortFunc(scores, func(a, b retrievalScoredDoc) int {
+		if retrievalScoreBetter(a, b) {
+			return -1
+		}
+		if retrievalScoreBetter(b, a) {
+			return 1
+		}
+		return 0
+	})
+	return scores
+}
+
+func retrievalScoreBetter(a, b retrievalScoredDoc) bool {
+	if a.Score > b.Score {
+		return true
+	}
+	if a.Score < b.Score {
+		return false
+	}
+	return a.ID < b.ID
+}
+
+type retrievalScoreHeap []retrievalScoredDoc
+
+func (h retrievalScoreHeap) Len() int {
+	return len(h)
+}
+
+func (h retrievalScoreHeap) Less(i, j int) bool {
+	return retrievalScoreBetter(h[j], h[i])
+}
+
+func (h retrievalScoreHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+}
+
+func (h *retrievalScoreHeap) Push(x any) {
+	*h = append(*h, x.(retrievalScoredDoc))
+}
+
+func (h *retrievalScoreHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
 }
 
 func dotRetrievalVectors(a, b []float32) float32 {

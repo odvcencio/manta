@@ -4,6 +4,7 @@ datasets/
 runs/
 .DS_Store
 .local/
+.ferrous-wheel-build/
 specs/
 plans/
 docs/specs/

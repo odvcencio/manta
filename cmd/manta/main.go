@@ -2161,11 +2161,12 @@ func trainMetricValue(metrics trainMetricsJSON, metric string) (float64, bool) {
 }
 
 func trainMetricThresholdPassed(got, limit float64, op string) bool {
+	const epsilon = 1e-6
 	switch op {
 	case ">=":
-		return got >= limit
+		return got >= limit-epsilon
 	case "<=":
-		return got <= limit
+		return got <= limit+epsilon
 	default:
 		return false
 	}

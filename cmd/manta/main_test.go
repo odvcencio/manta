@@ -951,6 +951,35 @@ func TestRunGateRetrievalMetricsChecksDatasetThresholds(t *testing.T) {
 	}
 }
 
+func TestRunGateRetrievalMetricsAllowsRoundedEquality(t *testing.T) {
+	clearRetrievalMetricGateEnv(t)
+	dir := t.TempDir()
+	metricsPath := filepath.Join(dir, "scifact.retrieval.metrics.json")
+	thresholdsPath := filepath.Join(dir, "thresholds.env")
+	metrics := mantaruntime.RetrievalEvalMetrics{
+		Schema:  mantaruntime.RetrievalEvalMetricsSchema,
+		Dataset: "scifact",
+		Quality: mantaruntime.RetrievalEvalQualityMetrics{
+			NDCGAt10: 0.22842998825189667,
+		},
+	}
+	data, err := json.Marshal(metrics)
+	if err != nil {
+		t.Fatalf("marshal retrieval metrics: %v", err)
+	}
+	if err := os.WriteFile(metricsPath, data, 0o644); err != nil {
+		t.Fatalf("write retrieval metrics: %v", err)
+	}
+	if err := os.WriteFile(thresholdsPath, []byte("MANTA_MIN_RETRIEVAL_NDCG10_SCIFACT=0.228430\n"), 0o644); err != nil {
+		t.Fatalf("write thresholds: %v", err)
+	}
+
+	output := captureRunOutput(t, []string{"gate-retrieval-metrics", "--thresholds", thresholdsPath, metricsPath})
+	if !strings.Contains(output, "retrieval gate: PASS checks=1") {
+		t.Fatalf("rounded equality gate did not pass\noutput:\n%s", output)
+	}
+}
+
 func clearTrainMetricGateEnv(t *testing.T) {
 	t.Helper()
 	for _, threshold := range trainMetricThresholds {
