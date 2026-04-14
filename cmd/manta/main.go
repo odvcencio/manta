@@ -797,6 +797,7 @@ func runTrainEmbed(args []string) error {
 	var noTokenizer bool
 	var planOnly bool
 	var evalOnly bool
+	var pairwiseTrain bool
 	var metricsJSONPath string
 	var learningRate float64
 	var contrastiveLoss string
@@ -817,6 +818,7 @@ func runTrainEmbed(args []string) error {
 	fs.BoolVar(&noTokenizer, "no-tokenizer", false, "disable sibling tokenizer discovery and treat JSONL as tokenized")
 	fs.BoolVar(&planOnly, "plan-only", false, "print planned workload and exit without training")
 	fs.BoolVar(&evalOnly, "eval-only", false, "evaluate the package without running optimizer steps")
+	fs.BoolVar(&pairwiseTrain, "pairwise-train", false, "treat the training JSONL as labeled pair examples instead of contrastive positives")
 	fs.StringVar(&metricsJSONPath, "metrics-json", "", "write machine-readable run metrics JSON to this path")
 	fs.Float64Var(&learningRate, "lr", 0, "override package learning rate for this run")
 	fs.StringVar(&contrastiveLoss, "contrastive-loss", "", "override package contrastive loss: pair_mse or infonce")
@@ -875,6 +877,7 @@ func runTrainEmbed(args []string) error {
 		Temperature:           float32(temperature),
 		ProgressEverySteps:    progressEvery,
 		EvalOnly:              evalOnly,
+		PairwiseTrain:         pairwiseTrain,
 	}
 	if progressEvery > 0 {
 		runConfig.Progress = printTrainProgress
@@ -972,6 +975,21 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg m
 			}
 			return mantaruntime.EstimatePairwiseTrainWorkload(0, len(evalPairs), cfg), nil
 		}
+		if cfg.PairwiseTrain {
+			trainPairs, err := mantaruntime.ReadEmbeddingTextPairExamplesFile(trainPath)
+			if err != nil {
+				return mantaruntime.EmbeddingTrainWorkload{}, err
+			}
+			evalCount := 0
+			if evalPath != "" {
+				evalPairs, err := mantaruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+				if err != nil {
+					return mantaruntime.EmbeddingTrainWorkload{}, err
+				}
+				evalCount = len(evalPairs)
+			}
+			return mantaruntime.EstimatePairwiseTrainWorkload(len(trainPairs), evalCount, cfg), nil
+		}
 		trainSet, err := mantaruntime.ReadEmbeddingTextContrastiveExamplesFile(trainPath)
 		if err != nil {
 			return mantaruntime.EmbeddingTrainWorkload{}, err
@@ -1015,6 +1033,21 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg m
 			return mantaruntime.EstimatePairwiseTrainWorkload(0, len(evalPairs), cfg), nil
 		}
 		return mantaruntime.EstimateContrastiveTrainWorkload(0, len(evalSet), cfg), nil
+	}
+	if cfg.PairwiseTrain {
+		trainPairs, err := mantaruntime.ReadEmbeddingPairExamplesFile(trainPath)
+		if err != nil {
+			return mantaruntime.EmbeddingTrainWorkload{}, err
+		}
+		evalCount := 0
+		if evalPath != "" {
+			evalPairs, err := mantaruntime.ReadEmbeddingPairExamplesFile(evalPath)
+			if err != nil {
+				return mantaruntime.EmbeddingTrainWorkload{}, err
+			}
+			evalCount = len(evalPairs)
+		}
+		return mantaruntime.EstimatePairwiseTrainWorkload(len(trainPairs), evalCount, cfg), nil
 	}
 	trainSet, err := mantaruntime.ReadEmbeddingContrastiveExamplesFile(trainPath)
 	if err != nil {
@@ -1324,6 +1357,7 @@ type trainRunConfigJSON struct {
 	Temperature         float32 `json:"temperature"`
 	ProgressEverySteps  int     `json:"progress_every_steps"`
 	EvalOnly            bool    `json:"eval_only"`
+	PairwiseTrain       bool    `json:"pairwise_train"`
 }
 
 type trainBatchMetricsJSON struct {
@@ -1482,6 +1516,7 @@ func trainRunConfigPayload(cfg mantaruntime.EmbeddingTrainRunConfig) trainRunCon
 		Temperature:         cfg.Temperature,
 		ProgressEverySteps:  cfg.ProgressEverySteps,
 		EvalOnly:            cfg.EvalOnly,
+		PairwiseTrain:       cfg.PairwiseTrain,
 	}
 }
 

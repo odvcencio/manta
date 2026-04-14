@@ -32,6 +32,31 @@ func TrainEmbeddingPackageFromContrastiveFiles(artifactPath, trainPath, evalPath
 		evalPath = trainPath
 		trainPath = ""
 	}
+	if cfg.PairwiseTrain {
+		var trainPairs []EmbeddingPairExample
+		if !cfg.EvalOnly {
+			trainPairs, err = ReadEmbeddingPairExamplesFile(trainPath)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read train pair dataset: %w", err)
+			}
+		}
+		var evalPairs []EmbeddingPairExample
+		if evalPath != "" {
+			evalPairs, err = ReadEmbeddingPairExamplesFile(evalPath)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read eval pair dataset: %w", err)
+			}
+		}
+		summary, err := trainer.Fit(trainPairs, evalPairs, cfg)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		paths, err := trainer.WriteTrainingPackage(artifactPath)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		return summary, paths, nil
+	}
 	var trainSet []EmbeddingContrastiveExample
 	if !cfg.EvalOnly {
 		trainSet, err = ReadEmbeddingContrastiveExamplesFile(trainPath)
@@ -102,6 +127,39 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("build tokenizer: %w", err)
 	}
 	tokenCache := embeddingTextTokenCache{}
+	if cfg.PairwiseTrain {
+		var trainPairs []EmbeddingPairExample
+		if !cfg.EvalOnly {
+			trainText, err := ReadEmbeddingTextPairExamplesFile(trainPath)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read train text pair dataset: %w", err)
+			}
+			trainPairs, err = tokenizeEmbeddingTextPairExamples(trainText, tokenizer, tokenCache, false)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize train pair dataset: %w", err)
+			}
+		}
+		var evalPairs []EmbeddingPairExample
+		if evalPath != "" {
+			evalText, err := ReadEmbeddingTextPairExamplesFile(evalPath)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read eval text pair dataset: %w", err)
+			}
+			evalPairs, err = tokenizeEmbeddingTextPairExamples(evalText, tokenizer, tokenCache, false)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize eval pair dataset: %w", err)
+			}
+		}
+		summary, err := trainer.Fit(trainPairs, evalPairs, cfg)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		paths, err := trainer.WriteTrainingPackage(artifactPath)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		return summary, paths, nil
+	}
 	var trainSet []EmbeddingContrastiveExample
 	if !cfg.EvalOnly {
 		trainText, err := ReadEmbeddingTextContrastiveExamplesFile(trainPath)

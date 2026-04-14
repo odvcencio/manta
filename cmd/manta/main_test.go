@@ -990,6 +990,50 @@ func TestRunTrainEmbedFitsTextContrastivePackageWithLabeledEvalPairs(t *testing.
 	}
 }
 
+func TestRunTrainEmbedFitsTextPairwisePackage(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	tokenizer := mantaruntime.TokenizerFile{
+		Version: mantaruntime.TokenizerFileVersion,
+		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
+	}
+	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	trainPath := filepath.Join(t.TempDir(), "train-pairs.jsonl")
+	evalPath := filepath.Join(t.TempDir(), "eval-pairs.jsonl")
+	trainData := "" +
+		"{\"query\":\"ab\",\"document\":\"ab\",\"label\":1}\n" +
+		"{\"query\":\"ab\",\"document\":\"cd\",\"label\":-1}\n" +
+		"{\"query\":\"cd\",\"document\":\"cd\",\"label\":1}\n" +
+		"{\"query\":\"cd\",\"document\":\"ab\",\"label\":-1}\n"
+	evalData := "" +
+		"{\"query\":\"ab\",\"document\":\"ab\",\"label\":1}\n" +
+		"{\"left\":\"ab\",\"right\":\"cd\",\"label\":0}\n"
+	if err := os.WriteFile(trainPath, []byte(trainData), 0o644); err != nil {
+		t.Fatalf("write train text pairs: %v", err)
+	}
+	if err := os.WriteFile(evalPath, []byte(evalData), 0o644); err != nil {
+		t.Fatalf("write eval text pairs: %v", err)
+	}
+
+	output := captureRunOutput(t, []string{"train-embed", "--pairwise-train", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath})
+	for _, want := range []string{
+		"trained package",
+		"train=4 pairwise examples",
+		"eval=2 pairwise examples",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("pairwise train output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+		t.Fatalf("reload trained package: %v", err)
+	}
+}
+
 func TestRunInspectReadsPackageManifest(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {

@@ -58,10 +58,11 @@ type evalRecord struct {
 }
 
 type outputCounts struct {
-	TrainPairs int
-	EvalPairs  int
-	HardPairs  int
-	CorpusDocs int
+	TrainPairs        int
+	TrainPairExamples int
+	EvalPairs         int
+	HardPairs         int
+	CorpusDocs        int
 }
 
 type acquireConfig struct {
@@ -78,6 +79,7 @@ type acquireConfig struct {
 	Negatives      int
 	ThresholdsPath string
 	TrainPath      string
+	TrainPairPath  string
 	EvalPath       string
 	HardEvalPath   string
 	TokenizerPath  string
@@ -95,6 +97,7 @@ Defaults:
 
 Outputs:
   processed/train.jsonl
+  processed/train-pairs.jsonl
   processed/eval.jsonl
   processed/hard-eval.jsonl
   processed/tokenizer-corpus.txt
@@ -226,6 +229,7 @@ func prepareConfig(root string) (acquireConfig, error) {
 		Negatives:      negatives,
 		ThresholdsPath: filepath.Join(outRoot, "processed", "thresholds.env"),
 		TrainPath:      filepath.Join(outRoot, "processed", "train.jsonl"),
+		TrainPairPath:  filepath.Join(outRoot, "processed", "train-pairs.jsonl"),
 		EvalPath:       filepath.Join(outRoot, "processed", "eval.jsonl"),
 		HardEvalPath:   filepath.Join(outRoot, "processed", "hard-eval.jsonl"),
 		TokenizerPath:  filepath.Join(outRoot, "processed", "tokenizer-corpus.txt"),
@@ -413,15 +417,32 @@ func readQrels(path string) ([]qrelRecord, error) {
 		if len(cols) < 3 {
 			continue
 		}
-		score, err := strconv.ParseFloat(cols[2], 64)
+		docCol := 1
+		scoreCol := 2
+		if len(cols) >= 4 {
+			docCol = 2
+			scoreCol = 3
+		}
+		score, err := strconv.ParseFloat(cols[scoreCol], 64)
 		if err != nil {
 			continue
 		}
 		if score > 0 {
-			out = append(out, qrelRecord{QueryID: cols[0], DocID: cols[1], Score: score})
+			out = append(out, qrelRecord{QueryID: cols[0], DocID: cols[docCol], Score: score})
 		}
 	}
 	return out, scanner.Err()
+}
+
+func positiveDocSets(qrels []qrelRecord) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for _, qrel := range qrels {
+		if out[qrel.QueryID] == nil {
+			out[qrel.QueryID] = map[string]bool{}
+		}
+		out[qrel.QueryID][qrel.DocID] = true
+	}
+	return out
 }
 
 func textTrainRecords(dataset string, qrels []qrelRecord, queries map[string]string, corpus map[string]string, limit int) []trainRecord {
@@ -446,7 +467,7 @@ func textTrainRecords(dataset string, qrels []qrelRecord, queries map[string]str
 	return out
 }
 
-func negativeDocID(dataset string, queryID string, positiveID string, ids []string, offset int) string {
+func negativeDocID(dataset string, queryID string, positiveID string, ids []string, positives map[string]bool, offset int) string {
 	if len(ids) == 0 {
 		return ""
 	}
@@ -455,16 +476,17 @@ func negativeDocID(dataset string, queryID string, positiveID string, ids []stri
 	start := int(h.Sum64() % uint64(len(ids)))
 	for i := 0; i < len(ids); i++ {
 		id := ids[(start+i+offset)%len(ids)]
-		if id != positiveID {
+		if id != positiveID && !positives[id] {
 			return id
 		}
 	}
 	return ""
 }
 
-func textEvalRecords(dataset string, qrels []qrelRecord, queries map[string]string, corpus map[string]string, ids []string, negatives int, limit int) []evalRecord {
+func textTrainPairRecords(dataset string, qrels []qrelRecord, queries map[string]string, corpus map[string]string, ids []string, negatives int, limit int) []evalRecord {
 	out := []evalRecord{}
 	seen := map[string]bool{}
+	positivesByQuery := positiveDocSets(qrels)
 	for _, qrel := range qrels {
 		if limit > 0 && len(out) >= limit {
 			break
@@ -483,7 +505,48 @@ func textEvalRecords(dataset string, qrels []qrelRecord, queries map[string]stri
 			if limit > 0 && len(out) >= limit {
 				break
 			}
-			negID := negativeDocID(dataset, qrel.QueryID, qrel.DocID, ids, i)
+			negID := negativeDocID(dataset, qrel.QueryID, qrel.DocID, ids, positivesByQuery[qrel.QueryID], i)
+			if negID == "" {
+				continue
+			}
+			negDoc := strings.TrimSpace(corpus[negID])
+			if negDoc == "" {
+				continue
+			}
+			negKey := qrel.QueryID + "\x00" + negID + "\x00-1"
+			if seen[negKey] {
+				continue
+			}
+			seen[negKey] = true
+			out = append(out, evalRecord{Left: query, Right: negDoc, Label: -1, Source: dataset})
+		}
+	}
+	return out
+}
+
+func textEvalRecords(dataset string, qrels []qrelRecord, queries map[string]string, corpus map[string]string, ids []string, negatives int, limit int) []evalRecord {
+	out := []evalRecord{}
+	seen := map[string]bool{}
+	positivesByQuery := positiveDocSets(qrels)
+	for _, qrel := range qrels {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		query := strings.TrimSpace(queries[qrel.QueryID])
+		doc := strings.TrimSpace(corpus[qrel.DocID])
+		if query == "" || doc == "" {
+			continue
+		}
+		key := qrel.QueryID + "\x00" + qrel.DocID + "\x001"
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, evalRecord{Query: query, Document: doc, Label: 1, Source: dataset})
+		}
+		for i := 0; i < negatives; i++ {
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+			negID := negativeDocID(dataset, qrel.QueryID, qrel.DocID, ids, positivesByQuery[qrel.QueryID], i)
 			if negID == "" {
 				continue
 			}
@@ -524,7 +587,7 @@ func writeJSONL(path string, values any) error {
 	return nil
 }
 
-func writeTokenizerCorpus(path string, records []trainRecord, evals []evalRecord, hard []evalRecord) error {
+func writeTokenizerCorpus(path string, records []trainRecord, trainPairs []evalRecord, evals []evalRecord, hard []evalRecord) error {
 	f, err := os.Create(path)
 	guard err == nil else return err
 	defer f.Close()
@@ -542,6 +605,12 @@ func writeTokenizerCorpus(path string, records []trainRecord, evals []evalRecord
 		err = writeText(record.Query)
 		guard err == nil else return err
 		err = writeText(record.Positive)
+		guard err == nil else return err
+	}
+	for _, record := range trainPairs {
+		err = writeText(firstNonEmpty(record.Query, record.Left))
+		guard err == nil else return err
+		err = writeText(firstNonEmpty(record.Document, record.Right))
 		guard err == nil else return err
 	}
 	for _, record := range evals {
@@ -591,20 +660,20 @@ func positiveSplits(dir string, dataset string) ([]qrelRecord, []qrelRecord, []q
 	return train, dev, test, nil
 }
 
-func acquireDataset(cfg acquireConfig, spec datasetSpec) ([]trainRecord, []evalRecord, []evalRecord, int, error) {
+func acquireDataset(cfg acquireConfig, spec datasetSpec) ([]trainRecord, []evalRecord, []evalRecord, []evalRecord, int, error) {
 	zipPath := filepath.Join(cfg.RawDir, spec.Name+".zip")
 	err := downloadFile(spec, zipPath)
-	guard err == nil else return nil, nil, nil, 0, err
+	guard err == nil else return nil, nil, nil, nil, 0, err
 	extractRoot := filepath.Join(cfg.RawDir, spec.Name)
 	err = unzip(zipPath, extractRoot)
-	guard err == nil else return nil, nil, nil, 0, err
+	guard err == nil else return nil, nil, nil, nil, 0, err
 	dir := datasetDir(extractRoot, spec.Name)
 	corpus, ids, err := readCorpus(filepath.Join(dir, "corpus.jsonl"))
-	guard err == nil else return nil, nil, nil, 0, err
+	guard err == nil else return nil, nil, nil, nil, 0, err
 	queries, err := readQueries(filepath.Join(dir, "queries.jsonl"))
-	guard err == nil else return nil, nil, nil, 0, err
+	guard err == nil else return nil, nil, nil, nil, 0, err
 	trainQrels, evalQrels, hardQrels, err := positiveSplits(dir, spec.Name)
-	guard err == nil else return nil, nil, nil, 0, err
+	guard err == nil else return nil, nil, nil, nil, 0, err
 	trainLimit := cfg.MaxTrain
 	evalLimit := cfg.MaxEval
 	hardLimit := cfg.MaxHard
@@ -614,13 +683,15 @@ func acquireDataset(cfg acquireConfig, spec datasetSpec) ([]trainRecord, []evalR
 		hardLimit = cfg.MaxHard / len(cfg.Datasets)
 	}
 	train := textTrainRecords(spec.Name, trainQrels, queries, corpus, trainLimit)
+	trainPairs := textTrainPairRecords(spec.Name, trainQrels, queries, corpus, ids, cfg.Negatives, trainLimit)
 	eval := textEvalRecords(spec.Name, evalQrels, queries, corpus, ids, cfg.Negatives, evalLimit)
 	hard := textEvalRecords(spec.Name, hardQrels, queries, corpus, ids, cfg.Negatives, hardLimit)
-	guard len(train) > 0 else return nil, nil, nil, 0, fmt.Errorf("%s produced no train records", spec.Name)
-	guard len(eval) > 0 else return nil, nil, nil, 0, fmt.Errorf("%s produced no eval records", spec.Name)
-	guard len(hard) > 0 else return nil, nil, nil, 0, fmt.Errorf("%s produced no hard eval records", spec.Name)
-	fmt.Println(f"{spec.Name}: train={len(train)} eval={len(eval)} hard={len(hard)} corpus_docs={len(ids)}")
-	return train, eval, hard, len(ids), nil
+	guard len(train) > 0 else return nil, nil, nil, nil, 0, fmt.Errorf("%s produced no train records", spec.Name)
+	guard len(trainPairs) > 0 else return nil, nil, nil, nil, 0, fmt.Errorf("%s produced no train pair records", spec.Name)
+	guard len(eval) > 0 else return nil, nil, nil, nil, 0, fmt.Errorf("%s produced no eval records", spec.Name)
+	guard len(hard) > 0 else return nil, nil, nil, nil, 0, fmt.Errorf("%s produced no hard eval records", spec.Name)
+	fmt.Println(f"{spec.Name}: train={len(train)} train_pairs={len(trainPairs)} eval={len(eval)} hard={len(hard)} corpus_docs={len(ids)}")
+	return train, trainPairs, eval, hard, len(ids), nil
 }
 
 func writeThresholds(path string) error {
@@ -662,6 +733,7 @@ func writeManifest(cfg acquireConfig, counts outputCounts) error {
   "datasets": %s,
   "outputs": {
     "train_jsonl": %q,
+    "train_pair_jsonl": %q,
     "eval_jsonl": %q,
     "hard_eval_jsonl": %q,
     "tokenizer_corpus": %q,
@@ -670,25 +742,28 @@ func writeManifest(cfg acquireConfig, counts outputCounts) error {
   },
   "counts": {
     "train_pairs": %d,
+    "train_pair_examples": %d,
     "eval_pairs": %d,
     "hard_pairs": %d,
     "corpus_docs": %d
   },
   "negative_sampling": {
     "negatives_per_positive": %d,
-    "strategy": "deterministic fnv64 query/doc offset"
+    "strategy": "deterministic fnv64 query/doc offset excluding known positive docs for the query"
   }
 }
 `,
 		time.Now().UTC().Format(time.RFC3339),
 		string(datasetJSON),
 		cfg.TrainPath,
+		cfg.TrainPairPath,
 		cfg.EvalPath,
 		cfg.HardEvalPath,
 		cfg.TokenizerPath,
 		cfg.ThresholdsPath,
 		cfg.SHAPath,
 		counts.TrainPairs,
+		counts.TrainPairExamples,
 		counts.EvalPairs,
 		counts.HardPairs,
 		counts.CorpusDocs,
@@ -698,7 +773,7 @@ func writeManifest(cfg acquireConfig, counts outputCounts) error {
 }
 
 func writeSHA256Sums(cfg acquireConfig) error {
-	paths := []string{cfg.TrainPath, cfg.EvalPath, cfg.HardEvalPath, cfg.TokenizerPath, cfg.ThresholdsPath, cfg.ManifestPath}
+	paths := []string{cfg.TrainPath, cfg.TrainPairPath, cfg.EvalPath, cfg.HardEvalPath, cfg.TokenizerPath, cfg.ThresholdsPath, cfg.ManifestPath}
 	f, err := os.Create(cfg.SHAPath)
 	guard err == nil else return err
 	defer f.Close()
@@ -728,24 +803,27 @@ func main() {
 	}
 	step("Acquire BEIR datasets")
 	allTrain := []trainRecord{}
+	allTrainPairs := []evalRecord{}
 	allEval := []evalRecord{}
 	allHard := []evalRecord{}
 	counts := outputCounts{}
 	for _, spec := range cfg.Datasets {
-		train, eval, hard, docs, err := acquireDataset(cfg, spec)
+		train, trainPairs, eval, hard, docs, err := acquireDataset(cfg, spec)
 		guard err == nil else {
 			fmt.Println(f"acquire {spec.Name} failed: {err}")
 			os.Exit(1)
 		}
 		allTrain = append(allTrain, train...)
+		allTrainPairs = append(allTrainPairs, trainPairs...)
 		allEval = append(allEval, eval...)
 		allHard = append(allHard, hard...)
 		counts.CorpusDocs += docs
 	}
 	counts.TrainPairs = len(allTrain)
+	counts.TrainPairExamples = len(allTrainPairs)
 	counts.EvalPairs = len(allEval)
 	counts.HardPairs = len(allHard)
-	guard counts.TrainPairs > 0 && counts.EvalPairs > 0 && counts.HardPairs > 0 else {
+	guard counts.TrainPairs > 0 && counts.TrainPairExamples > 0 && counts.EvalPairs > 0 && counts.HardPairs > 0 else {
 		fmt.Println("acquired datasets are empty")
 		os.Exit(1)
 	}
@@ -753,6 +831,11 @@ func main() {
 	err = writeJSONL(cfg.TrainPath, allTrain)
 	guard err == nil else {
 		fmt.Println(f"write train dataset failed: {err}")
+		os.Exit(1)
+	}
+	err = writeJSONL(cfg.TrainPairPath, allTrainPairs)
+	guard err == nil else {
+		fmt.Println(f"write train pair dataset failed: {err}")
 		os.Exit(1)
 	}
 	err = writeJSONL(cfg.EvalPath, allEval)
@@ -765,7 +848,7 @@ func main() {
 		fmt.Println(f"write hard eval dataset failed: {err}")
 		os.Exit(1)
 	}
-	err = writeTokenizerCorpus(cfg.TokenizerPath, allTrain, allEval, allHard)
+	err = writeTokenizerCorpus(cfg.TokenizerPath, allTrain, allTrainPairs, allEval, allHard)
 	guard err == nil else {
 		fmt.Println(f"write tokenizer corpus failed: {err}")
 		os.Exit(1)
@@ -788,6 +871,7 @@ func main() {
 	step("Dataset bundle ready")
 	fmt.Println(f"dataset_root={cfg.OutputRoot}")
 	fmt.Println(f"train_jsonl={cfg.TrainPath}")
+	fmt.Println(f"train_pair_jsonl={cfg.TrainPairPath}")
 	fmt.Println(f"eval_jsonl={cfg.EvalPath}")
 	fmt.Println(f"hard_eval_jsonl={cfg.HardEvalPath}")
 	fmt.Println(f"tokenizer_corpus={cfg.TokenizerPath}")

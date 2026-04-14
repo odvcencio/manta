@@ -32,6 +32,7 @@ type candidateConfig struct {
 	TokenizerCorpus     string
 	ThresholdsEnv       string
 	TrainMode           string
+	PairwiseTrain       string
 	VocabSize           string
 	MaxSeq              string
 	EmbeddingDim        string
@@ -93,6 +94,7 @@ Common knobs:
   MANTA_SELECT_METRIC=mrr
   MANTA_EVAL_EVERY_STEPS=0
   MANTA_PRETOKENIZE_JSONL=0
+  MANTA_PAIRWISE_TRAIN=1
   MANTA_TRAIN_ENABLE_FAST_GELU=1
   MANTA_MIN_MRR=0.90
   MANTA_MIN_TOP1=0.85
@@ -416,6 +418,7 @@ func writeManifest(cfg candidateConfig, status string) error {
   },
   "training": {
     "mode": %s,
+    "pairwise_train": %s,
     "epochs": %s,
     "batch_size": %s,
     "learning_rate": %s,
@@ -462,6 +465,7 @@ func writeManifest(cfg candidateConfig, status string) error {
 		cfg.HiddenDim,
 		cfg.InitSeed,
 		jsonString(cfg.TrainMode),
+		jsonBool(envEnabled("MANTA_PAIRWISE_TRAIN") || cfg.PairwiseTrain == "1" || strings.ToLower(cfg.PairwiseTrain) == "true"),
 		cfg.Epochs,
 		cfg.BatchSize,
 		cfg.LR,
@@ -568,6 +572,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		Patience:            getenv("MANTA_PATIENCE", "3"),
 		MinDelta:            getenv("MANTA_MIN_DELTA", "0"),
 		SelectMetric:        getenv("MANTA_SELECT_METRIC", "score_margin"),
+		PairwiseTrain:       getenv("MANTA_PAIRWISE_TRAIN", "0"),
 		MinFreq:             getenv("MANTA_MIN_FREQ", "1"),
 		MinChars:            getenv("MANTA_MIN_CHARS", "20"),
 		MaxPairs:            getenv("MANTA_MAX_PAIRS", "0"),
@@ -681,6 +686,10 @@ func trainCommonArgs(cfg candidateConfig) []string {
 	return args
 }
 
+func pairwiseTrainEnabled(cfg candidateConfig) bool {
+	return envEnabled("MANTA_PAIRWISE_TRAIN") || cfg.PairwiseTrain == "1" || strings.ToLower(cfg.PairwiseTrain) == "true"
+}
+
 func applyCandidateRuntimeEnv(cfg candidateConfig) {
 	if !envEnabled("MANTA_TRAIN_DISABLE_ACTIVATION_ACCEL") && cfg.ActivationAccel != "" {
 		os.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", cfg.ActivationAccel)
@@ -748,11 +757,15 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		trainTokenizer = tokenizerForEval
 	}
 	if cfg.TrainMode == "prepared_jsonl" && tokenizerForEval != "" && envEnabled("MANTA_PRETOKENIZE_JSONL") {
+		trainTokenizeMode := "contrastive"
+		if pairwiseTrainEnabled(cfg) {
+			trainTokenizeMode = "pair"
+		}
 		trainJSONLForRun = filepath.Join(cfg.RunDir, cfg.ModelName+".train.tokens.jsonl")
 		evalJSONLForRun = filepath.Join(cfg.RunDir, cfg.ModelName+".eval.tokens.jsonl")
 		err = runCmd(cfg, "Tokenize prepared train JSONL", "tokenize-train.log", cfg.MantaBin, []string{
 			"tokenize-embed",
-			"--mode", "contrastive",
+			"--mode", trainTokenizeMode,
 			"--tokenizer", tokenizerForEval,
 			cfg.Artifact,
 			cfg.TrainJSONL,
@@ -823,6 +836,9 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	} else {
 		args := append([]string{"train-embed"}, common...)
 		args = append(args, "--metrics-json", cfg.TrainMetricsJSON)
+		if pairwiseTrainEnabled(cfg) {
+			args = append(args, "--pairwise-train")
+		}
 		if trainTokenizer != "" {
 			args = append(args, "--tokenizer", trainTokenizer)
 		} else if tokenJSONLForRun {
@@ -830,6 +846,9 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		}
 		args = append(args, cfg.Artifact, trainJSONLForRun, evalJSONLForRun)
 		planArgs := append([]string{"train-embed", "--plan-only"}, common...)
+		if pairwiseTrainEnabled(cfg) {
+			planArgs = append(planArgs, "--pairwise-train")
+		}
 		if trainTokenizer != "" {
 			planArgs = append(planArgs, "--tokenizer", trainTokenizer)
 		} else if tokenJSONLForRun {

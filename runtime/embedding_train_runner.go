@@ -22,6 +22,7 @@ type EmbeddingTrainRunConfig struct {
 	MinDelta              float32
 	RestoreBest           bool
 	EvalOnly              bool
+	PairwiseTrain         bool
 	LengthBucketBatches   bool
 	LearningRate          float32
 	ContrastiveLoss       string
