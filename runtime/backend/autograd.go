@@ -342,7 +342,8 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 		if err != nil {
 			return nil, err
 		}
-		out, err := RateDistortionLossGrad(distortion, rate, attrFloat(step.Attributes, "lambda", 1))
+		rateWeight := attrFloat(step.Attributes, "lambda", 1) * attrFloat(step.Attributes, "rate_scale", 1)
+		out, err := RateDistortionLossGrad(distortion, rate, rateWeight)
 		if err != nil {
 			return nil, err
 		}
@@ -587,12 +588,12 @@ func ScalarAddGrad(inputs ...*GradTensor) (*GradTensor, error) {
 	return node, nil
 }
 
-// RateDistortionLossGrad applies distortion + lambda*rate.
-func RateDistortionLossGrad(distortion, rate *GradTensor, lambda float64) (*GradTensor, error) {
+// RateDistortionLossGrad applies distortion + rateWeight*rate.
+func RateDistortionLossGrad(distortion, rate *GradTensor, rateWeight float64) (*GradTensor, error) {
 	if distortion == nil || rate == nil {
 		return nil, fmt.Errorf("rate_distortion_loss autograd expects distortion and rate")
 	}
-	out, err := rateDistortionLossTensor(distortion.Value, rate.Value, lambda)
+	out, err := rateDistortionLossTensor(distortion.Value, rate.Value, rateWeight)
 	if err != nil {
 		return nil, err
 	}
@@ -601,7 +602,7 @@ func RateDistortionLossGrad(distortion, rate *GradTensor, lambda float64) (*Grad
 		if err := accumulateGrad(distortion, NewTensorF32([]int{1}, []float32{scale})); err != nil {
 			return err
 		}
-		return accumulateGrad(rate, NewTensorF32([]int{1}, []float32{float32(float64(scale) * lambda)}))
+		return accumulateGrad(rate, NewTensorF32([]int{1}, []float32{float32(float64(scale) * rateWeight)}))
 	})
 	return node, nil
 }

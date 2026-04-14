@@ -405,7 +405,8 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 				return tensorValuesFromDispatch(mod, entry, step, result, bindings, kind), result.VariantEntry, nil
 			}
 		}
-		out, err := rateDistortionLossTensor(distortion, rate, attrFloat(step.Attributes, "lambda", 1))
+		rateWeight := attrFloat(step.Attributes, "lambda", 1) * attrFloat(step.Attributes, "rate_scale", 1)
+		out, err := rateDistortionLossTensor(distortion, rate, rateWeight)
 		if err != nil {
 			return nil, "", err
 		}

@@ -138,6 +138,27 @@ func TestCrossEntropyAutogradPropagatesCodeSurrogate(t *testing.T) {
 	}
 }
 
+func TestRateDistortionLossAutogradUsesRateWeight(t *testing.T) {
+	distortion := NewGradTensor("distortion", NewTensorF32([]int{1}, []float32{2}), true)
+	rate := NewGradTensor("rate", NewTensorF32([]int{1}, []float32{5}), true)
+	loss, err := RateDistortionLossGrad(distortion, rate, 0.25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loss.Value.F32[0]; !close32(got, 3.25, 1e-6) {
+		t.Fatalf("loss = %.6f want 3.25", got)
+	}
+	if err := Backward(loss); err != nil {
+		t.Fatal(err)
+	}
+	if got := distortion.Grad.F32[0]; !close32(got, 1, 1e-6) {
+		t.Fatalf("distortion grad = %.6f want 1", got)
+	}
+	if got := rate.Grad.F32[0]; !close32(got, 0.25, 1e-6) {
+		t.Fatalf("rate grad = %.6f want 0.25", got)
+	}
+}
+
 func TestRateGradientFlowsThroughTurboQuantEncodeToInput(t *testing.T) {
 	mod := mantaartifact.NewModule("tq_rate_ste")
 	mod.EntryPoints = []mantaartifact.EntryPoint{{

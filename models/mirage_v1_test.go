@@ -78,6 +78,56 @@ func TestDefaultMirageV1ModuleRuns(t *testing.T) {
 	}
 }
 
+func TestDefaultMirageV1ModuleUsesBPPScaledRDLoss(t *testing.T) {
+	mod, err := DefaultMirageV1Module(MirageV1Config{
+		ImageHeight: 16,
+		ImageWidth:  32,
+		Lambda:      0.01,
+		LambdaSet:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loss := findMirageStep(t, mod, "train_step", "loss")
+	scale, err := strconv.ParseFloat(loss.Attributes["rate_scale"], 64)
+	if err != nil {
+		t.Fatalf("parse rate_scale: %v", err)
+	}
+	want := 1 / float64(16*32)
+	if math.Abs(scale-want) > 1e-12 {
+		t.Fatalf("rate_scale = %.12f want %.12f", scale, want)
+	}
+	if got := mod.Metadata["rate_unit"]; got != "bits_per_pixel" {
+		t.Fatalf("rate_unit metadata = %v", got)
+	}
+}
+
+func TestDefaultMirageV1ModuleAllowsExplicitZeroLambda(t *testing.T) {
+	mod, err := DefaultMirageV1Module(MirageV1Config{Lambda: 0, LambdaSet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loss := findMirageStep(t, mod, "train_step", "loss")
+	if got := loss.Attributes["lambda"]; got != "0" {
+		t.Fatalf("lambda attr = %q want 0", got)
+	}
+}
+
+func TestDefaultMirageV1TrainStepUsesContinuousReconstructionPath(t *testing.T) {
+	mod, err := DefaultMirageV1Module(MirageV1Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trainSynthesis := findMirageStep(t, mod, "train_step", "synthesis_0")
+	if got := trainSynthesis.Inputs[0]; got != "y" {
+		t.Fatalf("train synthesis input = %q want y", got)
+	}
+	deploySynthesis := findMirageStep(t, mod, "synthesize_image", "synthesis_0")
+	if got := deploySynthesis.Inputs[0]; got != "y_hat" {
+		t.Fatalf("deploy synthesis input = %q want y_hat", got)
+	}
+}
+
 func TestDefaultMirageV1BitPlaneModuleRuns(t *testing.T) {
 	mod, err := DefaultMirageV1Module(MirageV1Config{Factorization: "bit-plane"})
 	if err != nil {
@@ -103,6 +153,17 @@ func TestDefaultMirageV1BitPlaneModuleRuns(t *testing.T) {
 	if !sameShape(logits.Shape, []int{1, 4 * 4 * 2, 1, 1}) {
 		t.Fatalf("bit-plane pi_logits shape: got %v", logits.Shape)
 	}
+}
+
+func findMirageStep(t *testing.T, mod *mantaartifact.Module, entry, name string) mantaartifact.Step {
+	t.Helper()
+	for _, step := range mod.Steps {
+		if step.Entry == entry && step.Name == name {
+			return step
+		}
+	}
+	t.Fatalf("missing step %s/%s", entry, name)
+	return mantaartifact.Step{}
 }
 
 func TestDefaultMirageV1AutogradProducesTrainableGradients(t *testing.T) {

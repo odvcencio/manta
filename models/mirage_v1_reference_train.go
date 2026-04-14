@@ -19,6 +19,10 @@ type MirageV1ReferenceTrainConfig struct {
 	GradientClip float32
 	WeightDecay  float32
 	MinGDNBeta   float32
+	Optimizer    string
+	AdamBeta1    float32
+	AdamBeta2    float32
+	AdamEpsilon  float32
 }
 
 // MirageV1ReferenceTrainHistory records loss movement through a reference run.
@@ -102,6 +106,7 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 		Rates:         make([]float32, 0, cfg.Steps+1),
 		GradientNorms: make([]MirageV1ReferenceGradientNorms, 0, cfg.Steps),
 	}
+	opt := newMirageReferenceOptimizerState(mod, weights, cfg)
 	for step := 0; step < cfg.Steps; step++ {
 		image := images[step%len(images)]
 		result, err := backend.ExecuteAutograd(mod, backend.GradRequest{
@@ -120,7 +125,7 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 		history.MSEs = append(history.MSEs, metrics.MSE)
 		history.Rates = append(history.Rates, metrics.Rate)
 		history.GradientNorms = append(history.GradientNorms, mirageReferenceGradientNorms(result.Gradients))
-		if err := applyMirageReferenceSGD(mod, weights, result.Gradients, cfg); err != nil {
+		if err := applyMirageReferenceUpdate(mod, weights, result.Gradients, cfg, opt); err != nil {
 			return MirageV1ReferenceTrainHistory{}, err
 		}
 	}
@@ -227,7 +232,59 @@ func normalizeMirageReferenceTrainConfig(cfg MirageV1ReferenceTrainConfig) Mirag
 	if cfg.MinGDNBeta == 0 {
 		cfg.MinGDNBeta = 1e-4
 	}
+	cfg.Optimizer = strings.ToLower(strings.TrimSpace(cfg.Optimizer))
+	if cfg.Optimizer == "" {
+		cfg.Optimizer = "sgd"
+	}
+	if cfg.AdamBeta1 == 0 {
+		cfg.AdamBeta1 = 0.9
+	}
+	if cfg.AdamBeta2 == 0 {
+		cfg.AdamBeta2 = 0.999
+	}
+	if cfg.AdamEpsilon == 0 {
+		cfg.AdamEpsilon = 1e-8
+	}
 	return cfg
+}
+
+type mirageReferenceOptimizerState struct {
+	step int
+	m    map[string][]float32
+	v    map[string][]float32
+}
+
+func newMirageReferenceOptimizerState(mod *mantaartifact.Module, weights map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig) *mirageReferenceOptimizerState {
+	if cfg.Optimizer != "adam" {
+		return nil
+	}
+	state := &mirageReferenceOptimizerState{
+		m: make(map[string][]float32, len(mod.Params)),
+		v: make(map[string][]float32, len(mod.Params)),
+	}
+	for _, param := range mod.Params {
+		if !param.Trainable {
+			continue
+		}
+		weight := weights[param.Name]
+		if weight == nil {
+			continue
+		}
+		state.m[param.Name] = make([]float32, len(weight.F32))
+		state.v[param.Name] = make([]float32, len(weight.F32))
+	}
+	return state
+}
+
+func applyMirageReferenceUpdate(mod *mantaartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig, opt *mirageReferenceOptimizerState) error {
+	switch cfg.Optimizer {
+	case "sgd":
+		return applyMirageReferenceSGD(mod, weights, grads, cfg)
+	case "adam":
+		return applyMirageReferenceAdam(mod, weights, grads, cfg, opt)
+	default:
+		return fmt.Errorf("unknown optimizer %q", cfg.Optimizer)
+	}
 }
 
 func applyMirageReferenceSGD(mod *mantaartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig) error {
@@ -244,18 +301,62 @@ func applyMirageReferenceSGD(mod *mantaartifact.Module, weights, grads map[strin
 			return fmt.Errorf("gradient shape mismatch for %q", param.Name)
 		}
 		for i := range weight.F32 {
-			g := grad.F32[i]
-			if cfg.GradientClip > 0 {
-				g = clampFloat32(g, -cfg.GradientClip, cfg.GradientClip)
-			}
-			if cfg.WeightDecay != 0 {
-				g += cfg.WeightDecay * weight.F32[i]
-			}
+			g := prepareMirageReferenceGrad(grad.F32[i], weight.F32[i], cfg)
 			weight.F32[i] -= cfg.LearningRate * g
 		}
 		constrainMirageParam(param.Name, weight, cfg)
 	}
 	return nil
+}
+
+func applyMirageReferenceAdam(mod *mantaartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig, opt *mirageReferenceOptimizerState) error {
+	if opt == nil {
+		return fmt.Errorf("adam optimizer state is nil")
+	}
+	opt.step++
+	beta1, beta2 := float64(cfg.AdamBeta1), float64(cfg.AdamBeta2)
+	bias1 := 1 - math.Pow(beta1, float64(opt.step))
+	bias2 := 1 - math.Pow(beta2, float64(opt.step))
+	for _, param := range mod.Params {
+		if !param.Trainable {
+			continue
+		}
+		weight := weights[param.Name]
+		grad := grads[param.Name]
+		if weight == nil || grad == nil {
+			continue
+		}
+		if len(weight.F32) != len(grad.F32) {
+			return fmt.Errorf("gradient shape mismatch for %q", param.Name)
+		}
+		m := opt.m[param.Name]
+		v := opt.v[param.Name]
+		if len(m) != len(weight.F32) || len(v) != len(weight.F32) {
+			return fmt.Errorf("adam state shape mismatch for %q", param.Name)
+		}
+		for i := range weight.F32 {
+			g := prepareMirageReferenceGrad(grad.F32[i], weight.F32[i], cfg)
+			m[i] = cfg.AdamBeta1*m[i] + (1-cfg.AdamBeta1)*g
+			v[i] = cfg.AdamBeta2*v[i] + (1-cfg.AdamBeta2)*g*g
+			mHat := float64(m[i]) / bias1
+			vHat := float64(v[i]) / bias2
+			update := float64(cfg.LearningRate) * mHat / (math.Sqrt(vHat) + float64(cfg.AdamEpsilon))
+			weight.F32[i] -= float32(update)
+		}
+		constrainMirageParam(param.Name, weight, cfg)
+	}
+	return nil
+}
+
+func prepareMirageReferenceGrad(grad, weight float32, cfg MirageV1ReferenceTrainConfig) float32 {
+	g := grad
+	if cfg.GradientClip > 0 {
+		g = clampFloat32(g, -cfg.GradientClip, cfg.GradientClip)
+	}
+	if cfg.WeightDecay != 0 {
+		g += cfg.WeightDecay * weight
+	}
+	return g
 }
 
 func constrainMirageParam(name string, weight *backend.Tensor, cfg MirageV1ReferenceTrainConfig) {
@@ -356,7 +457,7 @@ func xavierScale(shape []int) float32 {
 	if fanIn <= 0 {
 		return 0.02
 	}
-	return float32(math.Sqrt(2/float64(fanIn)) * 0.25)
+	return float32(math.Sqrt(2 / float64(fanIn)))
 }
 
 func tensorForDType(dtype string, shape []int, values []float32) *backend.Tensor {

@@ -60,6 +60,39 @@ func TestMirageV1ReferenceTrainSingleImageConverges(t *testing.T) {
 	}
 }
 
+func TestMirageV1ReferenceTrainAdamRuns(t *testing.T) {
+	mod, err := DefaultMirageV1Module(MirageV1Config{
+		ImageHeight:    16,
+		ImageWidth:     16,
+		LatentChannels: 4,
+		HyperChannels:  4,
+		BitWidth:       2,
+		Lambda:         0,
+		LambdaSet:      true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	weights, err := InitMirageV1ReferenceWeights(mod, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := TrainMirageV1Reference(mod, weights, []*backend.Tensor{mirageReferenceTrainImage()}, MirageV1ReferenceTrainConfig{
+		Steps:        4,
+		LearningRate: 0.001,
+		Optimizer:    "adam",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Losses) != 5 {
+		t.Fatalf("loss history length = %d want 5", len(history.Losses))
+	}
+	if history.FinalLoss >= history.InitialLoss {
+		t.Fatalf("adam loss did not decrease: initial=%.6f final=%.6f", history.InitialLoss, history.FinalLoss)
+	}
+}
+
 func TestInitMirageV1ReferenceWeightsAreValid(t *testing.T) {
 	mod, err := DefaultMirageV1Module(MirageV1Config{})
 	if err != nil {

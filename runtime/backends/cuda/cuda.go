@@ -279,11 +279,11 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
-		lambda := stepAttrFloat32(step.Attributes, "lambda", 1)
-		if !supportsBuiltinRDLoss(inputs, lambda) {
+		rateWeight := stepAttrFloat32(step.Attributes, "lambda", 1) * stepAttrFloat32(step.Attributes, "rate_scale", 1)
+		if !supportsBuiltinRDLoss(inputs, rateWeight) {
 			return backend.StepDispatchResult{}, false, nil
 		}
-		result, err := e.device.runRDLossStep(inputs, outputType, lambda)
+		result, err := e.device.runRDLossStep(inputs, outputType, rateWeight)
 		if err != nil {
 			return backend.StepDispatchResult{}, false, err
 		}

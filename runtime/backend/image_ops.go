@@ -418,14 +418,14 @@ func scalarAddTensor(inputs ...*Tensor) (*Tensor, error) {
 	return NewTensorF32([]int{1}, []float32{sum}), nil
 }
 
-func rateDistortionLossTensor(distortion, rate *Tensor, lambda float64) (*Tensor, error) {
+func rateDistortionLossTensor(distortion, rate *Tensor, rateWeight float64) (*Tensor, error) {
 	if distortion == nil || rate == nil || len(distortion.F32) != 1 || len(rate.F32) != 1 {
 		return nil, fmt.Errorf("rate_distortion_loss expects scalar distortion and rate")
 	}
-	if math.IsNaN(lambda) || math.IsInf(lambda, 0) || lambda < 0 {
-		return nil, fmt.Errorf("rate_distortion_loss lambda must be finite and non-negative")
+	if math.IsNaN(rateWeight) || math.IsInf(rateWeight, 0) || rateWeight < 0 {
+		return nil, fmt.Errorf("rate_distortion_loss rate weight must be finite and non-negative")
 	}
-	loss := float64(distortion.F32[0]) + lambda*float64(rate.F32[0])
+	loss := float64(distortion.F32[0]) + rateWeight*float64(rate.F32[0])
 	return NewTensorF32([]int{1}, []float32{float32(loss)}), nil
 }
 

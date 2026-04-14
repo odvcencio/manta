@@ -23,6 +23,7 @@ type MirageV1Config struct {
 	Seed           int64
 	Factorization  string
 	Lambda         float64
+	LambdaSet      bool
 }
 
 // DefaultMirageV1Module returns a runnable host-reference Mirage Image v1 module
@@ -39,6 +40,7 @@ func DefaultMirageV1Module(cfg MirageV1Config) (*mantaartifact.Module, error) {
 	latentW := cfg.ImageWidth / 16
 	hyperH := latentH
 	hyperW := latentW
+	rateScale := 1 / float64(cfg.ImageWidth*cfg.ImageHeight)
 	bitsDType := fmt.Sprintf("q%d", cfg.BitWidth)
 	imageShape := []string{"1", itoa(cfg.ImageChannels), itoa(cfg.ImageHeight), itoa(cfg.ImageWidth)}
 	latentShape := []string{"1", itoa(cfg.LatentChannels), itoa(latentH), itoa(latentW)}
@@ -233,10 +235,9 @@ func DefaultMirageV1Module(cfg MirageV1Config) (*mantaartifact.Module, error) {
 			step(entry, mantaartifact.StepConv2D, "hyper_synthesis_norms", []string{"z_hat", "hs_norm_weight", "hs_norm_bias"}, []string{"norm_params"}, convAttrs("1", "1", "1")),
 		)
 	}
-	addSynthesis := func(entry string) {
+	addSynthesisLayers := func(entry, latentInput string) {
 		mod.Steps = append(mod.Steps,
-			step(entry, mantaartifact.StepTurboQDecode, "latent_dequantize", []string{"c_coords", "c_norms"}, []string{"y_hat"}, commonAttrs),
-			step(entry, mantaartifact.StepConv2DTrans, "synthesis_0", []string{"y_hat", "gs0_weight", "gs0_bias"}, []string{"gs0"}, convTransposeAttrs("2", "2", "1", "1")),
+			step(entry, mantaartifact.StepConv2DTrans, "synthesis_0", []string{latentInput, "gs0_weight", "gs0_bias"}, []string{"gs0"}, convTransposeAttrs("2", "2", "1", "1")),
 			step(entry, mantaartifact.StepIGDN, "synthesis_igdn_0", []string{"gs0", "igdn0_beta", "igdn0_gamma"}, []string{"gs0_igdn"}, nil),
 			step(entry, mantaartifact.StepConv2DTrans, "synthesis_1", []string{"gs0_igdn", "gs1_weight", "gs1_bias"}, []string{"gs1"}, convTransposeAttrs("2", "2", "1", "1")),
 			step(entry, mantaartifact.StepIGDN, "synthesis_igdn_1", []string{"gs1", "igdn1_beta", "igdn1_gamma"}, []string{"gs1_igdn"}, nil),
@@ -244,6 +245,12 @@ func DefaultMirageV1Module(cfg MirageV1Config) (*mantaartifact.Module, error) {
 			step(entry, mantaartifact.StepIGDN, "synthesis_igdn_2", []string{"gs2", "igdn2_beta", "igdn2_gamma"}, []string{"gs2_igdn"}, nil),
 			step(entry, mantaartifact.StepConv2DTrans, "synthesis_3", []string{"gs2_igdn", "gs3_weight", "gs3_bias"}, []string{"x_hat"}, convTransposeAttrs("2", "2", "1", "1")),
 		)
+	}
+	addSynthesis := func(entry string) {
+		mod.Steps = append(mod.Steps,
+			step(entry, mantaartifact.StepTurboQDecode, "latent_dequantize", []string{"c_coords", "c_norms"}, []string{"y_hat"}, commonAttrs),
+		)
+		addSynthesisLayers(entry, "y_hat")
 	}
 	addAnalysis("train_step")
 	addHyperAnalysis("train_step")
@@ -253,11 +260,14 @@ func DefaultMirageV1Module(cfg MirageV1Config) (*mantaartifact.Module, error) {
 		step("train_step", mantaartifact.StepCrossEntropy, "rate_norms", []string{"c_norms", "norm_params"}, []string{"rate_norms"}, normRateAttrs),
 		step("train_step", mantaartifact.StepScalarAdd, "rate_sum", []string{"rate_z", "rate_coords", "rate_norms"}, []string{"rate"}, nil),
 	)
-	addSynthesis("train_step")
+	addSynthesisLayers("train_step", "y")
 	mod.Steps = append(mod.Steps,
 		step("train_step", mantaartifact.StepMSELoss, "distortion_mse", []string{"x", "x_hat"}, []string{"mse"}, nil),
 		step("train_step", mantaartifact.StepMSSSIMLoss, "distortion_ms_ssim", []string{"x", "x_hat"}, []string{"ms_ssim"}, nil),
-		step("train_step", mantaartifact.StepRDLoss, "loss", []string{"mse", "rate"}, []string{"loss"}, map[string]string{"lambda": fmt.Sprintf("%.8g", cfg.Lambda)}),
+		step("train_step", mantaartifact.StepRDLoss, "loss", []string{"mse", "rate"}, []string{"loss"}, map[string]string{
+			"lambda":     fmt.Sprintf("%.8g", cfg.Lambda),
+			"rate_scale": fmt.Sprintf("%.8g", rateScale),
+		}),
 		step("train_step", mantaartifact.StepReturn, "return", nil, []string{"loss", "x_hat", "c_z", "c_z_norms", "c_coords", "c_norms", "pi_logits", "norm_params", "rate", "rate_z", "rate_coords", "rate_norms", "mse", "ms_ssim"}, nil),
 	)
 	addAnalysis("analyze")
@@ -278,6 +288,8 @@ func DefaultMirageV1Module(cfg MirageV1Config) (*mantaartifact.Module, error) {
 		"bit_width":           cfg.BitWidth,
 		"factorization":       factorization,
 		"lambda":              cfg.Lambda,
+		"rate_scale":          rateScale,
+		"rate_unit":           "bits_per_pixel",
 		"execution_scope":     "host_reference",
 		"entrypoint_surface":  "analyze+synthesize_hyperprior+synthesize_image+train_step",
 		"hyperprior_payloads": "c_z and c_z_norms are packed into the .mrg c_z stream by the host codec",
@@ -328,7 +340,7 @@ func (cfg MirageV1Config) normalized() MirageV1Config {
 	if cfg.Factorization == "" {
 		cfg.Factorization = "categorical"
 	}
-	if cfg.Lambda == 0 {
+	if cfg.Lambda == 0 && !cfg.LambdaSet {
 		cfg.Lambda = 0.01
 	}
 	return cfg
