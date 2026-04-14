@@ -15,4 +15,4 @@ jobs:
       - name: Test
         env:
           CGO_ENABLED: "0"
-        run: go test ./artifact/barr ./cmd/barr ./compiler ./models ./runtime/backend ./runtime/backends/metal ./syntax
+        run: go test ./artifact/manta ./cmd/manta ./compiler ./models ./runtime/backend ./runtime/backends/metal ./syntax
