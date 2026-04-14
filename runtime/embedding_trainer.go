@@ -1137,7 +1137,10 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 		candidateGrads[i] = make([]float32, len(candidates[i].pooled))
 	}
 
-	totalLoss, totalScore := accumulateInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, t.config.Temperature, queryGrads, candidateGrads)
+	totalLoss, totalScore, ok := t.tryInfoNCEHardNegativeAccelerator(queries, candidates, targetIndexes, queryGrads, candidateGrads)
+	if !ok {
+		totalLoss, totalScore = accumulateInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, t.config.Temperature, queryGrads, candidateGrads)
+	}
 	if !t.tryBackpropContrastiveBatch(
 		queries,
 		candidates,
@@ -2543,6 +2546,38 @@ func (t *EmbeddingTrainer) tryInfoNCEContrastiveAccelerator(queries, positives [
 	for row := range queryGrads {
 		copy(queryGrads[row], result.QueryGrads.F32[row*queryMatrix.width:(row+1)*queryMatrix.width])
 		copy(positiveGrads[row], result.PositiveGrads.F32[row*positiveMatrix.width:(row+1)*positiveMatrix.width])
+	}
+	return result.LossSum, result.ScoreSum, true
+}
+
+func (t *EmbeddingTrainer) tryInfoNCEHardNegativeAccelerator(queries, candidates []*embeddingEncodedSequence, targetIndexes []int, queryGrads, candidateGrads [][]float32) (float32, float32, bool) {
+	if t == nil || t.contrastiveAccel == nil || len(queries) == 0 || len(candidates) < 2 || len(targetIndexes) != len(queries) {
+		return 0, 0, false
+	}
+	queryMatrix := newContrastivePooledMatrix(queries)
+	candidateMatrix := newContrastivePooledMatrix(candidates)
+	if queryMatrix.rows == 0 || queryMatrix.width == 0 || candidateMatrix.rows < 2 || candidateMatrix.width != queryMatrix.width {
+		return 0, 0, false
+	}
+	result, err := t.contrastiveAccel.RunInfoNCEWithTargets(
+		tensorF32View([]int{queryMatrix.rows, queryMatrix.width}, queryMatrix.data),
+		tensorF32View([]int{candidateMatrix.rows, candidateMatrix.width}, candidateMatrix.data),
+		targetIndexes,
+		backend.ContrastiveLossConfig{Temperature: t.config.Temperature},
+	)
+	if err != nil || result.QueryGrads == nil || result.PositiveGrads == nil {
+		return 0, 0, false
+	}
+	if result.QueryGrads.Rank() != 2 || result.PositiveGrads.Rank() != 2 ||
+		result.QueryGrads.Shape[0] != queryMatrix.rows || result.QueryGrads.Shape[1] != queryMatrix.width ||
+		result.PositiveGrads.Shape[0] != candidateMatrix.rows || result.PositiveGrads.Shape[1] != candidateMatrix.width {
+		return 0, 0, false
+	}
+	for row := range queryGrads {
+		copy(queryGrads[row], result.QueryGrads.F32[row*queryMatrix.width:(row+1)*queryMatrix.width])
+	}
+	for row := range candidateGrads {
+		copy(candidateGrads[row], result.PositiveGrads.F32[row*candidateMatrix.width:(row+1)*candidateMatrix.width])
 	}
 	return result.LossSum, result.ScoreSum, true
 }

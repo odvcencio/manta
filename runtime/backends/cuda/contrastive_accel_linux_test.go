@@ -57,6 +57,41 @@ func TestCUDAContrastiveAcceleratorMatchesHostInfoNCE(t *testing.T) {
 	}
 }
 
+func TestCUDAContrastiveAcceleratorMatchesHostRectangularInfoNCE(t *testing.T) {
+	accelAny, err := NewContrastiveAccelerator()
+	if err != nil {
+		t.Fatalf("new contrastive accelerator: %v", err)
+	}
+	if accelAny == nil {
+		t.Skip("no cuda contrastive accelerator available")
+	}
+	defer accelAny.Close()
+
+	query := backend.NewTensorF32([]int{2, 4}, []float32{
+		0.25, -0.5, 0.75, 1.25,
+		-0.25, 0.8, 0.3, -0.6,
+	})
+	candidates := backend.NewTensorF32([]int{5, 4}, []float32{
+		-0.75, 0.5, 0.125, 1.5,
+		0.15, 0.9, -0.25, -0.35,
+		0.8, -0.2, -0.55, 0.45,
+		0.4, -0.1, 0.2, 0.7,
+		-0.2, 0.6, 0.5, -0.4,
+	})
+	targets := []int{1, 3}
+	cfg := backend.ContrastiveLossConfig{Temperature: 0.07}
+
+	got, err := accelAny.RunInfoNCEWithTargets(query, candidates, targets, cfg)
+	if err != nil {
+		t.Fatalf("run rectangular infonce: %v", err)
+	}
+	wantQ, wantC, wantLoss, wantScore := hostInfoNCEGradTargets(query.F32, candidates.F32, 2, 5, 4, targets, cfg.Temperature)
+	assertTensorClose(t, got.QueryGrads, []int{2, 4}, wantQ)
+	assertTensorClose(t, got.PositiveGrads, []int{5, 4}, wantC)
+	assertCloseF32(t, got.LossSum, wantLoss, 0.0001)
+	assertCloseF32(t, got.ScoreSum, wantScore, 0.0001)
+}
+
 func TestCUDAContrastiveKernelsUse64BitPairIndexing(t *testing.T) {
 	for name, source := range map[string]string{
 		"scores": contrastiveScoresKernelSource,
@@ -66,7 +101,7 @@ func TestCUDAContrastiveKernelsUse64BitPairIndexing(t *testing.T) {
 			t.Fatalf("%s kernel does not use 64-bit global index", name)
 		}
 	}
-	if !strings.Contains(contrastiveGradKernelSource, "(long long)rows * (long long)rows * (long long)width") {
+	if !strings.Contains(contrastiveGradKernelSource, "(long long)query_rows * (long long)candidate_rows * (long long)width") {
 		t.Fatal("grad kernel does not compute total grad elements in 64-bit")
 	}
 }
@@ -101,6 +136,46 @@ func BenchmarkHostContrastiveInfoNCE256x64(b *testing.B) {
 	}
 }
 
+func BenchmarkHostContrastiveInfoNCE128x512x64(b *testing.B) {
+	query, _ := syntheticContrastiveTensors(128, 64)
+	candidates, _ := syntheticContrastiveTensors(512, 64)
+	targets := make([]int, 128)
+	for i := range targets {
+		targets[i] = i * 4
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		hostInfoNCEGradTargets(query.F32, candidates.F32, 128, 512, 64, targets, 0.05)
+	}
+}
+
+func BenchmarkCUDAContrastiveAccelerator128x512x64(b *testing.B) {
+	accelAny, err := NewContrastiveAccelerator()
+	if err != nil {
+		b.Fatalf("new contrastive accelerator: %v", err)
+	}
+	if accelAny == nil {
+		b.Skip("no cuda contrastive accelerator available")
+	}
+	defer accelAny.Close()
+
+	query, _ := syntheticContrastiveTensors(128, 64)
+	candidates, _ := syntheticContrastiveTensors(512, 64)
+	targets := make([]int, 128)
+	for i := range targets {
+		targets[i] = i * 4
+	}
+	cfg := backend.ContrastiveLossConfig{Temperature: 0.05}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := accelAny.RunInfoNCEWithTargets(query, candidates, targets, cfg); err != nil {
+			b.Fatalf("run rectangular infonce: %v", err)
+		}
+	}
+}
+
 func syntheticContrastiveTensors(rows, width int) (*backend.Tensor, *backend.Tensor) {
 	query := make([]float32, rows*width)
 	positive := make([]float32, rows*width)
@@ -116,43 +191,52 @@ func syntheticContrastiveTensors(rows, width int) (*backend.Tensor, *backend.Ten
 }
 
 func hostInfoNCEGrad(query, positive []float32, rows, width int, temperature float32) ([]float32, []float32, float32, float32) {
+	targets := make([]int, rows)
+	for i := range targets {
+		targets[i] = i
+	}
+	return hostInfoNCEGradTargets(query, positive, rows, rows, width, targets, temperature)
+}
+
+func hostInfoNCEGradTargets(query, candidates []float32, queryRows, candidateRows, width int, targetIndexes []int, temperature float32) ([]float32, []float32, float32, float32) {
 	if temperature <= 0 {
 		temperature = 0.05
 	}
-	queryNorms := tensorRowNorms(query, rows, width)
-	positiveNorms := tensorRowNorms(positive, rows, width)
-	queryGrads := make([]float32, rows*width)
-	positiveGrads := make([]float32, rows*width)
+	queryNorms := tensorRowNorms(query, queryRows, width)
+	candidateNorms := tensorRowNorms(candidates, candidateRows, width)
+	queryGrads := make([]float32, queryRows*width)
+	candidateGrads := make([]float32, candidateRows*width)
 	totalLoss := float32(0)
 	totalScore := float32(0)
-	rowScores := make([]float32, rows)
-	probs := make([]float32, rows)
-	for row := 0; row < rows; row++ {
-		for col := 0; col < rows; col++ {
-			score := hostCosineScore(query[row*width:(row+1)*width], positive[col*width:(col+1)*width], queryNorms[row], positiveNorms[col])
+	rowScores := make([]float32, candidateRows)
+	probs := make([]float32, candidateRows)
+	for row := 0; row < queryRows; row++ {
+		for col := 0; col < candidateRows; col++ {
+			score := hostCosineScore(query[row*width:(row+1)*width], candidates[col*width:(col+1)*width], queryNorms[row], candidateNorms[col])
 			rowScores[col] = score
 			totalScore += score
 		}
-		totalLoss += hostInfoNCEProbs(rowScores, row, temperature, probs)
+		targetIndex := targetIndexes[row]
+		totalLoss += hostInfoNCEProbs(rowScores, targetIndex, temperature, probs)
 		for col, prob := range probs {
 			target := float32(0)
-			if row == col {
+			if col == targetIndex {
 				target = 1
 			}
 			scale := (prob - target) / temperature
 			hostAccumulateCosineGrad(
 				query[row*width:(row+1)*width],
-				positive[col*width:(col+1)*width],
+				candidates[col*width:(col+1)*width],
 				queryNorms[row],
-				positiveNorms[col],
+				candidateNorms[col],
 				rowScores[col],
 				scale,
 				queryGrads[row*width:(row+1)*width],
-				positiveGrads[col*width:(col+1)*width],
+				candidateGrads[col*width:(col+1)*width],
 			)
 		}
 	}
-	return queryGrads, positiveGrads, totalLoss, totalScore
+	return queryGrads, candidateGrads, totalLoss, totalScore
 }
 
 func hostCosineScore(left, right []float32, leftNorm, rightNorm float32) float32 {

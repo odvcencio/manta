@@ -129,7 +129,7 @@ func main() {
 	let count = getenv("MANTA_BENCH_COUNT", "5")
 	let benchtime = getenv("MANTA_BENCH_TIME", "750ms")
 	let runtimeBench = getenv("MANTA_BENCH_RUNTIME", "BenchmarkAccumulateInfoNCEContrastiveGrads128x64")
-	let cudaBench = getenv("MANTA_BENCH_CUDA_REGEX", "BenchmarkCUDAContrastiveAccelerator256x64|BenchmarkHostContrastiveInfoNCE256x64")
+	let cudaBench = getenv("MANTA_BENCH_CUDA_REGEX", "BenchmarkCUDAContrastiveAccelerator256x64|BenchmarkCUDAContrastiveAccelerator128x512x64|BenchmarkHostContrastiveInfoNCE256x64|BenchmarkHostContrastiveInfoNCE128x512x64")
 
 	let start = time.Now()
 	step("Go microbenchmarks")

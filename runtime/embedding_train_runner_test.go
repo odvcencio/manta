@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/compiler"
 	"github.com/odvcencio/manta/runtime/backend"
 )
@@ -719,6 +720,80 @@ func TestEmbeddingTrainerTrainHardNegativeContrastiveStep(t *testing.T) {
 		t.Fatalf("step = %d, want 1", trainer.step)
 	}
 }
+
+func TestEmbeddingTrainerTrainHardNegativeContrastiveStepUsesRectangularAccelerator(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
+	trainer.config.ContrastiveLoss = "infonce"
+	trainer.config.Temperature = 0.05
+	accel := &countingContrastiveAccelerator{}
+	trainer.contrastiveAccel = accel
+
+	_, err := trainer.TrainHardNegativeContrastiveStep(tinyEmbeddingHardNegativeDataset())
+	if err != nil {
+		t.Fatalf("train hard-negative step: %v", err)
+	}
+	if accel.rectCalls != 1 {
+		t.Fatalf("rectangular calls = %d, want 1", accel.rectCalls)
+	}
+	if accel.squareCalls != 0 {
+		t.Fatalf("square calls = %d, want 0", accel.squareCalls)
+	}
+	if accel.queryRows != 2 || accel.candidateRows != 4 || accel.width == 0 {
+		t.Fatalf("accelerator shape query=%d candidate=%d width=%d, want 2x4xwidth", accel.queryRows, accel.candidateRows, accel.width)
+	}
+	if len(accel.targetIndexes) != 2 || accel.targetIndexes[0] != 0 || accel.targetIndexes[1] != 2 {
+		t.Fatalf("target indexes = %v, want [0 2]", accel.targetIndexes)
+	}
+}
+
+type countingContrastiveAccelerator struct {
+	squareCalls   int
+	rectCalls     int
+	queryRows     int
+	candidateRows int
+	width         int
+	targetIndexes []int
+}
+
+func (a *countingContrastiveAccelerator) Backend() mantaartifact.BackendKind {
+	return mantaartifact.BackendCUDA
+}
+
+func (a *countingContrastiveAccelerator) RunInfoNCE(query, positive *backend.Tensor, cfg backend.ContrastiveLossConfig) (backend.ContrastiveGradResult, error) {
+	a.squareCalls++
+	if query == nil || positive == nil || query.Rank() != 2 || positive.Rank() != 2 {
+		return backend.ContrastiveGradResult{}, nil
+	}
+	return backend.ContrastiveGradResult{
+		QueryGrads:    backend.NewTensorF32(query.Shape, make([]float32, len(query.F32))),
+		PositiveGrads: backend.NewTensorF32(positive.Shape, make([]float32, len(positive.F32))),
+		LossSum:       1,
+		ScoreSum:      1,
+	}, nil
+}
+
+func (a *countingContrastiveAccelerator) RunInfoNCEWithTargets(query, candidates *backend.Tensor, targetIndexes []int, cfg backend.ContrastiveLossConfig) (backend.ContrastiveGradResult, error) {
+	a.rectCalls++
+	a.targetIndexes = append([]int(nil), targetIndexes...)
+	if query == nil || candidates == nil || query.Rank() != 2 || candidates.Rank() != 2 {
+		return backend.ContrastiveGradResult{}, nil
+	}
+	a.queryRows = query.Shape[0]
+	a.candidateRows = candidates.Shape[0]
+	a.width = query.Shape[1]
+	return backend.ContrastiveGradResult{
+		QueryGrads:    backend.NewTensorF32(query.Shape, make([]float32, len(query.F32))),
+		PositiveGrads: backend.NewTensorF32(candidates.Shape, make([]float32, len(candidates.F32))),
+		LossSum:       1,
+		ScoreSum:      float32(query.Shape[0] * candidates.Shape[0]),
+	}, nil
+}
+
+func (a *countingContrastiveAccelerator) Stats() backend.ContrastiveAcceleratorStats {
+	return backend.ContrastiveAcceleratorStats{RunCalls: int64(a.squareCalls + a.rectCalls)}
+}
+
+func (a *countingContrastiveAccelerator) Close() {}
 
 func TestContrastiveCosineFastPathMatchesCosineGrad(t *testing.T) {
 	left := []float32{0.25, -0.5, 0.75, 1.25}

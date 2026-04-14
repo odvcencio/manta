@@ -210,6 +210,7 @@ type ActivationAccelerator interface {
 type ContrastiveAccelerator interface {
 	Backend() mantaartifact.BackendKind
 	RunInfoNCE(query, positive *Tensor, cfg ContrastiveLossConfig) (ContrastiveGradResult, error)
+	RunInfoNCEWithTargets(query, candidates *Tensor, targetIndexes []int, cfg ContrastiveLossConfig) (ContrastiveGradResult, error)
 	Stats() ContrastiveAcceleratorStats
 	Close()
 }

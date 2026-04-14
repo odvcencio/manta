@@ -20,28 +20,29 @@ import (
 const contrastiveScoresKernelSource = `
 extern "C" __global__ void manta_contrastive_scores(
     const float* query,
-    const float* positive,
+    const float* candidates,
     const float* query_norms,
-    const float* positive_norms,
+    const float* candidate_norms,
     float* scores,
-    int rows,
+    int query_rows,
+    int candidate_rows,
     int width
 ) {
     long long idx = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
-    long long total = (long long)rows * (long long)rows;
+    long long total = (long long)query_rows * (long long)candidate_rows;
     if (idx >= total) {
         return;
     }
-    int row = (int)(idx / rows);
-    int col = (int)(idx - (long long)row * rows);
+    int row = (int)(idx / candidate_rows);
+    int col = (int)(idx - (long long)row * candidate_rows);
     float qn = query_norms[row];
-    float pn = positive_norms[col];
+    float pn = candidate_norms[col];
     if (qn == 0.0f || pn == 0.0f) {
         scores[idx] = 0.0f;
         return;
     }
     const float* q = query + row * width;
-    const float* p = positive + col * width;
+    const float* p = candidates + col * width;
     float dot = 0.0f;
     for (int k = 0; k < width; ++k) {
         dot += q[k] * p[k];
@@ -53,21 +54,27 @@ extern "C" __global__ void manta_contrastive_scores(
 const infoNCEScalesKernelSource = `
 extern "C" __global__ void manta_infonce_scales(
     const float* scores,
+    const float* target_indexes,
     float* scales,
     float* row_loss,
     float* row_score,
-    int rows,
+    int query_rows,
+    int candidate_rows,
     float temperature
 ) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= rows) {
+    if (row >= query_rows) {
         return;
     }
-    int base = row * rows;
+    int base = row * candidate_rows;
+    int target_index = (int)target_indexes[row];
+    if (target_index < 0 || target_index >= candidate_rows) {
+        target_index = 0;
+    }
     float temp = temperature > 0.0f ? temperature : 0.05f;
     float max_logit = scores[base] / temp;
     float score_sum = 0.0f;
-    for (int col = 0; col < rows; ++col) {
+    for (int col = 0; col < candidate_rows; ++col) {
         float score = scores[base + col];
         score_sum += score;
         float logit = score / temp;
@@ -76,16 +83,16 @@ extern "C" __global__ void manta_infonce_scales(
         }
     }
     float denom = 0.0f;
-    for (int col = 0; col < rows; ++col) {
+    for (int col = 0; col < candidate_rows; ++col) {
         denom += expf(scores[base + col] / temp - max_logit);
     }
     float target_prob = 0.0f;
-    for (int col = 0; col < rows; ++col) {
+    for (int col = 0; col < candidate_rows; ++col) {
         float prob = 0.0f;
         if (denom != 0.0f) {
             prob = expf(scores[base + col] / temp - max_logit) / denom;
         }
-        if (col == row) {
+        if (col == target_index) {
             target_prob = prob;
             scales[base + col] = (prob - 1.0f) / temp;
         } else {
@@ -103,27 +110,28 @@ extern "C" __global__ void manta_infonce_scales(
 const contrastiveGradKernelSource = `
 extern "C" __global__ void manta_contrastive_grad(
     const float* query,
-    const float* positive,
+    const float* candidates,
     const float* query_norms,
-    const float* positive_norms,
+    const float* candidate_norms,
     const float* scores,
     const float* scales,
     float* query_grads,
-    float* positive_grads,
-    int rows,
+    float* candidate_grads,
+    int query_rows,
+    int candidate_rows,
     int width
 ) {
     long long idx = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
-    long long total = (long long)rows * (long long)rows * (long long)width;
+    long long total = (long long)query_rows * (long long)candidate_rows * (long long)width;
     if (idx >= total) {
         return;
     }
     int k = (int)(idx % width);
     long long pair = idx / width;
-    int row = (int)(pair / rows);
-    int col = (int)(pair - (long long)row * rows);
+    int row = (int)(pair / candidate_rows);
+    int col = (int)(pair - (long long)row * candidate_rows);
     float qn = query_norms[row];
-    float pn = positive_norms[col];
+    float pn = candidate_norms[col];
     if (qn == 0.0f || pn == 0.0f) {
         return;
     }
@@ -134,10 +142,10 @@ extern "C" __global__ void manta_contrastive_grad(
     float denom = qn * pn;
     float qScale = score / (qn * qn);
     float pScale = score / (pn * pn);
-    float qGrad = scale * (positive[pBase + k] / denom - query[qBase + k] * qScale);
-    float pGrad = scale * (query[qBase + k] / denom - positive[pBase + k] * pScale);
+    float qGrad = scale * (candidates[pBase + k] / denom - query[qBase + k] * qScale);
+    float pGrad = scale * (query[qBase + k] / denom - candidates[pBase + k] * pScale);
     atomicAdd(&query_grads[qBase + k], qGrad);
-    atomicAdd(&positive_grads[pBase + k], pGrad);
+    atomicAdd(&candidate_grads[pBase + k], pGrad);
 }
 `
 
@@ -202,36 +210,78 @@ func (a *contrastiveAccelerator) RunInfoNCE(query, positive *backend.Tensor, cfg
 	if rows < 2 {
 		return backend.ContrastiveGradResult{}, fmt.Errorf("cuda infonce requires at least two rows")
 	}
+	targetIndexes := make([]int, rows)
+	for i := range targetIndexes {
+		targetIndexes[i] = i
+	}
+	return a.runInfoNCE(query, positive, targetIndexes, cfg, rows, rows, width)
+}
+
+func (a *contrastiveAccelerator) RunInfoNCEWithTargets(query, candidates *backend.Tensor, targetIndexes []int, cfg backend.ContrastiveLossConfig) (backend.ContrastiveGradResult, error) {
+	if a == nil || a.device == nil || a.scoreKernel == nil || a.scaleKernel == nil || a.gradKernel == nil {
+		return backend.ContrastiveGradResult{}, fmt.Errorf("cuda contrastive accelerator is not initialized")
+	}
+	queryRows, candidateRows, width, err := contrastiveRectShape(query, candidates)
+	if err != nil {
+		return backend.ContrastiveGradResult{}, err
+	}
+	if queryRows < 1 {
+		return backend.ContrastiveGradResult{}, fmt.Errorf("cuda infonce requires at least one query row")
+	}
+	if candidateRows < 2 {
+		return backend.ContrastiveGradResult{}, fmt.Errorf("cuda infonce requires at least two candidate rows")
+	}
+	if len(targetIndexes) != queryRows {
+		return backend.ContrastiveGradResult{}, fmt.Errorf("cuda infonce target indexes length %d does not match query rows %d", len(targetIndexes), queryRows)
+	}
+	for row, target := range targetIndexes {
+		if target < 0 || target >= candidateRows {
+			return backend.ContrastiveGradResult{}, fmt.Errorf("cuda infonce target index %d for row %d is outside %d candidates", target, row, candidateRows)
+		}
+	}
+	return a.runInfoNCE(query, candidates, targetIndexes, cfg, queryRows, candidateRows, width)
+}
+
+func (a *contrastiveAccelerator) runInfoNCE(query, candidates *backend.Tensor, targetIndexes []int, cfg backend.ContrastiveLossConfig, queryRows, candidateRows, width int) (backend.ContrastiveGradResult, error) {
 	temperature := cfg.Temperature
 	if temperature <= 0 {
 		temperature = 0.05
 	}
 	start := time.Now()
-	queryNorms := tensorRowNorms(query.F32, rows, width)
-	positiveNorms := tensorRowNorms(positive.F32, rows, width)
+	queryNorms := tensorRowNorms(query.F32, queryRows, width)
+	candidateNorms := tensorRowNorms(candidates.F32, candidateRows, width)
 	queryBuf, err := a.device.uploadFloat32(query.F32)
 	if err != nil {
 		return backend.ContrastiveGradResult{}, err
 	}
 	defer a.device.freeBuffer(queryBuf)
-	positiveBuf, err := a.device.uploadFloat32(positive.F32)
+	candidateBuf, err := a.device.uploadFloat32(candidates.F32)
 	if err != nil {
 		return backend.ContrastiveGradResult{}, err
 	}
-	defer a.device.freeBuffer(positiveBuf)
+	defer a.device.freeBuffer(candidateBuf)
 	queryNormBuf, err := a.device.uploadFloat32(queryNorms)
 	if err != nil {
 		return backend.ContrastiveGradResult{}, err
 	}
 	defer a.device.freeBuffer(queryNormBuf)
-	positiveNormBuf, err := a.device.uploadFloat32(positiveNorms)
+	candidateNormBuf, err := a.device.uploadFloat32(candidateNorms)
 	if err != nil {
 		return backend.ContrastiveGradResult{}, err
 	}
-	defer a.device.freeBuffer(positiveNormBuf)
-	a.stats.UploadedBytes += int64((len(query.F32) + len(positive.F32) + len(queryNorms) + len(positiveNorms)) * 4)
+	defer a.device.freeBuffer(candidateNormBuf)
+	targetData := make([]float32, len(targetIndexes))
+	for i, target := range targetIndexes {
+		targetData[i] = float32(target)
+	}
+	targetBuf, err := a.device.uploadFloat32(targetData)
+	if err != nil {
+		return backend.ContrastiveGradResult{}, err
+	}
+	defer a.device.freeBuffer(targetBuf)
+	a.stats.UploadedBytes += int64((len(query.F32) + len(candidates.F32) + len(queryNorms) + len(candidateNorms) + len(targetData)) * 4)
 
-	pairCount := rows * rows
+	pairCount := queryRows * candidateRows
 	scoresBuf, err := a.device.allocFloat32(pairCount)
 	if err != nil {
 		return backend.ContrastiveGradResult{}, err
@@ -242,53 +292,54 @@ func (a *contrastiveAccelerator) RunInfoNCE(query, positive *backend.Tensor, cfg
 		return backend.ContrastiveGradResult{}, err
 	}
 	defer a.device.freeBuffer(scalesBuf)
-	rowLossBuf, err := a.device.allocFloat32(rows)
+	rowLossBuf, err := a.device.allocFloat32(queryRows)
 	if err != nil {
 		return backend.ContrastiveGradResult{}, err
 	}
 	defer a.device.freeBuffer(rowLossBuf)
-	rowScoreBuf, err := a.device.allocFloat32(rows)
+	rowScoreBuf, err := a.device.allocFloat32(queryRows)
 	if err != nil {
 		return backend.ContrastiveGradResult{}, err
 	}
 	defer a.device.freeBuffer(rowScoreBuf)
 
-	zeroGrads := make([]float32, rows*width)
-	queryGradBuf, err := a.device.uploadFloat32(zeroGrads)
+	queryZeroGrads := make([]float32, queryRows*width)
+	queryGradBuf, err := a.device.uploadFloat32(queryZeroGrads)
 	if err != nil {
 		return backend.ContrastiveGradResult{}, err
 	}
 	defer a.device.freeBuffer(queryGradBuf)
-	positiveGradBuf, err := a.device.uploadFloat32(zeroGrads)
+	candidateZeroGrads := make([]float32, candidateRows*width)
+	candidateGradBuf, err := a.device.uploadFloat32(candidateZeroGrads)
 	if err != nil {
 		return backend.ContrastiveGradResult{}, err
 	}
-	defer a.device.freeBuffer(positiveGradBuf)
-	a.stats.UploadedBytes += int64(len(zeroGrads) * 8)
+	defer a.device.freeBuffer(candidateGradBuf)
+	a.stats.UploadedBytes += int64((len(queryZeroGrads) + len(candidateZeroGrads)) * 4)
 
 	block := uint(128)
 	scoreGrid := uint((pairCount + int(block) - 1) / int(block))
-	if err := a.device.launchAuxContrastiveScores(a.scoreKernel, scoreGrid, block, queryBuf, positiveBuf, queryNormBuf, positiveNormBuf, scoresBuf, rows, width); err != nil {
+	if err := a.device.launchAuxContrastiveScores(a.scoreKernel, scoreGrid, block, queryBuf, candidateBuf, queryNormBuf, candidateNormBuf, scoresBuf, queryRows, candidateRows, width); err != nil {
 		return backend.ContrastiveGradResult{}, err
 	}
-	rowGrid := uint((rows + int(block) - 1) / int(block))
-	if err := a.device.launchAuxInfoNCEScales(a.scaleKernel, rowGrid, block, scoresBuf, scalesBuf, rowLossBuf, rowScoreBuf, rows, temperature); err != nil {
+	rowGrid := uint((queryRows + int(block) - 1) / int(block))
+	if err := a.device.launchAuxInfoNCEScales(a.scaleKernel, rowGrid, block, scoresBuf, targetBuf, scalesBuf, rowLossBuf, rowScoreBuf, queryRows, candidateRows, temperature); err != nil {
 		return backend.ContrastiveGradResult{}, err
 	}
 	gradElements := pairCount * width
 	gradGrid := uint((gradElements + int(block) - 1) / int(block))
-	if err := a.device.launchAuxContrastiveGrad(a.gradKernel, gradGrid, block, queryBuf, positiveBuf, queryNormBuf, positiveNormBuf, scoresBuf, scalesBuf, queryGradBuf, positiveGradBuf, rows, width); err != nil {
+	if err := a.device.launchAuxContrastiveGrad(a.gradKernel, gradGrid, block, queryBuf, candidateBuf, queryNormBuf, candidateNormBuf, scoresBuf, scalesBuf, queryGradBuf, candidateGradBuf, queryRows, candidateRows, width); err != nil {
 		return backend.ContrastiveGradResult{}, err
 	}
 
-	queryGrads := make([]float32, rows*width)
-	positiveGrads := make([]float32, rows*width)
-	rowLoss := make([]float32, rows)
-	rowScore := make([]float32, rows)
+	queryGrads := make([]float32, queryRows*width)
+	candidateGrads := make([]float32, candidateRows*width)
+	rowLoss := make([]float32, queryRows)
+	rowScore := make([]float32, queryRows)
 	if err := a.device.downloadFloat32(queryGrads, queryGradBuf); err != nil {
 		return backend.ContrastiveGradResult{}, err
 	}
-	if err := a.device.downloadFloat32(positiveGrads, positiveGradBuf); err != nil {
+	if err := a.device.downloadFloat32(candidateGrads, candidateGradBuf); err != nil {
 		return backend.ContrastiveGradResult{}, err
 	}
 	if err := a.device.downloadFloat32(rowLoss, rowLossBuf); err != nil {
@@ -297,12 +348,12 @@ func (a *contrastiveAccelerator) RunInfoNCE(query, positive *backend.Tensor, cfg
 	if err := a.device.downloadFloat32(rowScore, rowScoreBuf); err != nil {
 		return backend.ContrastiveGradResult{}, err
 	}
-	a.stats.DownloadedBytes += int64((len(queryGrads) + len(positiveGrads) + len(rowLoss) + len(rowScore)) * 4)
+	a.stats.DownloadedBytes += int64((len(queryGrads) + len(candidateGrads) + len(rowLoss) + len(rowScore)) * 4)
 	a.stats.RunCalls++
 	a.stats.RunNanos += time.Since(start).Nanoseconds()
 	return backend.ContrastiveGradResult{
-		QueryGrads:    backend.NewTensorF32([]int{rows, width}, queryGrads),
-		PositiveGrads: backend.NewTensorF32([]int{rows, width}, positiveGrads),
+		QueryGrads:    backend.NewTensorF32([]int{queryRows, width}, queryGrads),
+		PositiveGrads: backend.NewTensorF32([]int{candidateRows, width}, candidateGrads),
 		LossSum:       sumFloat32(rowLoss),
 		ScoreSum:      sumFloat32(rowScore),
 	}, nil
@@ -343,6 +394,22 @@ func contrastiveShape(query, positive *backend.Tensor) (rows, width int, err err
 		return 0, 0, fmt.Errorf("cuda contrastive tensor data does not match shape")
 	}
 	return query.Shape[0], query.Shape[1], nil
+}
+
+func contrastiveRectShape(query, candidates *backend.Tensor) (queryRows, candidateRows, width int, err error) {
+	if query == nil || candidates == nil {
+		return 0, 0, 0, fmt.Errorf("cuda contrastive tensors are required")
+	}
+	if query.Rank() != 2 || candidates.Rank() != 2 {
+		return 0, 0, 0, fmt.Errorf("cuda contrastive tensors must be rank-2")
+	}
+	if query.Shape[1] != candidates.Shape[1] {
+		return 0, 0, 0, fmt.Errorf("cuda contrastive tensor width mismatch %v vs %v", query.Shape, candidates.Shape)
+	}
+	if len(query.F32) != query.Shape[0]*query.Shape[1] || len(candidates.F32) != candidates.Shape[0]*candidates.Shape[1] {
+		return 0, 0, 0, fmt.Errorf("cuda contrastive tensor data does not match shape")
+	}
+	return query.Shape[0], candidates.Shape[0], query.Shape[1], nil
 }
 
 func tensorRowNorms(data []float32, rows, width int) []float32 {

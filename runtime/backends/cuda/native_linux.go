@@ -491,18 +491,18 @@ static int mantaCudaLaunchCrossEntropyPartials(MantaCudaRuntime* rt, MantaCudaKe
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchContrastiveScores(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr positive, CUdeviceptr queryNorms, CUdeviceptr positiveNorms, CUdeviceptr scores, int rows, int width, char** err) {
-	void* args[] = {&query, &positive, &queryNorms, &positiveNorms, &scores, &rows, &width};
+static int mantaCudaLaunchContrastiveScores(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr positive, CUdeviceptr queryNorms, CUdeviceptr positiveNorms, CUdeviceptr scores, int queryRows, int candidateRows, int width, char** err) {
+	void* args[] = {&query, &positive, &queryNorms, &positiveNorms, &scores, &queryRows, &candidateRows, &width};
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchInfoNCEScales(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr scores, CUdeviceptr scales, CUdeviceptr rowLoss, CUdeviceptr rowScore, int rows, float temperature, char** err) {
-	void* args[] = {&scores, &scales, &rowLoss, &rowScore, &rows, &temperature};
+static int mantaCudaLaunchInfoNCEScales(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr scores, CUdeviceptr targetIndexes, CUdeviceptr scales, CUdeviceptr rowLoss, CUdeviceptr rowScore, int queryRows, int candidateRows, float temperature, char** err) {
+	void* args[] = {&scores, &targetIndexes, &scales, &rowLoss, &rowScore, &queryRows, &candidateRows, &temperature};
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchContrastiveGrad(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr positive, CUdeviceptr queryNorms, CUdeviceptr positiveNorms, CUdeviceptr scores, CUdeviceptr scales, CUdeviceptr queryGrads, CUdeviceptr positiveGrads, int rows, int width, char** err) {
-	void* args[] = {&query, &positive, &queryNorms, &positiveNorms, &scores, &scales, &queryGrads, &positiveGrads, &rows, &width};
+static int mantaCudaLaunchContrastiveGrad(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr positive, CUdeviceptr queryNorms, CUdeviceptr positiveNorms, CUdeviceptr scores, CUdeviceptr scales, CUdeviceptr queryGrads, CUdeviceptr positiveGrads, int queryRows, int candidateRows, int width, char** err) {
+	void* args[] = {&query, &positive, &queryNorms, &positiveNorms, &scores, &scales, &queryGrads, &positiveGrads, &queryRows, &candidateRows, &width};
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
@@ -2981,34 +2981,34 @@ func (rt *deviceRuntime) launchAuxLayerNormBackwardRows(kernel *auxKernel, grid,
 	return nil
 }
 
-func (rt *deviceRuntime) launchAuxContrastiveScores(kernel *auxKernel, grid, block uint, query, positive, queryNorms, positiveNorms, scores C.CUdeviceptr, rows, width int) error {
+func (rt *deviceRuntime) launchAuxContrastiveScores(kernel *auxKernel, grid, block uint, query, positive, queryNorms, positiveNorms, scores C.CUdeviceptr, queryRows, candidateRows, width int) error {
 	if kernel == nil || kernel.ptr == nil {
 		return fmt.Errorf("cuda auxiliary contrastive score kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchContrastiveScores(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), query, positive, queryNorms, positiveNorms, scores, C.int(rows), C.int(width), &errStr) != 0 {
+	if C.mantaCudaLaunchContrastiveScores(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), query, positive, queryNorms, positiveNorms, scores, C.int(queryRows), C.int(candidateRows), C.int(width), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
 }
 
-func (rt *deviceRuntime) launchAuxInfoNCEScales(kernel *auxKernel, grid, block uint, scores, scales, rowLoss, rowScore C.CUdeviceptr, rows int, temperature float32) error {
+func (rt *deviceRuntime) launchAuxInfoNCEScales(kernel *auxKernel, grid, block uint, scores, targetIndexes, scales, rowLoss, rowScore C.CUdeviceptr, queryRows, candidateRows int, temperature float32) error {
 	if kernel == nil || kernel.ptr == nil {
 		return fmt.Errorf("cuda auxiliary infonce scale kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchInfoNCEScales(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), scores, scales, rowLoss, rowScore, C.int(rows), C.float(temperature), &errStr) != 0 {
+	if C.mantaCudaLaunchInfoNCEScales(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), scores, targetIndexes, scales, rowLoss, rowScore, C.int(queryRows), C.int(candidateRows), C.float(temperature), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
 }
 
-func (rt *deviceRuntime) launchAuxContrastiveGrad(kernel *auxKernel, grid, block uint, query, positive, queryNorms, positiveNorms, scores, scales, queryGrads, positiveGrads C.CUdeviceptr, rows, width int) error {
+func (rt *deviceRuntime) launchAuxContrastiveGrad(kernel *auxKernel, grid, block uint, query, positive, queryNorms, positiveNorms, scores, scales, queryGrads, positiveGrads C.CUdeviceptr, queryRows, candidateRows, width int) error {
 	if kernel == nil || kernel.ptr == nil {
 		return fmt.Errorf("cuda auxiliary contrastive grad kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchContrastiveGrad(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), query, positive, queryNorms, positiveNorms, scores, scales, queryGrads, positiveGrads, C.int(rows), C.int(width), &errStr) != 0 {
+	if C.mantaCudaLaunchContrastiveGrad(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), query, positive, queryNorms, positiveNorms, scores, scales, queryGrads, positiveGrads, C.int(queryRows), C.int(candidateRows), C.int(width), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
