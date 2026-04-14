@@ -693,16 +693,16 @@ func applyCandidateRuntimeEnv(cfg candidateConfig) {
 }
 
 func runCandidate(cfg candidateConfig) (candidateConfig, error) {
+	if !envEnabled("MANTA_SKIP_TESTS") {
+		err := runCmd(cfg, "Go package gate", "go-test.log", "go", []string{"test", "./cmd/manta", "./runtime", "./models", "-count=1"})
+		guard err == nil else return cfg, err
+	}
 	applyCandidateRuntimeEnv(cfg)
 	err := writeSelectedEnvironment(cfg)
 	guard err == nil else return cfg, err
 	err = writeManifest(cfg, "started")
 	guard err == nil else return cfg, err
 
-	if !envEnabled("MANTA_SKIP_TESTS") {
-		err = runCmd(cfg, "Go package gate", "go-test.log", "go", []string{"test", "./cmd/manta", "./runtime", "./models", "-count=1"})
-		guard err == nil else return cfg, err
-	}
 	err = runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/manta"})
 	guard err == nil else return cfg, err
 
