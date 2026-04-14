@@ -18,6 +18,10 @@ type MirageV1ReferenceTrainConfig struct {
 	LearningRate         float32
 	LearningRateSchedule string
 	FinalLearningRate    float32
+	LambdaSchedule       string
+	InitialLambda        float32
+	LambdaDelaySteps     int
+	LambdaRampSteps      int
 	GradientClip         float32
 	WeightDecay          float32
 	MinGDNBeta           float32
@@ -25,6 +29,7 @@ type MirageV1ReferenceTrainConfig struct {
 	AdamBeta1            float32
 	AdamBeta2            float32
 	AdamEpsilon          float32
+	FreezeAnalysisSteps  int
 	CheckpointEvery      int
 	CheckpointFunc       func(MirageV1ReferenceCheckpoint, map[string]*backend.Tensor) error
 }
@@ -37,6 +42,7 @@ type MirageV1ReferenceTrainHistory struct {
 	MSEs          []float32
 	Rates         []float32
 	LearningRates []float32
+	Lambdas       []float32
 	GradientNorms []MirageV1ReferenceGradientNorms
 	Checkpoints   []MirageV1ReferenceCheckpoint
 }
@@ -49,6 +55,7 @@ type MirageV1ReferenceCheckpoint struct {
 	MSE          float32
 	Rate         float32
 	LearningRate float32
+	Lambda       float32
 }
 
 // MirageV1ReferenceGradientNorms records raw gradient L2 norms by graph region
@@ -114,6 +121,16 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 	if err := validateMirageReferenceTrainConfig(cfg); err != nil {
 		return MirageV1ReferenceTrainHistory{}, err
 	}
+	targetLambda, err := mirageReferenceTrainStepLambda(mod)
+	if err != nil {
+		return MirageV1ReferenceTrainHistory{}, err
+	}
+	defer func() {
+		_ = setMirageReferenceTrainStepLambda(mod, targetLambda)
+	}()
+	if err := setMirageReferenceTrainStepLambda(mod, mirageReferenceLambda(cfg, targetLambda, 0)); err != nil {
+		return MirageV1ReferenceTrainHistory{}, err
+	}
 	initial, err := MirageV1ReferenceEval(mod, weights, images)
 	if err != nil {
 		return MirageV1ReferenceTrainHistory{}, err
@@ -124,12 +141,17 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 		MSEs:          make([]float32, 0, cfg.Steps+1),
 		Rates:         make([]float32, 0, cfg.Steps+1),
 		LearningRates: make([]float32, 0, cfg.Steps),
+		Lambdas:       make([]float32, 0, cfg.Steps),
 		GradientNorms: make([]MirageV1ReferenceGradientNorms, 0, cfg.Steps),
 		Checkpoints:   make([]MirageV1ReferenceCheckpoint, 0, checkpointCapacity(cfg)),
 	}
 	opt := newMirageReferenceOptimizerState(mod, weights, cfg)
 	for step := 0; step < cfg.Steps; step++ {
 		learningRate := mirageReferenceLearningRate(cfg, step)
+		activeLambda := mirageReferenceLambda(cfg, targetLambda, step)
+		if err := setMirageReferenceTrainStepLambda(mod, activeLambda); err != nil {
+			return MirageV1ReferenceTrainHistory{}, err
+		}
 		image := images[step%len(images)]
 		result, err := backend.ExecuteAutograd(mod, backend.GradRequest{
 			Entry:   "train_step",
@@ -147,10 +169,11 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 		history.MSEs = append(history.MSEs, metrics.MSE)
 		history.Rates = append(history.Rates, metrics.Rate)
 		history.LearningRates = append(history.LearningRates, learningRate)
+		history.Lambdas = append(history.Lambdas, activeLambda)
 		history.GradientNorms = append(history.GradientNorms, mirageReferenceGradientNorms(result.Gradients))
 		stepCfg := cfg
 		stepCfg.LearningRate = learningRate
-		if err := applyMirageReferenceUpdate(mod, weights, result.Gradients, stepCfg, opt); err != nil {
+		if err := applyMirageReferenceUpdate(mod, weights, result.Gradients, stepCfg, opt, step); err != nil {
 			return MirageV1ReferenceTrainHistory{}, err
 		}
 		stepNumber := step + 1
@@ -165,6 +188,7 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 				MSE:          checkpointMetrics.MSE,
 				Rate:         checkpointMetrics.Rate,
 				LearningRate: learningRate,
+				Lambda:       activeLambda,
 			}
 			history.Checkpoints = append(history.Checkpoints, checkpoint)
 			if cfg.CheckpointFunc != nil {
@@ -173,6 +197,9 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 				}
 			}
 		}
+	}
+	if err := setMirageReferenceTrainStepLambda(mod, targetLambda); err != nil {
+		return MirageV1ReferenceTrainHistory{}, err
 	}
 	final, err := MirageV1ReferenceEval(mod, weights, images)
 	if err != nil {
@@ -275,6 +302,10 @@ func normalizeMirageReferenceTrainConfig(cfg MirageV1ReferenceTrainConfig) Mirag
 	if cfg.LearningRateSchedule == "" {
 		cfg.LearningRateSchedule = "constant"
 	}
+	cfg.LambdaSchedule = strings.ToLower(strings.TrimSpace(cfg.LambdaSchedule))
+	if cfg.LambdaSchedule == "" {
+		cfg.LambdaSchedule = "constant"
+	}
 	if cfg.FinalLearningRate == 0 {
 		cfg.FinalLearningRate = cfg.LearningRate
 	}
@@ -306,6 +337,20 @@ func validateMirageReferenceTrainConfig(cfg MirageV1ReferenceTrainConfig) error 
 	default:
 		return fmt.Errorf("unknown learning rate schedule %q", cfg.LearningRateSchedule)
 	}
+	switch cfg.LambdaSchedule {
+	case "constant", "linear":
+	default:
+		return fmt.Errorf("unknown lambda schedule %q", cfg.LambdaSchedule)
+	}
+	if cfg.LambdaDelaySteps < 0 {
+		return fmt.Errorf("lambda delay steps must be non-negative")
+	}
+	if cfg.LambdaRampSteps < 0 {
+		return fmt.Errorf("lambda ramp steps must be non-negative")
+	}
+	if cfg.FreezeAnalysisSteps < 0 {
+		return fmt.Errorf("analysis freeze steps must be non-negative")
+	}
 	if cfg.CheckpointEvery < 0 {
 		return fmt.Errorf("checkpoint interval must be non-negative")
 	}
@@ -324,6 +369,26 @@ func mirageReferenceLearningRate(cfg MirageV1ReferenceTrainConfig, step int) flo
 	default:
 		return cfg.LearningRate
 	}
+}
+
+func mirageReferenceLambda(cfg MirageV1ReferenceTrainConfig, target float32, step int) float32 {
+	if cfg.LambdaSchedule != "linear" {
+		return target
+	}
+	if step < cfg.LambdaDelaySteps {
+		return cfg.InitialLambda
+	}
+	if cfg.LambdaRampSteps <= 0 {
+		return target
+	}
+	progress := float64(step-cfg.LambdaDelaySteps) / float64(cfg.LambdaRampSteps)
+	if progress <= 0 {
+		return cfg.InitialLambda
+	}
+	if progress >= 1 {
+		return target
+	}
+	return cfg.InitialLambda + float32(progress)*(target-cfg.InitialLambda)
 }
 
 func checkpointCapacity(cfg MirageV1ReferenceTrainConfig) int {
@@ -361,20 +426,23 @@ func newMirageReferenceOptimizerState(mod *mantaartifact.Module, weights map[str
 	return state
 }
 
-func applyMirageReferenceUpdate(mod *mantaartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig, opt *mirageReferenceOptimizerState) error {
+func applyMirageReferenceUpdate(mod *mantaartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig, opt *mirageReferenceOptimizerState, step int) error {
 	switch cfg.Optimizer {
 	case "sgd":
-		return applyMirageReferenceSGD(mod, weights, grads, cfg)
+		return applyMirageReferenceSGD(mod, weights, grads, cfg, step)
 	case "adam":
-		return applyMirageReferenceAdam(mod, weights, grads, cfg, opt)
+		return applyMirageReferenceAdam(mod, weights, grads, cfg, opt, step)
 	default:
 		return fmt.Errorf("unknown optimizer %q", cfg.Optimizer)
 	}
 }
 
-func applyMirageReferenceSGD(mod *mantaartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig) error {
+func applyMirageReferenceSGD(mod *mantaartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig, step int) error {
 	for _, param := range mod.Params {
 		if !param.Trainable {
+			continue
+		}
+		if mirageReferenceParamFrozen(param.Name, cfg, step) {
 			continue
 		}
 		weight := weights[param.Name]
@@ -394,7 +462,7 @@ func applyMirageReferenceSGD(mod *mantaartifact.Module, weights, grads map[strin
 	return nil
 }
 
-func applyMirageReferenceAdam(mod *mantaartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig, opt *mirageReferenceOptimizerState) error {
+func applyMirageReferenceAdam(mod *mantaartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig, opt *mirageReferenceOptimizerState, step int) error {
 	if opt == nil {
 		return fmt.Errorf("adam optimizer state is nil")
 	}
@@ -404,6 +472,9 @@ func applyMirageReferenceAdam(mod *mantaartifact.Module, weights, grads map[stri
 	bias2 := 1 - math.Pow(beta2, float64(opt.step))
 	for _, param := range mod.Params {
 		if !param.Trainable {
+			continue
+		}
+		if mirageReferenceParamFrozen(param.Name, cfg, step) {
 			continue
 		}
 		weight := weights[param.Name]
@@ -431,6 +502,17 @@ func applyMirageReferenceAdam(mod *mantaartifact.Module, weights, grads map[stri
 		constrainMirageParam(param.Name, weight, cfg)
 	}
 	return nil
+}
+
+func mirageReferenceParamFrozen(name string, cfg MirageV1ReferenceTrainConfig, step int) bool {
+	if cfg.FreezeAnalysisSteps <= 0 || step >= cfg.FreezeAnalysisSteps {
+		return false
+	}
+	return mirageReferenceAnalysisParam(name)
+}
+
+func mirageReferenceAnalysisParam(name string) bool {
+	return strings.HasPrefix(name, "ga") || strings.HasPrefix(name, "gdn")
 }
 
 func prepareMirageReferenceGrad(grad, weight float32, cfg MirageV1ReferenceTrainConfig) float32 {
@@ -478,6 +560,46 @@ func mirageTrainMetrics(result backend.GradResult) (MirageV1ReferenceMetrics, er
 		return MirageV1ReferenceMetrics{}, err
 	}
 	return MirageV1ReferenceMetrics{Loss: loss, MSE: mse, Rate: rate}, nil
+}
+
+func mirageReferenceTrainStepLambda(mod *mantaartifact.Module) (float32, error) {
+	step, err := mirageReferenceTrainStepLoss(mod)
+	if err != nil {
+		return 0, err
+	}
+	value, err := strconv.ParseFloat(step.Attributes["lambda"], 32)
+	if err != nil {
+		return 0, fmt.Errorf("parse train_step lambda: %w", err)
+	}
+	return float32(value), nil
+}
+
+func setMirageReferenceTrainStepLambda(mod *mantaartifact.Module, lambda float32) error {
+	step, err := mirageReferenceTrainStepLoss(mod)
+	if err != nil {
+		return err
+	}
+	if step.Attributes == nil {
+		step.Attributes = map[string]string{}
+	}
+	step.Attributes["lambda"] = strconv.FormatFloat(float64(lambda), 'g', 8, 32)
+	if mod.Metadata != nil {
+		mod.Metadata["lambda"] = float64(lambda)
+	}
+	return nil
+}
+
+func mirageReferenceTrainStepLoss(mod *mantaartifact.Module) (*mantaartifact.Step, error) {
+	if mod == nil {
+		return nil, fmt.Errorf("nil module")
+	}
+	for i := range mod.Steps {
+		step := &mod.Steps[i]
+		if step.Entry == "train_step" && step.Kind == mantaartifact.StepRDLoss {
+			return step, nil
+		}
+	}
+	return nil, fmt.Errorf("train_step rate-distortion loss not found")
 }
 
 func scalarOutput(result backend.GradResult, name string) (float32, error) {

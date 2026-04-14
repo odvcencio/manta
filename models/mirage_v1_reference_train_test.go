@@ -4,6 +4,7 @@ import (
 	"math"
 	"testing"
 
+	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 	"github.com/odvcencio/manta/runtime/backend"
 )
 
@@ -133,6 +134,9 @@ func TestMirageV1ReferenceTrainCosineScheduleAndCheckpoints(t *testing.T) {
 	if len(history.LearningRates) != 4 {
 		t.Fatalf("learning rate history length = %d want 4", len(history.LearningRates))
 	}
+	if len(history.Lambdas) != 4 {
+		t.Fatalf("lambda history length = %d want 4", len(history.Lambdas))
+	}
 	if !nearFloat32(history.LearningRates[0], 0.01, 1e-7) {
 		t.Fatalf("first learning rate = %.8f want 0.01", history.LearningRates[0])
 	}
@@ -147,6 +151,65 @@ func TestMirageV1ReferenceTrainCosineScheduleAndCheckpoints(t *testing.T) {
 	}
 	if history.Checkpoints[1].LearningRate != history.LearningRates[3] {
 		t.Fatalf("checkpoint learning rate = %.8f want %.8f", history.Checkpoints[1].LearningRate, history.LearningRates[3])
+	}
+}
+
+func TestMirageV1ReferenceLambdaSchedule(t *testing.T) {
+	cfg := normalizeMirageReferenceTrainConfig(MirageV1ReferenceTrainConfig{
+		LambdaSchedule:   "linear",
+		InitialLambda:    0,
+		LambdaDelaySteps: 1,
+		LambdaRampSteps:  2,
+	})
+	target := float32(0.01)
+	want := []float32{0, 0, 0.005, 0.01, 0.01}
+	for step, expected := range want {
+		if got := mirageReferenceLambda(cfg, target, step); !nearFloat32(got, expected, 1e-7) {
+			t.Fatalf("lambda at step %d = %.8f want %.8f", step, got, expected)
+		}
+	}
+}
+
+func TestMirageV1ReferenceFreezeAnalysisSteps(t *testing.T) {
+	mod := &mantaartifact.Module{
+		Params: []mantaartifact.Param{
+			{Name: "ga0_weight", Trainable: true},
+			{Name: "gdn0_beta", Trainable: true},
+			{Name: "hs_logits_weight", Trainable: true},
+			{Name: "gs0_weight", Trainable: true},
+		},
+	}
+	weights := map[string]*backend.Tensor{
+		"ga0_weight":       backend.NewTensorF16([]int{1}, []float32{1}),
+		"gdn0_beta":        backend.NewTensorF16([]int{1}, []float32{1}),
+		"hs_logits_weight": backend.NewTensorF16([]int{1}, []float32{1}),
+		"gs0_weight":       backend.NewTensorF16([]int{1}, []float32{1}),
+	}
+	grads := map[string]*backend.Tensor{
+		"ga0_weight":       backend.NewTensorF16([]int{1}, []float32{1}),
+		"gdn0_beta":        backend.NewTensorF16([]int{1}, []float32{1}),
+		"hs_logits_weight": backend.NewTensorF16([]int{1}, []float32{1}),
+		"gs0_weight":       backend.NewTensorF16([]int{1}, []float32{1}),
+	}
+	cfg := normalizeMirageReferenceTrainConfig(MirageV1ReferenceTrainConfig{
+		LearningRate:        0.1,
+		Optimizer:           "sgd",
+		FreezeAnalysisSteps: 1,
+	})
+	if err := applyMirageReferenceUpdate(mod, weights, grads, cfg, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if weights["ga0_weight"].F32[0] != 1 || weights["gdn0_beta"].F32[0] != 1 {
+		t.Fatalf("analysis params changed during freeze: ga=%.4f gdn=%.4f", weights["ga0_weight"].F32[0], weights["gdn0_beta"].F32[0])
+	}
+	if !nearFloat32(weights["hs_logits_weight"].F32[0], 0.9, 1e-7) || !nearFloat32(weights["gs0_weight"].F32[0], 0.9, 1e-7) {
+		t.Fatalf("non-analysis params were not updated: hs=%.4f gs=%.4f", weights["hs_logits_weight"].F32[0], weights["gs0_weight"].F32[0])
+	}
+	if err := applyMirageReferenceUpdate(mod, weights, grads, cfg, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	if !nearFloat32(weights["ga0_weight"].F32[0], 0.9, 1e-7) || !nearFloat32(weights["gdn0_beta"].F32[0], 0.9, 1e-7) {
+		t.Fatalf("analysis params did not update after freeze: ga=%.4f gdn=%.4f", weights["ga0_weight"].F32[0], weights["gdn0_beta"].F32[0])
 	}
 }
 
