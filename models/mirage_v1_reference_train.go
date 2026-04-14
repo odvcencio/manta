@@ -14,15 +14,19 @@ import (
 // MirageV1ReferenceTrainConfig controls the tiny CPU reference training loop
 // used to de-risk the Mirage graph before backend backward kernels exist.
 type MirageV1ReferenceTrainConfig struct {
-	Steps        int
-	LearningRate float32
-	GradientClip float32
-	WeightDecay  float32
-	MinGDNBeta   float32
-	Optimizer    string
-	AdamBeta1    float32
-	AdamBeta2    float32
-	AdamEpsilon  float32
+	Steps                int
+	LearningRate         float32
+	LearningRateSchedule string
+	FinalLearningRate    float32
+	GradientClip         float32
+	WeightDecay          float32
+	MinGDNBeta           float32
+	Optimizer            string
+	AdamBeta1            float32
+	AdamBeta2            float32
+	AdamEpsilon          float32
+	CheckpointEvery      int
+	CheckpointFunc       func(MirageV1ReferenceCheckpoint, map[string]*backend.Tensor) error
 }
 
 // MirageV1ReferenceTrainHistory records loss movement through a reference run.
@@ -32,7 +36,19 @@ type MirageV1ReferenceTrainHistory struct {
 	Losses        []float32
 	MSEs          []float32
 	Rates         []float32
+	LearningRates []float32
 	GradientNorms []MirageV1ReferenceGradientNorms
+	Checkpoints   []MirageV1ReferenceCheckpoint
+}
+
+// MirageV1ReferenceCheckpoint records full-dataset reference metrics at a
+// checkpoint boundary after the optimizer update for Step has been applied.
+type MirageV1ReferenceCheckpoint struct {
+	Step         int
+	Loss         float32
+	MSE          float32
+	Rate         float32
+	LearningRate float32
 }
 
 // MirageV1ReferenceGradientNorms records raw gradient L2 norms by graph region
@@ -95,6 +111,9 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 		return MirageV1ReferenceTrainHistory{}, fmt.Errorf("at least one training image is required")
 	}
 	cfg = normalizeMirageReferenceTrainConfig(cfg)
+	if err := validateMirageReferenceTrainConfig(cfg); err != nil {
+		return MirageV1ReferenceTrainHistory{}, err
+	}
 	initial, err := MirageV1ReferenceEval(mod, weights, images)
 	if err != nil {
 		return MirageV1ReferenceTrainHistory{}, err
@@ -104,10 +123,13 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 		Losses:        make([]float32, 0, cfg.Steps+1),
 		MSEs:          make([]float32, 0, cfg.Steps+1),
 		Rates:         make([]float32, 0, cfg.Steps+1),
+		LearningRates: make([]float32, 0, cfg.Steps),
 		GradientNorms: make([]MirageV1ReferenceGradientNorms, 0, cfg.Steps),
+		Checkpoints:   make([]MirageV1ReferenceCheckpoint, 0, checkpointCapacity(cfg)),
 	}
 	opt := newMirageReferenceOptimizerState(mod, weights, cfg)
 	for step := 0; step < cfg.Steps; step++ {
+		learningRate := mirageReferenceLearningRate(cfg, step)
 		image := images[step%len(images)]
 		result, err := backend.ExecuteAutograd(mod, backend.GradRequest{
 			Entry:   "train_step",
@@ -124,9 +146,32 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 		history.Losses = append(history.Losses, metrics.Loss)
 		history.MSEs = append(history.MSEs, metrics.MSE)
 		history.Rates = append(history.Rates, metrics.Rate)
+		history.LearningRates = append(history.LearningRates, learningRate)
 		history.GradientNorms = append(history.GradientNorms, mirageReferenceGradientNorms(result.Gradients))
-		if err := applyMirageReferenceUpdate(mod, weights, result.Gradients, cfg, opt); err != nil {
+		stepCfg := cfg
+		stepCfg.LearningRate = learningRate
+		if err := applyMirageReferenceUpdate(mod, weights, result.Gradients, stepCfg, opt); err != nil {
 			return MirageV1ReferenceTrainHistory{}, err
+		}
+		stepNumber := step + 1
+		if cfg.CheckpointEvery > 0 && stepNumber%cfg.CheckpointEvery == 0 {
+			checkpointMetrics, err := MirageV1ReferenceEval(mod, weights, images)
+			if err != nil {
+				return MirageV1ReferenceTrainHistory{}, err
+			}
+			checkpoint := MirageV1ReferenceCheckpoint{
+				Step:         stepNumber,
+				Loss:         checkpointMetrics.Loss,
+				MSE:          checkpointMetrics.MSE,
+				Rate:         checkpointMetrics.Rate,
+				LearningRate: learningRate,
+			}
+			history.Checkpoints = append(history.Checkpoints, checkpoint)
+			if cfg.CheckpointFunc != nil {
+				if err := cfg.CheckpointFunc(checkpoint, weights); err != nil {
+					return MirageV1ReferenceTrainHistory{}, err
+				}
+			}
 		}
 	}
 	final, err := MirageV1ReferenceEval(mod, weights, images)
@@ -226,6 +271,13 @@ func normalizeMirageReferenceTrainConfig(cfg MirageV1ReferenceTrainConfig) Mirag
 	if cfg.LearningRate == 0 {
 		cfg.LearningRate = 0.01
 	}
+	cfg.LearningRateSchedule = strings.ToLower(strings.TrimSpace(cfg.LearningRateSchedule))
+	if cfg.LearningRateSchedule == "" {
+		cfg.LearningRateSchedule = "constant"
+	}
+	if cfg.FinalLearningRate == 0 {
+		cfg.FinalLearningRate = cfg.LearningRate
+	}
 	if cfg.GradientClip == 0 {
 		cfg.GradientClip = 1
 	}
@@ -246,6 +298,39 @@ func normalizeMirageReferenceTrainConfig(cfg MirageV1ReferenceTrainConfig) Mirag
 		cfg.AdamEpsilon = 1e-8
 	}
 	return cfg
+}
+
+func validateMirageReferenceTrainConfig(cfg MirageV1ReferenceTrainConfig) error {
+	switch cfg.LearningRateSchedule {
+	case "constant", "cosine":
+	default:
+		return fmt.Errorf("unknown learning rate schedule %q", cfg.LearningRateSchedule)
+	}
+	if cfg.CheckpointEvery < 0 {
+		return fmt.Errorf("checkpoint interval must be non-negative")
+	}
+	return nil
+}
+
+func mirageReferenceLearningRate(cfg MirageV1ReferenceTrainConfig, step int) float32 {
+	switch cfg.LearningRateSchedule {
+	case "cosine":
+		if cfg.Steps <= 1 {
+			return cfg.LearningRate
+		}
+		progress := float64(step) / float64(cfg.Steps-1)
+		cosine := 0.5 * (1 + math.Cos(math.Pi*progress))
+		return cfg.FinalLearningRate + float32(cosine)*float32(cfg.LearningRate-cfg.FinalLearningRate)
+	default:
+		return cfg.LearningRate
+	}
+}
+
+func checkpointCapacity(cfg MirageV1ReferenceTrainConfig) int {
+	if cfg.CheckpointEvery <= 0 {
+		return 0
+	}
+	return cfg.Steps / cfg.CheckpointEvery
 }
 
 type mirageReferenceOptimizerState struct {

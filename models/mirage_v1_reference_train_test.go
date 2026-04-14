@@ -1,6 +1,7 @@
 package models
 
 import (
+	"math"
 	"testing"
 
 	"github.com/odvcencio/manta/runtime/backend"
@@ -93,6 +94,62 @@ func TestMirageV1ReferenceTrainAdamRuns(t *testing.T) {
 	}
 }
 
+func TestMirageV1ReferenceTrainCosineScheduleAndCheckpoints(t *testing.T) {
+	mod, err := DefaultMirageV1Module(MirageV1Config{
+		ImageHeight:    16,
+		ImageWidth:     16,
+		LatentChannels: 4,
+		HyperChannels:  4,
+		BitWidth:       2,
+		Lambda:         0,
+		LambdaSet:      true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	weights, err := InitMirageV1ReferenceWeights(mod, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var callbacks []MirageV1ReferenceCheckpoint
+	history, err := TrainMirageV1Reference(mod, weights, []*backend.Tensor{mirageReferenceTrainImage()}, MirageV1ReferenceTrainConfig{
+		Steps:                4,
+		LearningRate:         0.01,
+		FinalLearningRate:    0.001,
+		LearningRateSchedule: "cosine",
+		Optimizer:            "adam",
+		CheckpointEvery:      2,
+		CheckpointFunc: func(checkpoint MirageV1ReferenceCheckpoint, weights map[string]*backend.Tensor) error {
+			callbacks = append(callbacks, checkpoint)
+			if len(weights) == 0 {
+				t.Fatalf("checkpoint weights are empty")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history.LearningRates) != 4 {
+		t.Fatalf("learning rate history length = %d want 4", len(history.LearningRates))
+	}
+	if !nearFloat32(history.LearningRates[0], 0.01, 1e-7) {
+		t.Fatalf("first learning rate = %.8f want 0.01", history.LearningRates[0])
+	}
+	if !nearFloat32(history.LearningRates[3], 0.001, 1e-7) {
+		t.Fatalf("last learning rate = %.8f want 0.001", history.LearningRates[3])
+	}
+	if len(history.Checkpoints) != 2 || len(callbacks) != 2 {
+		t.Fatalf("checkpoints=%d callbacks=%d want 2", len(history.Checkpoints), len(callbacks))
+	}
+	if history.Checkpoints[0].Step != 2 || history.Checkpoints[1].Step != 4 {
+		t.Fatalf("checkpoint steps = %+v", history.Checkpoints)
+	}
+	if history.Checkpoints[1].LearningRate != history.LearningRates[3] {
+		t.Fatalf("checkpoint learning rate = %.8f want %.8f", history.Checkpoints[1].LearningRate, history.LearningRates[3])
+	}
+}
+
 func TestInitMirageV1ReferenceWeightsAreValid(t *testing.T) {
 	mod, err := DefaultMirageV1Module(MirageV1Config{})
 	if err != nil {
@@ -118,6 +175,10 @@ func TestInitMirageV1ReferenceWeightsAreValid(t *testing.T) {
 			t.Fatalf("%s storage = %d want %d", param.Name, len(weight.F32), weight.Elements())
 		}
 	}
+}
+
+func nearFloat32(got, want, tol float32) bool {
+	return math.Abs(float64(got-want)) <= float64(tol)
 }
 
 func mirageReferenceTrainImage() *backend.Tensor {
