@@ -27,6 +27,10 @@ type evalConfig struct {
 	MaxQueries  string
 	Leaderboard string
 	ThresholdsEnv string
+	BM25Baseline string
+	BM25Gate string
+	BM25GateMetric string
+	BM25GateMinRatio string
 }
 
 type retrievalMetrics struct {
@@ -70,7 +74,11 @@ Optional:
   MANTA_EVAL_TOP_K=100
   MANTA_EVAL_MAX_DOCS=0
   MANTA_EVAL_MAX_QUERIES=0
-  MANTA_THRESHOLDS_ENV=/path/to/thresholds.env`)
+  MANTA_THRESHOLDS_ENV=/path/to/thresholds.env
+  MANTA_EVAL_BM25_BASELINE=1
+  MANTA_GATE_BM25_BASELINE=0
+  MANTA_GATE_BM25_METRIC=ndcg_at_10
+  MANTA_GATE_BM25_MIN_RATIO=1.0`)
 }
 
 func getenv(name string, fallback string) string {
@@ -207,6 +215,10 @@ func prepareConfig(root string) (evalConfig, error) {
 		MaxQueries:  getenv("MANTA_EVAL_MAX_QUERIES", "0"),
 		Leaderboard: filepath.Join(runDir, "leaderboard.tsv"),
 		ThresholdsEnv: thresholdsEnv,
+		BM25Baseline: getenv("MANTA_EVAL_BM25_BASELINE", "1"),
+		BM25Gate: getenv("MANTA_GATE_BM25_BASELINE", "0"),
+		BM25GateMetric: getenv("MANTA_GATE_BM25_METRIC", "ndcg_at_10"),
+		BM25GateMinRatio: getenv("MANTA_GATE_BM25_MIN_RATIO", "1.0"),
 	}, nil
 }
 
@@ -257,6 +269,30 @@ func runEval(cfg evalConfig) error {
 		if _, err := os.Stat(dir); err != nil {
 			return fmt.Errorf("dataset directory missing for %s: %s", dataset, dir)
 		}
+		bm25MetricsPath := ""
+		if cfg.BM25Baseline != "0" {
+			bm25MetricsPath = filepath.Join(cfg.RunDir, dataset+".bm25.retrieval.metrics.json")
+			bm25Args := []string{
+				"eval-retrieval-bm25",
+				"--dataset", dataset,
+				"--split", cfg.Split,
+				"--top-k", cfg.TopK,
+				"--metrics-json", bm25MetricsPath,
+			}
+			if cfg.MaxDocs != "" && cfg.MaxDocs != "0" {
+				bm25Args = append(bm25Args, "--max-docs", cfg.MaxDocs)
+			}
+			if cfg.MaxQueries != "" && cfg.MaxQueries != "0" {
+				bm25Args = append(bm25Args, "--max-queries", cfg.MaxQueries)
+			}
+			bm25Args = append(bm25Args, dir)
+			err = runCmd(cfg, "Evaluate BM25 "+dataset, dataset+"-bm25-eval.log", cfg.MantaBin, bm25Args)
+			guard err == nil else return err
+			bm25Metrics, err := readMetrics(bm25MetricsPath)
+			guard err == nil else return err
+			err = appendLeaderboard(cfg.Leaderboard, bm25Metrics)
+			guard err == nil else return err
+		}
 		metricsPath := filepath.Join(cfg.RunDir, dataset+".retrieval.metrics.json")
 		args := []string{
 			"eval-retrieval",
@@ -284,6 +320,18 @@ func runEval(cfg evalConfig) error {
 		guard err == nil else return err
 		err = appendLeaderboard(cfg.Leaderboard, metrics)
 		guard err == nil else return err
+		if cfg.BM25Gate != "0" && bm25MetricsPath != "" {
+			compareArgs := []string{
+				"compare-retrieval-metrics",
+				"--metric", cfg.BM25GateMetric,
+				"--min-ratio", cfg.BM25GateMinRatio,
+				"--require-win",
+				metricsPath,
+				bm25MetricsPath,
+			}
+			err = runCmd(cfg, "Gate retrieval against BM25 "+dataset, dataset+"-bm25-compare.log", cfg.MantaBin, compareArgs)
+			guard err == nil else return err
+		}
 	}
 	step("Retrieval leaderboard")
 	data, err := os.ReadFile(cfg.Leaderboard)

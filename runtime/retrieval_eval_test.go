@@ -181,3 +181,45 @@ func TestReadBEIRQrelsAcceptsTRECFormat(t *testing.T) {
 		t.Fatalf("non-positive qrel was retained: %+v", qrels)
 	}
 }
+
+func TestEvaluateBM25RetrievalRanksLexicalMatch(t *testing.T) {
+	dir := t.TempDir()
+	qrelsDir := filepath.Join(dir, "qrels")
+	if err := os.Mkdir(qrelsDir, 0o755); err != nil {
+		t.Fatalf("mkdir qrels: %v", err)
+	}
+	corpusPath := filepath.Join(dir, "corpus.jsonl")
+	queriesPath := filepath.Join(dir, "queries.jsonl")
+	qrelsPath := filepath.Join(qrelsDir, "test.tsv")
+	if err := os.WriteFile(corpusPath, []byte(
+		`{"_id":"d1","text":"alpha alpha finance"}`+"\n"+
+			`{"_id":"d2","text":"beta medicine"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(queriesPath, []byte(`{"_id":"q1","text":"alpha finance"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+
+	metrics, err := EvaluateBM25Retrieval(context.Background(), RetrievalEvalConfig{
+		DatasetName: "tiny",
+		CorpusPath:  corpusPath,
+		QueriesPath: queriesPath,
+		QrelsPath:   qrelsPath,
+		TopK:        100,
+	})
+	if err != nil {
+		t.Fatalf("evaluate bm25: %v", err)
+	}
+	if metrics.Backend != "bm25" || metrics.Dataset != "tiny" {
+		t.Fatalf("metrics identity = backend:%q dataset:%q", metrics.Backend, metrics.Dataset)
+	}
+	if metrics.Inputs.Documents != 2 || metrics.Inputs.Queries != 1 || metrics.Inputs.ScoredPairs != 2 {
+		t.Fatalf("input metrics = %+v", metrics.Inputs)
+	}
+	if metrics.Quality.NDCGAt10 != 1 || metrics.Quality.MRRAt10 != 1 || metrics.Quality.RecallAt10 != 1 || metrics.Quality.RecallAt100 != 1 {
+		t.Fatalf("quality = %+v, want perfect lexical ranking", metrics.Quality)
+	}
+}

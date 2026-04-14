@@ -327,6 +327,96 @@ func TestRunEvalRetrievalWritesMetricsJSON(t *testing.T) {
 	}
 }
 
+func TestRunEvalRetrievalBM25WritesMetricsJSON(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "corpus.jsonl"), []byte(
+		`{"_id":"d1","text":"alpha finance"}`+"\n"+
+			`{"_id":"d2","text":"beta medicine"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(`{"_id":"q1","text":"alpha"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "test.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	metricsPath := filepath.Join(dir, "bm25.retrieval.metrics.json")
+
+	output := captureRunOutput(t, []string{"eval-retrieval-bm25", "--dataset", "tiny", "--metrics-json", metricsPath, datasetDir})
+	for _, want := range []string{
+		"retrieval bm25: dataset=tiny backend=bm25",
+		"quality: ndcg@10=1.000000",
+		"metrics: " + metricsPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("eval-retrieval-bm25 output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	var metrics mantaruntime.RetrievalEvalMetrics
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	if metrics.Schema != mantaruntime.RetrievalEvalMetricsSchema || metrics.Dataset != "tiny" || metrics.Backend != "bm25" || metrics.Quality.NDCGAt10 != 1 {
+		t.Fatalf("metrics = %+v", metrics)
+	}
+}
+
+func TestRunCompareRetrievalMetricsCanRequireBaselineWin(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "current.retrieval.metrics.json")
+	baselinePath := filepath.Join(dir, "baseline.retrieval.metrics.json")
+	current := mantaruntime.RetrievalEvalMetrics{
+		Schema:  mantaruntime.RetrievalEvalMetricsSchema,
+		Dataset: "tiny",
+		Backend: "cuda",
+		Quality: mantaruntime.RetrievalEvalQualityMetrics{
+			NDCGAt10: 0.30,
+		},
+	}
+	baseline := mantaruntime.RetrievalEvalMetrics{
+		Schema:  mantaruntime.RetrievalEvalMetricsSchema,
+		Dataset: "tiny",
+		Backend: "bm25",
+		Quality: mantaruntime.RetrievalEvalQualityMetrics{
+			NDCGAt10: 0.25,
+		},
+	}
+	currentData, err := json.Marshal(current)
+	if err != nil {
+		t.Fatalf("marshal current: %v", err)
+	}
+	baselineData, err := json.Marshal(baseline)
+	if err != nil {
+		t.Fatalf("marshal baseline: %v", err)
+	}
+	if err := os.WriteFile(currentPath, currentData, 0o644); err != nil {
+		t.Fatalf("write current: %v", err)
+	}
+	if err := os.WriteFile(baselinePath, baselineData, 0o644); err != nil {
+		t.Fatalf("write baseline: %v", err)
+	}
+
+	output := captureRunOutput(t, []string{"compare-retrieval-metrics", "--require-win", currentPath, baselinePath})
+	for _, want := range []string{
+		"current: " + currentPath + " backend=cuda dataset=tiny",
+		"baseline: " + baselinePath + " backend=bm25 dataset=tiny",
+		"target: ndcg_at_10=0.3 baseline=0.25 required=0.25 ratio=1.2",
+		"retrieval baseline gate: PASS",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("compare-retrieval-metrics output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
 func TestRunTrainEmbedFitsContrastivePackage(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {

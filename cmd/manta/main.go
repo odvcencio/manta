@@ -101,6 +101,8 @@ func run(args []string) error {
 		return runEmbedText(args[1:])
 	case "eval-retrieval":
 		return runEvalRetrieval(args[1:])
+	case "eval-retrieval-bm25":
+		return runEvalRetrievalBM25(args[1:])
 	case "demo":
 		return runDemo(args[1:])
 	case "inspect":
@@ -127,6 +129,8 @@ func run(args []string) error {
 		return runTrainCorpus(args[1:])
 	case "compare-train-metrics":
 		return runCompareTrainMetrics(args[1:])
+	case "compare-retrieval-metrics":
+		return runCompareRetrievalMetrics(args[1:])
 	case "diagnose-train-metrics":
 		return runDiagnoseTrainMetrics(args[1:])
 	case "gate-train-metrics":
@@ -394,6 +398,64 @@ func runEvalRetrieval(args []string) error {
 		}
 	}
 	fmt.Printf("retrieval eval: dataset=%s backend=%s docs=%d queries=%d relevant_pairs=%d scored_pairs=%d\n",
+		metrics.Dataset, metrics.Backend, metrics.Inputs.Documents, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredPairs)
+	fmt.Printf("quality: ndcg@10=%.6f mrr@10=%.6f recall@10=%.6f recall@100=%.6f\n",
+		metrics.Quality.NDCGAt10, metrics.Quality.MRRAt10, metrics.Quality.RecallAt10, metrics.Quality.RecallAt100)
+	fmt.Printf("throughput: elapsed=%.3fs docs/s=%.2f queries/s=%.2f scores/s=%.2f\n",
+		metrics.Throughput.ElapsedSeconds, metrics.Throughput.DocumentsPerSecond, metrics.Throughput.QueriesPerSecond, metrics.Throughput.ScoresPerSecond)
+	if *metricsPath != "" {
+		fmt.Printf("metrics: %s\n", *metricsPath)
+	}
+	return nil
+}
+
+func runEvalRetrievalBM25(args []string) error {
+	fs := flag.NewFlagSet("eval-retrieval-bm25", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for metrics output")
+	split := fs.String("split", "test", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
+	topK := fs.Int("top-k", 100, "retrieval depth for scoring")
+	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
+	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	metricsPath := fs.String("metrics-json", "", "write retrieval metrics JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || fs.Arg(0) == "" {
+		return fmt.Errorf("usage: manta eval-retrieval-bm25 [flags] <beir-dataset-dir>")
+	}
+	datasetDir := fs.Arg(0)
+	corpusPath, queriesPath, defaultQrelsPath := mantaruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+	metrics, err := mantaruntime.EvaluateBM25Retrieval(context.Background(), mantaruntime.RetrievalEvalConfig{
+		DatasetName: *datasetName,
+		CorpusPath:  corpusPath,
+		QueriesPath: queriesPath,
+		QrelsPath:   *qrelsPath,
+		TopK:        *topK,
+		MaxDocs:     *maxDocs,
+		MaxQueries:  *maxQueries,
+	})
+	if err != nil {
+		return err
+	}
+	if *metricsPath != "" {
+		data, err := json.MarshalIndent(metrics, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		if err := os.WriteFile(*metricsPath, data, 0o644); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("retrieval bm25: dataset=%s backend=%s docs=%d queries=%d relevant_pairs=%d scored_pairs=%d\n",
 		metrics.Dataset, metrics.Backend, metrics.Inputs.Documents, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredPairs)
 	fmt.Printf("quality: ndcg@10=%.6f mrr@10=%.6f recall@10=%.6f recall@100=%.6f\n",
 		metrics.Quality.NDCGAt10, metrics.Quality.MRRAt10, metrics.Quality.RecallAt10, metrics.Quality.RecallAt100)
@@ -1722,6 +1784,72 @@ func runCompareTrainMetrics(args []string) error {
 	return nil
 }
 
+func runCompareRetrievalMetrics(args []string) error {
+	fs := flag.NewFlagSet("compare-retrieval-metrics", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	metric := fs.String("metric", "ndcg_at_10", "metric to compare for gate mode")
+	minRatio := fs.Float64("min-ratio", 1.0, "required current/baseline ratio when --require-win is set")
+	requireWin := fs.Bool("require-win", false, "return non-zero unless current metric meets or beats baseline ratio")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
+		return fmt.Errorf("usage: manta compare-retrieval-metrics [--metric ndcg_at_10] [--min-ratio 1.0] [--require-win] <current.retrieval.metrics.json> <baseline.retrieval.metrics.json>")
+	}
+	if *minRatio < 0 {
+		return fmt.Errorf("min-ratio must be non-negative")
+	}
+	currentPath := fs.Arg(0)
+	baselinePath := fs.Arg(1)
+	current, err := readRetrievalMetricsJSON(currentPath)
+	if err != nil {
+		return err
+	}
+	baseline, err := readRetrievalMetricsJSON(baselinePath)
+	if err != nil {
+		return err
+	}
+	if current.Dataset != baseline.Dataset {
+		return fmt.Errorf("dataset mismatch: current=%q baseline=%q", current.Dataset, baseline.Dataset)
+	}
+	fmt.Printf("current: %s backend=%s dataset=%s\n", currentPath, current.Backend, current.Dataset)
+	fmt.Printf("baseline: %s backend=%s dataset=%s\n", baselinePath, baseline.Backend, baseline.Dataset)
+	printRetrievalMetricDelta("ndcg_at_10", current.Quality.NDCGAt10, baseline.Quality.NDCGAt10)
+	printRetrievalMetricDelta("mrr_at_10", current.Quality.MRRAt10, baseline.Quality.MRRAt10)
+	printRetrievalMetricDelta("recall_at_10", current.Quality.RecallAt10, baseline.Quality.RecallAt10)
+	printRetrievalMetricDelta("recall_at_100", current.Quality.RecallAt100, baseline.Quality.RecallAt100)
+	currentValue, ok := retrievalMetricValue(current, *metric)
+	if !ok {
+		return fmt.Errorf("metric %q is unavailable", *metric)
+	}
+	baselineValue, ok := retrievalMetricValue(baseline, *metric)
+	if !ok {
+		return fmt.Errorf("metric %q is unavailable", *metric)
+	}
+	required := baselineValue * *minRatio
+	ratio := 0.0
+	if baselineValue != 0 {
+		ratio = currentValue / baselineValue
+	}
+	fmt.Printf("target: %s=%.6g baseline=%.6g required=%.6g ratio=%.6g\n", *metric, currentValue, baselineValue, required, ratio)
+	if *requireWin && !trainMetricThresholdPassed(currentValue, required, ">=") {
+		fmt.Printf("retrieval baseline gate: FAIL metric=%s current=%.6g baseline=%.6g min_ratio=%.6g\n", *metric, currentValue, baselineValue, *minRatio)
+		return fmt.Errorf("retrieval baseline gate failed")
+	}
+	if *requireWin {
+		fmt.Printf("retrieval baseline gate: PASS metric=%s current=%.6g baseline=%.6g min_ratio=%.6g\n", *metric, currentValue, baselineValue, *minRatio)
+	}
+	return nil
+}
+
+func printRetrievalMetricDelta(name string, current, baseline float64) {
+	ratio := 0.0
+	if baseline != 0 {
+		ratio = current / baseline
+	}
+	fmt.Printf("%s: current=%.6f baseline=%.6f delta=%+.6f ratio=%.6f\n", name, current, baseline, current-baseline, ratio)
+}
+
 func readTrainMetricsJSON(path string) (trainMetricsJSON, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -2540,6 +2668,7 @@ func printUsage() {
 	fmt.Println("  manta export-mll <artifact.mll> [output.mll]")
 	fmt.Println("  manta embed-text <artifact.mll> <text...>")
 	fmt.Println("  manta eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
+	fmt.Println("  manta eval-retrieval-bm25 [flags] <beir-dataset-dir>")
 	fmt.Println("  manta init-model [flags] <artifact.mll>")
 	fmt.Println("  manta init-mirage [flags] <artifact.mll>")
 	fmt.Println("  manta init-train [flags] <artifact.mll>")
@@ -2549,6 +2678,7 @@ func printUsage() {
 	fmt.Println("  manta train-corpus [flags] <artifact.mll> <corpus.txt>")
 	fmt.Println("  manta train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]")
 	fmt.Println("  manta compare-train-metrics <current.metrics.json> [baseline.metrics.json]")
+	fmt.Println("  manta compare-retrieval-metrics <current.retrieval.metrics.json> <baseline.retrieval.metrics.json>")
 	fmt.Println("  manta diagnose-train-metrics <metrics.json>")
 	fmt.Println("  manta gate-train-metrics [flags] <metrics.json>")
 	fmt.Println("  manta gate-retrieval-metrics [flags] <retrieval.metrics.json>")
@@ -2560,6 +2690,7 @@ func printUsage() {
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Manta metadata in XMTA.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("eval-retrieval scores a sealed embedding .mll on BEIR-style corpus/query/qrels files with nDCG/MRR/Recall metrics.")
+	fmt.Println("eval-retrieval-bm25 scores the same BEIR files with an in-repo BM25 lexical baseline.")
 	fmt.Println("init-model creates the Manta-owned default quantized embedding training package.")
 	fmt.Println("init-mirage creates the Manta-owned Mirage Image v1 host-reference artifact.")
 	fmt.Println("init-train creates a native training package next to an artifact.")
@@ -2569,6 +2700,7 @@ func printUsage() {
 	fmt.Println("train-corpus trains tokenizer + mined text pairs + embedder in one Manta job from a raw text corpus.")
 	fmt.Println("train-embed reloads a training package, fits or --eval-only evaluates token JSONL or text JSONL (with --tokenizer or a sibling .tokenizer.mll; use --no-tokenizer for token JSONL beside a tokenizer), and writes it back.")
 	fmt.Println("compare-train-metrics summarizes metrics JSON and prints deltas against a baseline metrics JSON when provided.")
+	fmt.Println("compare-retrieval-metrics summarizes retrieval quality deltas and can gate a candidate against a baseline.")
 	fmt.Println("diagnose-train-metrics explains backend use, transfer pressure, and suspicious training/eval counters from metrics JSON.")
 	fmt.Println("gate-train-metrics checks metrics JSON against MANTA_* thresholds from the environment or a thresholds env file.")
 	fmt.Println("gate-retrieval-metrics checks BEIR retrieval metrics against dataset-specific MANTA_* thresholds.")
