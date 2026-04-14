@@ -57,9 +57,17 @@ type evalRecord struct {
 	Source   string `json:"source,omitempty"`
 }
 
+type hardNegativeRecord struct {
+	Query     string   `json:"query"`
+	Positive  string   `json:"positive"`
+	Negatives []string `json:"negatives"`
+	Source    string   `json:"source,omitempty"`
+}
+
 type outputCounts struct {
 	TrainPairs        int
 	TrainPairExamples int
+	HardNegativeTrain int
 	EvalPairs         int
 	HardPairs         int
 	CorpusDocs        int
@@ -80,6 +88,7 @@ type acquireConfig struct {
 	ThresholdsPath string
 	TrainPath      string
 	TrainPairPath  string
+	HardTrainPath  string
 	EvalPath       string
 	HardEvalPath   string
 	TokenizerPath  string
@@ -98,6 +107,7 @@ Defaults:
 Outputs:
   processed/train.jsonl
   processed/train-pairs.jsonl
+  processed/train-hard-negatives.jsonl
   processed/eval.jsonl
   processed/hard-eval.jsonl
   processed/tokenizer-corpus.txt
@@ -230,6 +240,7 @@ func prepareConfig(root string) (acquireConfig, error) {
 		ThresholdsPath: filepath.Join(outRoot, "processed", "thresholds.env"),
 		TrainPath:      filepath.Join(outRoot, "processed", "train.jsonl"),
 		TrainPairPath:  filepath.Join(outRoot, "processed", "train-pairs.jsonl"),
+		HardTrainPath:  filepath.Join(outRoot, "processed", "train-hard-negatives.jsonl"),
 		EvalPath:       filepath.Join(outRoot, "processed", "eval.jsonl"),
 		HardEvalPath:   filepath.Join(outRoot, "processed", "hard-eval.jsonl"),
 		TokenizerPath:  filepath.Join(outRoot, "processed", "tokenizer-corpus.txt"),
@@ -524,6 +535,60 @@ func textTrainPairRecords(dataset string, qrels []qrelRecord, queries map[string
 	return out
 }
 
+func textHardNegativeRecords(records []evalRecord, maxNegatives int) []hardNegativeRecord {
+	type group struct {
+		source    string
+		positives []string
+		negatives []string
+	}
+	groups := map[string]*group{}
+	order := []string{}
+	for _, record := range records {
+		query := firstNonEmpty(record.Query, record.Left)
+		doc := firstNonEmpty(record.Document, record.Right)
+		if strings.TrimSpace(query) == "" || strings.TrimSpace(doc) == "" {
+			continue
+		}
+		key := record.Source + "\x00" + query
+		item := groups[key]
+		if item == nil {
+			item = &group{source: record.Source}
+			groups[key] = item
+			order = append(order, key)
+		}
+		if record.Label > 0 {
+			item.positives = append(item.positives, doc)
+		} else {
+			item.negatives = append(item.negatives, doc)
+		}
+	}
+	out := []hardNegativeRecord{}
+	for _, key := range order {
+		item := groups[key]
+		query := strings.SplitN(key, "\x00", 2)[1]
+		if len(item.positives) == 0 || len(item.negatives) == 0 {
+			continue
+		}
+		limit := maxNegatives
+		if limit <= 0 || limit > len(item.negatives) {
+			limit = len(item.negatives)
+		}
+		for i, positive := range item.positives {
+			negatives := []string{}
+			for j := 0; j < limit; j++ {
+				negatives = append(negatives, item.negatives[(i+j)%len(item.negatives)])
+			}
+			out = append(out, hardNegativeRecord{
+				Query:     query,
+				Positive:  positive,
+				Negatives: negatives,
+				Source:    item.source,
+			})
+		}
+	}
+	return out
+}
+
 func textEvalRecords(dataset string, qrels []qrelRecord, queries map[string]string, corpus map[string]string, ids []string, negatives int, limit int) []evalRecord {
 	out := []evalRecord{}
 	seen := map[string]bool{}
@@ -577,6 +642,11 @@ func writeJSONL(path string, values any) error {
 			guard err == nil else return err
 		}
 	case []evalRecord:
+		for _, record := range records {
+			err = enc.Encode(record)
+			guard err == nil else return err
+		}
+	case []hardNegativeRecord:
 		for _, record := range records {
 			err = enc.Encode(record)
 			guard err == nil else return err
@@ -713,6 +783,19 @@ func writeThresholds(path string) error {
 		"MANTA_MAX_MATMUL_RUNS=400000",
 		"MANTA_MAX_MATMUL_RUN_UPLOAD_MB=950000",
 		"MANTA_MAX_MATMUL_RUN_DOWNLOAD_MB=485000",
+		"MANTA_MIN_RETRIEVAL_NDCG10_SCIFACT=0.228430",
+		"MANTA_MIN_RETRIEVAL_MRR10_SCIFACT=0.213567",
+		"MANTA_MIN_RETRIEVAL_RECALL10_SCIFACT=0.314000",
+		"MANTA_MIN_RETRIEVAL_RECALL100_SCIFACT=0.590444",
+		"MANTA_MIN_RETRIEVAL_NDCG10_NFCORPUS=0.110113",
+		"MANTA_MIN_RETRIEVAL_MRR10_NFCORPUS=0.211574",
+		"MANTA_MIN_RETRIEVAL_RECALL10_NFCORPUS=0.048110",
+		"MANTA_MIN_RETRIEVAL_RECALL100_NFCORPUS=0.152181",
+		"MANTA_MIN_RETRIEVAL_NDCG10_FIQA=0.066785",
+		"MANTA_MIN_RETRIEVAL_MRR10_FIQA=0.087438",
+		"MANTA_MIN_RETRIEVAL_RECALL10_FIQA=0.089869",
+		"MANTA_MIN_RETRIEVAL_RECALL100_FIQA=0.241676",
+		"MANTA_MIN_RETRIEVAL_SCORES_PER_SEC=7000000",
 		"",
 	}, "\n")
 	return os.WriteFile(path, []byte(body), 0o644)
@@ -734,6 +817,7 @@ func writeManifest(cfg acquireConfig, counts outputCounts) error {
   "outputs": {
     "train_jsonl": %q,
     "train_pair_jsonl": %q,
+    "train_hard_negative_jsonl": %q,
     "eval_jsonl": %q,
     "hard_eval_jsonl": %q,
     "tokenizer_corpus": %q,
@@ -743,6 +827,7 @@ func writeManifest(cfg acquireConfig, counts outputCounts) error {
   "counts": {
     "train_pairs": %d,
     "train_pair_examples": %d,
+    "hard_negative_train_examples": %d,
     "eval_pairs": %d,
     "hard_pairs": %d,
     "corpus_docs": %d
@@ -757,6 +842,7 @@ func writeManifest(cfg acquireConfig, counts outputCounts) error {
 		string(datasetJSON),
 		cfg.TrainPath,
 		cfg.TrainPairPath,
+		cfg.HardTrainPath,
 		cfg.EvalPath,
 		cfg.HardEvalPath,
 		cfg.TokenizerPath,
@@ -764,6 +850,7 @@ func writeManifest(cfg acquireConfig, counts outputCounts) error {
 		cfg.SHAPath,
 		counts.TrainPairs,
 		counts.TrainPairExamples,
+		counts.HardNegativeTrain,
 		counts.EvalPairs,
 		counts.HardPairs,
 		counts.CorpusDocs,
@@ -773,7 +860,7 @@ func writeManifest(cfg acquireConfig, counts outputCounts) error {
 }
 
 func writeSHA256Sums(cfg acquireConfig) error {
-	paths := []string{cfg.TrainPath, cfg.TrainPairPath, cfg.EvalPath, cfg.HardEvalPath, cfg.TokenizerPath, cfg.ThresholdsPath, cfg.ManifestPath}
+	paths := []string{cfg.TrainPath, cfg.TrainPairPath, cfg.HardTrainPath, cfg.EvalPath, cfg.HardEvalPath, cfg.TokenizerPath, cfg.ThresholdsPath, cfg.ManifestPath}
 	f, err := os.Create(cfg.SHAPath)
 	guard err == nil else return err
 	defer f.Close()
@@ -804,6 +891,7 @@ func main() {
 	step("Acquire BEIR datasets")
 	allTrain := []trainRecord{}
 	allTrainPairs := []evalRecord{}
+	allHardTrain := []hardNegativeRecord{}
 	allEval := []evalRecord{}
 	allHard := []evalRecord{}
 	counts := outputCounts{}
@@ -815,15 +903,17 @@ func main() {
 		}
 		allTrain = append(allTrain, train...)
 		allTrainPairs = append(allTrainPairs, trainPairs...)
+		allHardTrain = append(allHardTrain, textHardNegativeRecords(trainPairs, cfg.Negatives)...)
 		allEval = append(allEval, eval...)
 		allHard = append(allHard, hard...)
 		counts.CorpusDocs += docs
 	}
 	counts.TrainPairs = len(allTrain)
 	counts.TrainPairExamples = len(allTrainPairs)
+	counts.HardNegativeTrain = len(allHardTrain)
 	counts.EvalPairs = len(allEval)
 	counts.HardPairs = len(allHard)
-	guard counts.TrainPairs > 0 && counts.TrainPairExamples > 0 && counts.EvalPairs > 0 && counts.HardPairs > 0 else {
+	guard counts.TrainPairs > 0 && counts.TrainPairExamples > 0 && counts.HardNegativeTrain > 0 && counts.EvalPairs > 0 && counts.HardPairs > 0 else {
 		fmt.Println("acquired datasets are empty")
 		os.Exit(1)
 	}
@@ -836,6 +926,11 @@ func main() {
 	err = writeJSONL(cfg.TrainPairPath, allTrainPairs)
 	guard err == nil else {
 		fmt.Println(f"write train pair dataset failed: {err}")
+		os.Exit(1)
+	}
+	err = writeJSONL(cfg.HardTrainPath, allHardTrain)
+	guard err == nil else {
+		fmt.Println(f"write train hard-negative dataset failed: {err}")
 		os.Exit(1)
 	}
 	err = writeJSONL(cfg.EvalPath, allEval)
@@ -872,6 +967,7 @@ func main() {
 	fmt.Println(f"dataset_root={cfg.OutputRoot}")
 	fmt.Println(f"train_jsonl={cfg.TrainPath}")
 	fmt.Println(f"train_pair_jsonl={cfg.TrainPairPath}")
+	fmt.Println(f"train_hard_negative_jsonl={cfg.HardTrainPath}")
 	fmt.Println(f"eval_jsonl={cfg.EvalPath}")
 	fmt.Println(f"hard_eval_jsonl={cfg.HardEvalPath}")
 	fmt.Println(f"tokenizer_corpus={cfg.TokenizerPath}")

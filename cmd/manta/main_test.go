@@ -904,10 +904,65 @@ func TestRunGateTrainMetricsFailsMissedThreshold(t *testing.T) {
 	}
 }
 
+func TestRunGateRetrievalMetricsChecksDatasetThresholds(t *testing.T) {
+	clearRetrievalMetricGateEnv(t)
+	dir := t.TempDir()
+	metricsPath := filepath.Join(dir, "scifact.retrieval.metrics.json")
+	thresholdsPath := filepath.Join(dir, "thresholds.env")
+	metrics := mantaruntime.RetrievalEvalMetrics{
+		Schema:  mantaruntime.RetrievalEvalMetricsSchema,
+		Dataset: "scifact",
+		Quality: mantaruntime.RetrievalEvalQualityMetrics{
+			NDCGAt10:    0.23,
+			MRRAt10:     0.22,
+			RecallAt10:  0.32,
+			RecallAt100: 0.60,
+		},
+		Throughput: mantaruntime.RetrievalEvalThroughput{
+			ScoresPerSecond: 8000000,
+		},
+	}
+	data, err := json.Marshal(metrics)
+	if err != nil {
+		t.Fatalf("marshal retrieval metrics: %v", err)
+	}
+	if err := os.WriteFile(metricsPath, data, 0o644); err != nil {
+		t.Fatalf("write retrieval metrics: %v", err)
+	}
+	thresholds := "" +
+		"MANTA_MIN_RETRIEVAL_NDCG10_SCIFACT=0.22843\n" +
+		"MANTA_MIN_RETRIEVAL_MRR10_SCIFACT=0.213567\n" +
+		"MANTA_MIN_RETRIEVAL_SCORES_PER_SEC=7000000\n"
+	if err := os.WriteFile(thresholdsPath, []byte(thresholds), 0o644); err != nil {
+		t.Fatalf("write thresholds: %v", err)
+	}
+
+	output := captureRunOutput(t, []string{"gate-retrieval-metrics", "--thresholds", thresholdsPath, metricsPath})
+	for _, want := range []string{
+		"dataset: scifact",
+		"pass: ndcg_at_10=0.23 >= 0.22843",
+		"pass: mrr_at_10=0.22 >= 0.213567",
+		"pass: scores/s=8e+06 >= 7e+06",
+		"retrieval gate: PASS checks=3",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("retrieval gate output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
 func clearTrainMetricGateEnv(t *testing.T) {
 	t.Helper()
 	for _, threshold := range trainMetricThresholds {
 		t.Setenv(threshold.Env, "")
+	}
+}
+
+func clearRetrievalMetricGateEnv(t *testing.T) {
+	t.Helper()
+	for _, threshold := range retrievalMetricThresholds {
+		t.Setenv(threshold.Env, "")
+		t.Setenv(threshold.Env+"_SCIFACT", "")
 	}
 }
 
@@ -1031,6 +1086,81 @@ func TestRunTrainEmbedFitsTextPairwisePackage(t *testing.T) {
 	}
 	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained package: %v", err)
+	}
+}
+
+func TestRunTrainEmbedFitsTextHardNegativePackage(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	tokenizer := mantaruntime.TokenizerFile{
+		Version: mantaruntime.TokenizerFileVersion,
+		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
+	}
+	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	trainPath := filepath.Join(t.TempDir(), "train-pairs.jsonl")
+	evalPath := filepath.Join(t.TempDir(), "eval-pairs.jsonl")
+	trainData := "" +
+		"{\"query\":\"ab\",\"document\":\"ab\",\"label\":1}\n" +
+		"{\"query\":\"ab\",\"document\":\"cd\",\"label\":-1}\n" +
+		"{\"query\":\"cd\",\"document\":\"cd\",\"label\":1}\n" +
+		"{\"query\":\"cd\",\"document\":\"ab\",\"label\":-1}\n"
+	evalData := "" +
+		"{\"query\":\"ab\",\"document\":\"ab\",\"label\":1}\n" +
+		"{\"left\":\"ab\",\"right\":\"cd\",\"label\":0}\n"
+	if err := os.WriteFile(trainPath, []byte(trainData), 0o644); err != nil {
+		t.Fatalf("write train text pairs: %v", err)
+	}
+	if err := os.WriteFile(evalPath, []byte(evalData), 0o644); err != nil {
+		t.Fatalf("write eval text pairs: %v", err)
+	}
+
+	output := captureRunOutput(t, []string{"train-embed", "--hard-negative-train", "--hard-negatives-per-query", "1", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath})
+	for _, want := range []string{
+		"trained package",
+		"train=2 hard_negative_contrastive examples",
+		"eval=2 pairwise examples",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("hard-negative train output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+		t.Fatalf("reload trained package: %v", err)
+	}
+}
+
+func TestRunTokenizeEmbedHardNegativeMode(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	tokenizer := mantaruntime.TokenizerFile{
+		Version: mantaruntime.TokenizerFileVersion,
+		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
+	}
+	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	inputPath := filepath.Join(t.TempDir(), "pairs.jsonl")
+	outputPath := filepath.Join(t.TempDir(), "hard.tokens.jsonl")
+	inputData := "" +
+		"{\"query\":\"ab\",\"document\":\"ab\",\"label\":1}\n" +
+		"{\"query\":\"ab\",\"document\":\"cd\",\"label\":-1}\n"
+	if err := os.WriteFile(inputPath, []byte(inputData), 0o644); err != nil {
+		t.Fatalf("write input pairs: %v", err)
+	}
+
+	output := captureRunOutput(t, []string{"tokenize-embed", "--mode", "hard-negative", path, inputPath, outputPath})
+	if !strings.Contains(output, "tokenized hard-negative examples: 1") {
+		t.Fatalf("tokenize hard-negative output unexpected:\n%s", output)
+	}
+	examples, err := mantaruntime.ReadEmbeddingHardNegativeExamplesFile(outputPath)
+	if err != nil {
+		t.Fatalf("read tokenized hard-negative output: %v", err)
+	}
+	if len(examples) != 1 || len(examples[0].NegativeTokens) != 1 {
+		t.Fatalf("tokenized examples = %+v", examples)
 	}
 }
 

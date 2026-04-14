@@ -32,6 +32,43 @@ func TrainEmbeddingPackageFromContrastiveFiles(artifactPath, trainPath, evalPath
 		evalPath = trainPath
 		trainPath = ""
 	}
+	if cfg.HardNegativeTrain {
+		var trainSet []EmbeddingHardNegativeExample
+		if !cfg.EvalOnly {
+			trainSet, err = ReadEmbeddingHardNegativeExamplesFile(trainPath)
+			if err != nil {
+				trainPairs, pairErr := ReadEmbeddingPairExamplesFile(trainPath)
+				if pairErr != nil {
+					return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read train hard-negative dataset: %w", err)
+				}
+				trainSet, err = BuildEmbeddingHardNegativeExamplesFromPairs(trainPairs, cfg.HardNegativesPerQuery)
+				if err != nil {
+					return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("build train hard-negative dataset: %w", err)
+				}
+			}
+			trainSet = limitHardNegativeExamples(trainSet, cfg.HardNegativesPerQuery)
+		}
+		var evalPairs []EmbeddingPairExample
+		if evalPath != "" {
+			evalPairs, err = ReadEmbeddingPairExamplesFile(evalPath)
+			if err != nil {
+				evalSet, contrastiveErr := ReadEmbeddingContrastiveExamplesFile(evalPath)
+				if contrastiveErr != nil {
+					return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read eval pair dataset: %w", err)
+				}
+				evalPairs = expandContrastiveExamples(evalSet)
+			}
+		}
+		summary, err := trainer.FitHardNegatives(trainSet, evalPairs, cfg)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		paths, err := trainer.WriteTrainingPackage(artifactPath)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		return summary, paths, nil
+	}
 	if cfg.PairwiseTrain {
 		var trainPairs []EmbeddingPairExample
 		if !cfg.EvalOnly {
@@ -127,6 +164,47 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("build tokenizer: %w", err)
 	}
 	tokenCache := embeddingTextTokenCache{}
+	if cfg.HardNegativeTrain {
+		var trainSet []EmbeddingHardNegativeExample
+		if !cfg.EvalOnly {
+			trainText, err := ReadEmbeddingTextHardNegativeExamplesFile(trainPath)
+			if err != nil {
+				trainTextPairs, pairErr := ReadEmbeddingTextPairExamplesFile(trainPath)
+				if pairErr != nil {
+					return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read train text hard-negative dataset: %w", err)
+				}
+				trainText, err = BuildEmbeddingTextHardNegativeExamplesFromPairs(trainTextPairs, cfg.HardNegativesPerQuery)
+				if err != nil {
+					return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("build train text hard-negative dataset: %w", err)
+				}
+			}
+			trainSet, err = tokenizeEmbeddingTextHardNegativeExamples(trainText, tokenizer, tokenCache, false)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize train hard-negative dataset: %w", err)
+			}
+			trainSet = limitHardNegativeExamples(trainSet, cfg.HardNegativesPerQuery)
+		}
+		var evalPairs []EmbeddingPairExample
+		if evalPath != "" {
+			evalText, err := ReadEmbeddingTextPairExamplesFile(evalPath)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read eval text pair dataset: %w", err)
+			}
+			evalPairs, err = tokenizeEmbeddingTextPairExamples(evalText, tokenizer, tokenCache, false)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize eval pair dataset: %w", err)
+			}
+		}
+		summary, err := trainer.FitHardNegatives(trainSet, evalPairs, cfg)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		paths, err := trainer.WriteTrainingPackage(artifactPath)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		return summary, paths, nil
+	}
 	if cfg.PairwiseTrain {
 		var trainPairs []EmbeddingPairExample
 		if !cfg.EvalOnly {

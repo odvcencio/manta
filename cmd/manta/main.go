@@ -131,6 +131,8 @@ func run(args []string) error {
 		return runDiagnoseTrainMetrics(args[1:])
 	case "gate-train-metrics":
 		return runGateTrainMetrics(args[1:])
+	case "gate-retrieval-metrics":
+		return runGateRetrievalMetrics(args[1:])
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
@@ -798,6 +800,8 @@ func runTrainEmbed(args []string) error {
 	var planOnly bool
 	var evalOnly bool
 	var pairwiseTrain bool
+	var hardNegativeTrain bool
+	var hardNegativesPerQuery int
 	var metricsJSONPath string
 	var learningRate float64
 	var contrastiveLoss string
@@ -819,6 +823,8 @@ func runTrainEmbed(args []string) error {
 	fs.BoolVar(&planOnly, "plan-only", false, "print planned workload and exit without training")
 	fs.BoolVar(&evalOnly, "eval-only", false, "evaluate the package without running optimizer steps")
 	fs.BoolVar(&pairwiseTrain, "pairwise-train", false, "treat the training JSONL as labeled pair examples instead of contrastive positives")
+	fs.BoolVar(&hardNegativeTrain, "hard-negative-train", false, "group labeled pair JSONL into query-positive-hard-negative contrastive batches")
+	fs.IntVar(&hardNegativesPerQuery, "hard-negatives-per-query", 1, "maximum explicit negatives to attach to each query-positive example")
 	fs.StringVar(&metricsJSONPath, "metrics-json", "", "write machine-readable run metrics JSON to this path")
 	fs.Float64Var(&learningRate, "lr", 0, "override package learning rate for this run")
 	fs.StringVar(&contrastiveLoss, "contrastive-loss", "", "override package contrastive loss: pair_mse or infonce")
@@ -840,6 +846,12 @@ func runTrainEmbed(args []string) error {
 	}
 	if evalEverySteps < 0 {
 		return fmt.Errorf("eval-every-steps must be non-negative")
+	}
+	if hardNegativesPerQuery < 0 {
+		return fmt.Errorf("hard-negatives-per-query must be non-negative")
+	}
+	if pairwiseTrain && hardNegativeTrain {
+		return fmt.Errorf("set either --pairwise-train or --hard-negative-train, not both")
 	}
 	path := fs.Arg(0)
 	trainPath := fs.Arg(1)
@@ -878,6 +890,8 @@ func runTrainEmbed(args []string) error {
 		ProgressEverySteps:    progressEvery,
 		EvalOnly:              evalOnly,
 		PairwiseTrain:         pairwiseTrain,
+		HardNegativeTrain:     hardNegativeTrain,
+		HardNegativesPerQuery: hardNegativesPerQuery,
 	}
 	if progressEvery > 0 {
 		runConfig.Progress = printTrainProgress
@@ -990,6 +1004,28 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg m
 			}
 			return mantaruntime.EstimatePairwiseTrainWorkload(len(trainPairs), evalCount, cfg), nil
 		}
+		if cfg.HardNegativeTrain {
+			trainSet, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(trainPath)
+			if err != nil {
+				trainPairs, pairErr := mantaruntime.ReadEmbeddingTextPairExamplesFile(trainPath)
+				if pairErr != nil {
+					return mantaruntime.EmbeddingTrainWorkload{}, err
+				}
+				trainSet, err = mantaruntime.BuildEmbeddingTextHardNegativeExamplesFromPairs(trainPairs, cfg.HardNegativesPerQuery)
+				if err != nil {
+					return mantaruntime.EmbeddingTrainWorkload{}, err
+				}
+			}
+			evalCount := 0
+			if evalPath != "" {
+				evalPairs, err := mantaruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+				if err != nil {
+					return mantaruntime.EmbeddingTrainWorkload{}, err
+				}
+				evalCount = len(evalPairs)
+			}
+			return mantaruntime.EstimateHardNegativeTrainWorkload(len(trainSet), cfg.HardNegativesPerQuery, evalCount, cfg), nil
+		}
 		trainSet, err := mantaruntime.ReadEmbeddingTextContrastiveExamplesFile(trainPath)
 		if err != nil {
 			return mantaruntime.EmbeddingTrainWorkload{}, err
@@ -1048,6 +1084,28 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg m
 			evalCount = len(evalPairs)
 		}
 		return mantaruntime.EstimatePairwiseTrainWorkload(len(trainPairs), evalCount, cfg), nil
+	}
+	if cfg.HardNegativeTrain {
+		trainSet, err := mantaruntime.ReadEmbeddingHardNegativeExamplesFile(trainPath)
+		if err != nil {
+			trainPairs, pairErr := mantaruntime.ReadEmbeddingPairExamplesFile(trainPath)
+			if pairErr != nil {
+				return mantaruntime.EmbeddingTrainWorkload{}, err
+			}
+			trainSet, err = mantaruntime.BuildEmbeddingHardNegativeExamplesFromPairs(trainPairs, cfg.HardNegativesPerQuery)
+			if err != nil {
+				return mantaruntime.EmbeddingTrainWorkload{}, err
+			}
+		}
+		evalCount := 0
+		if evalPath != "" {
+			evalPairs, err := mantaruntime.ReadEmbeddingPairExamplesFile(evalPath)
+			if err != nil {
+				return mantaruntime.EmbeddingTrainWorkload{}, err
+			}
+			evalCount = len(evalPairs)
+		}
+		return mantaruntime.EstimateHardNegativeTrainWorkload(len(trainSet), cfg.HardNegativesPerQuery, evalCount, cfg), nil
 	}
 	trainSet, err := mantaruntime.ReadEmbeddingContrastiveExamplesFile(trainPath)
 	if err != nil {
@@ -1341,23 +1399,25 @@ type trainRunSummaryJSON struct {
 }
 
 type trainRunConfigJSON struct {
-	Epochs              int     `json:"epochs"`
-	BatchSize           int     `json:"batch_size"`
-	Shuffle             bool    `json:"shuffle"`
-	Seed                int64   `json:"seed"`
-	EvalEveryEpoch      int     `json:"eval_every_epoch"`
-	EvalEverySteps      int     `json:"eval_every_steps"`
-	Patience            int     `json:"patience"`
-	SelectMetric        string  `json:"select_metric"`
-	MinDelta            float32 `json:"min_delta"`
-	RestoreBest         bool    `json:"restore_best"`
-	LengthBucketBatches bool    `json:"length_bucket_batches"`
-	LearningRate        float32 `json:"learning_rate"`
-	ContrastiveLoss     string  `json:"contrastive_loss,omitempty"`
-	Temperature         float32 `json:"temperature"`
-	ProgressEverySteps  int     `json:"progress_every_steps"`
-	EvalOnly            bool    `json:"eval_only"`
-	PairwiseTrain       bool    `json:"pairwise_train"`
+	Epochs                int     `json:"epochs"`
+	BatchSize             int     `json:"batch_size"`
+	Shuffle               bool    `json:"shuffle"`
+	Seed                  int64   `json:"seed"`
+	EvalEveryEpoch        int     `json:"eval_every_epoch"`
+	EvalEverySteps        int     `json:"eval_every_steps"`
+	Patience              int     `json:"patience"`
+	SelectMetric          string  `json:"select_metric"`
+	MinDelta              float32 `json:"min_delta"`
+	RestoreBest           bool    `json:"restore_best"`
+	LengthBucketBatches   bool    `json:"length_bucket_batches"`
+	LearningRate          float32 `json:"learning_rate"`
+	ContrastiveLoss       string  `json:"contrastive_loss,omitempty"`
+	Temperature           float32 `json:"temperature"`
+	ProgressEverySteps    int     `json:"progress_every_steps"`
+	EvalOnly              bool    `json:"eval_only"`
+	PairwiseTrain         bool    `json:"pairwise_train"`
+	HardNegativeTrain     bool    `json:"hard_negative_train"`
+	HardNegativesPerQuery int     `json:"hard_negatives_per_query"`
 }
 
 type trainBatchMetricsJSON struct {
@@ -1500,23 +1560,25 @@ func trainRunSummaryPayload(summary mantaruntime.EmbeddingTrainRunSummary) train
 
 func trainRunConfigPayload(cfg mantaruntime.EmbeddingTrainRunConfig) trainRunConfigJSON {
 	return trainRunConfigJSON{
-		Epochs:              cfg.Epochs,
-		BatchSize:           cfg.BatchSize,
-		Shuffle:             cfg.Shuffle,
-		Seed:                cfg.Seed,
-		EvalEveryEpoch:      cfg.EvalEveryEpoch,
-		EvalEverySteps:      cfg.EvalEverySteps,
-		Patience:            cfg.EarlyStoppingPatience,
-		SelectMetric:        cfg.SelectMetric,
-		MinDelta:            cfg.MinDelta,
-		RestoreBest:         cfg.RestoreBest,
-		LengthBucketBatches: cfg.LengthBucketBatches,
-		LearningRate:        cfg.LearningRate,
-		ContrastiveLoss:     cfg.ContrastiveLoss,
-		Temperature:         cfg.Temperature,
-		ProgressEverySteps:  cfg.ProgressEverySteps,
-		EvalOnly:            cfg.EvalOnly,
-		PairwiseTrain:       cfg.PairwiseTrain,
+		Epochs:                cfg.Epochs,
+		BatchSize:             cfg.BatchSize,
+		Shuffle:               cfg.Shuffle,
+		Seed:                  cfg.Seed,
+		EvalEveryEpoch:        cfg.EvalEveryEpoch,
+		EvalEverySteps:        cfg.EvalEverySteps,
+		Patience:              cfg.EarlyStoppingPatience,
+		SelectMetric:          cfg.SelectMetric,
+		MinDelta:              cfg.MinDelta,
+		RestoreBest:           cfg.RestoreBest,
+		LengthBucketBatches:   cfg.LengthBucketBatches,
+		LearningRate:          cfg.LearningRate,
+		ContrastiveLoss:       cfg.ContrastiveLoss,
+		Temperature:           cfg.Temperature,
+		ProgressEverySteps:    cfg.ProgressEverySteps,
+		EvalOnly:              cfg.EvalOnly,
+		PairwiseTrain:         cfg.PairwiseTrain,
+		HardNegativeTrain:     cfg.HardNegativeTrain,
+		HardNegativesPerQuery: cfg.HardNegativesPerQuery,
 	}
 }
 
@@ -2109,6 +2171,169 @@ func trainMetricThresholdPassed(got, limit float64, op string) bool {
 	}
 }
 
+type retrievalMetricThreshold struct {
+	Env    string
+	Metric string
+	Op     string
+	Scope  string
+}
+
+var retrievalMetricThresholds = []retrievalMetricThreshold{
+	{Env: "MANTA_MIN_RETRIEVAL_NDCG10", Metric: "ndcg_at_10", Op: ">=", Scope: "quality"},
+	{Env: "MANTA_MIN_RETRIEVAL_MRR10", Metric: "mrr_at_10", Op: ">=", Scope: "quality"},
+	{Env: "MANTA_MIN_RETRIEVAL_RECALL10", Metric: "recall_at_10", Op: ">=", Scope: "quality"},
+	{Env: "MANTA_MIN_RETRIEVAL_RECALL100", Metric: "recall_at_100", Op: ">=", Scope: "quality"},
+	{Env: "MANTA_MIN_RETRIEVAL_DOCUMENTS_PER_SEC", Metric: "documents/s", Op: ">=", Scope: "efficiency"},
+	{Env: "MANTA_MIN_RETRIEVAL_QUERIES_PER_SEC", Metric: "queries/s", Op: ">=", Scope: "efficiency"},
+	{Env: "MANTA_MIN_RETRIEVAL_SCORES_PER_SEC", Metric: "scores/s", Op: ">=", Scope: "efficiency"},
+}
+
+func runGateRetrievalMetrics(args []string) error {
+	fs := flag.NewFlagSet("gate-retrieval-metrics", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var thresholdsPath string
+	var scope string
+	fs.StringVar(&thresholdsPath, "thresholds", "", "optional KEY=VALUE threshold env file")
+	fs.StringVar(&scope, "scope", "all", "gate scope: all, quality, or efficiency")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || fs.Arg(0) == "" {
+		return fmt.Errorf("usage: manta gate-retrieval-metrics [--thresholds thresholds.env] [--scope all|quality|efficiency] <retrieval.metrics.json>")
+	}
+	scope = strings.ToLower(scope)
+	if !validRetrievalMetricsGateScope(scope) {
+		return fmt.Errorf("unsupported gate scope %q", scope)
+	}
+	metricsPath := fs.Arg(0)
+	metrics, err := readRetrievalMetricsJSON(metricsPath)
+	if err != nil {
+		return err
+	}
+	thresholds, err := trainMetricThresholdValues(thresholdsPath)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("metrics: %s\n", metricsPath)
+	if thresholdsPath != "" {
+		fmt.Printf("thresholds: %s\n", thresholdsPath)
+	}
+	fmt.Printf("dataset: %s\n", metrics.Dataset)
+	fmt.Printf("scope: %s\n", scope)
+	checked := 0
+	failed := 0
+	for _, threshold := range retrievalMetricThresholds {
+		if !trainMetricThresholdInScope(threshold.Scope, scope) {
+			continue
+		}
+		envName, limitText := retrievalThresholdValue(thresholds, threshold.Env, metrics.Dataset)
+		if limitText == "" {
+			continue
+		}
+		limit, err := strconv.ParseFloat(limitText, 64)
+		if err != nil {
+			return fmt.Errorf("%s=%q is not numeric: %w", envName, limitText, err)
+		}
+		got, ok := retrievalMetricValue(metrics, threshold.Metric)
+		if !ok {
+			return fmt.Errorf("metric %s is unavailable in %s", threshold.Metric, metricsPath)
+		}
+		checked++
+		passed := trainMetricThresholdPassed(got, limit, threshold.Op)
+		status := "pass"
+		if !passed {
+			status = "fail"
+			failed++
+		}
+		fmt.Printf("%s: %s=%.6g %s %.6g (%s)\n", status, threshold.Metric, got, threshold.Op, limit, envName)
+	}
+	if checked == 0 {
+		return fmt.Errorf("no retrieval thresholds selected for scope %q", scope)
+	}
+	if failed > 0 {
+		fmt.Printf("retrieval gate: FAIL checks=%d failed=%d\n", checked, failed)
+		return fmt.Errorf("retrieval metrics gate failed")
+	}
+	fmt.Printf("retrieval gate: PASS checks=%d\n", checked)
+	return nil
+}
+
+func readRetrievalMetricsJSON(path string) (mantaruntime.RetrievalEvalMetrics, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return mantaruntime.RetrievalEvalMetrics{}, err
+	}
+	var metrics mantaruntime.RetrievalEvalMetrics
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		return mantaruntime.RetrievalEvalMetrics{}, fmt.Errorf("parse retrieval metrics JSON %q: %w", path, err)
+	}
+	if metrics.Schema != mantaruntime.RetrievalEvalMetricsSchema {
+		return mantaruntime.RetrievalEvalMetrics{}, fmt.Errorf("unsupported retrieval metrics schema %q", metrics.Schema)
+	}
+	return metrics, nil
+}
+
+func validRetrievalMetricsGateScope(scope string) bool {
+	switch scope {
+	case "all", "quality", "efficiency":
+		return true
+	default:
+		return false
+	}
+}
+
+func retrievalThresholdValue(values map[string]string, baseEnv, dataset string) (string, string) {
+	if suffix := retrievalDatasetEnvSuffix(dataset); suffix != "" {
+		datasetEnv := baseEnv + "_" + suffix
+		if value := values[datasetEnv]; value != "" {
+			return datasetEnv, value
+		}
+	}
+	return baseEnv, values[baseEnv]
+}
+
+func retrievalDatasetEnvSuffix(dataset string) string {
+	dataset = strings.ToUpper(strings.TrimSpace(dataset))
+	if dataset == "" {
+		return ""
+	}
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range dataset {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	return strings.Trim(b.String(), "_")
+}
+
+func retrievalMetricValue(metrics mantaruntime.RetrievalEvalMetrics, metric string) (float64, bool) {
+	switch metric {
+	case "ndcg_at_10":
+		return metrics.Quality.NDCGAt10, true
+	case "mrr_at_10":
+		return metrics.Quality.MRRAt10, true
+	case "recall_at_10":
+		return metrics.Quality.RecallAt10, true
+	case "recall_at_100":
+		return metrics.Quality.RecallAt100, true
+	case "documents/s":
+		return metrics.Throughput.DocumentsPerSecond, true
+	case "queries/s":
+		return metrics.Throughput.QueriesPerSecond, true
+	case "scores/s":
+		return metrics.Throughput.ScoresPerSecond, true
+	default:
+		return 0, false
+	}
+}
+
 func runTrainTokenizer(args []string) error {
 	fs := flag.NewFlagSet("train-tokenizer", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -2168,13 +2393,18 @@ func runTokenizeEmbed(args []string) error {
 	fs.SetOutput(os.Stderr)
 	var tokenizerPath string
 	var mode string
+	var hardNegativesPerQuery int
 	fs.StringVar(&tokenizerPath, "tokenizer", "", "path to tokenizer .mll (default: sibling tokenizer)")
-	fs.StringVar(&mode, "mode", "contrastive", "output mode: contrastive or pair")
+	fs.StringVar(&mode, "mode", "contrastive", "output mode: contrastive, pair, or hard-negative")
+	fs.IntVar(&hardNegativesPerQuery, "hard-negatives-per-query", 1, "maximum explicit negatives per query-positive example in hard-negative mode")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() < 3 || fs.Arg(0) == "" || fs.Arg(1) == "" || fs.Arg(2) == "" {
-		return fmt.Errorf("usage: manta tokenize-embed [--mode contrastive|pair] [--tokenizer tokenizer.mll] <artifact.mll> <input-text.jsonl> <output-token.jsonl>")
+		return fmt.Errorf("usage: manta tokenize-embed [--mode contrastive|pair|hard-negative] [--tokenizer tokenizer.mll] <artifact.mll> <input-text.jsonl> <output-token.jsonl>")
+	}
+	if hardNegativesPerQuery < 0 {
+		return fmt.Errorf("hard-negatives-per-query must be non-negative")
 	}
 	artifactPath := fs.Arg(0)
 	inputPath := fs.Arg(1)
@@ -2221,8 +2451,28 @@ func runTokenizeEmbed(args []string) error {
 			return err
 		}
 		fmt.Printf("tokenized pair examples: %d\n", len(tokenized))
+	case "hard-negative", "hard_negative":
+		examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
+		if err != nil {
+			pairs, pairErr := mantaruntime.ReadEmbeddingTextPairExamplesFile(inputPath)
+			if pairErr != nil {
+				return fmt.Errorf("read text hard-negative dataset: %w", err)
+			}
+			examples, err = mantaruntime.BuildEmbeddingTextHardNegativeExamplesFromPairs(pairs, hardNegativesPerQuery)
+			if err != nil {
+				return fmt.Errorf("build text hard-negative dataset: %w", err)
+			}
+		}
+		tokenized, err := mantaruntime.TokenizeEmbeddingTextHardNegativeExamples(examples, tokenizer)
+		if err != nil {
+			return fmt.Errorf("tokenize hard-negative dataset: %w", err)
+		}
+		if err := mantaruntime.WriteEmbeddingHardNegativeExamplesFile(outputPath, tokenized); err != nil {
+			return err
+		}
+		fmt.Printf("tokenized hard-negative examples: %d\n", len(tokenized))
 	default:
-		return fmt.Errorf("unsupported tokenize mode %q: want contrastive or pair", mode)
+		return fmt.Errorf("unsupported tokenize mode %q: want contrastive, pair, or hard-negative", mode)
 	}
 	fmt.Printf("tokenizer: %s\n", tokenizerPath)
 	fmt.Printf("input: %s\n", inputPath)
@@ -2300,6 +2550,7 @@ func printUsage() {
 	fmt.Println("  manta compare-train-metrics <current.metrics.json> [baseline.metrics.json]")
 	fmt.Println("  manta diagnose-train-metrics <metrics.json>")
 	fmt.Println("  manta gate-train-metrics [flags] <metrics.json>")
+	fmt.Println("  manta gate-retrieval-metrics [flags] <retrieval.metrics.json>")
 	fmt.Println("  manta run <artifact.mll> [entry]")
 	fmt.Println("  manta demo [module-name]")
 	fmt.Println()
@@ -2313,12 +2564,13 @@ func printUsage() {
 	fmt.Println("init-train creates a native training package next to an artifact.")
 	fmt.Println("rename-embed rewrites a training package under a new embedding model identity.")
 	fmt.Println("train-tokenizer builds a sibling .tokenizer.mll from a raw text corpus, using embedding-manifest vocab_size by default.")
-	fmt.Println("tokenize-embed converts text JSONL into reusable token JSONL for training or eval.")
+	fmt.Println("tokenize-embed converts text JSONL into reusable token JSONL for contrastive, pair, or hard-negative training and eval.")
 	fmt.Println("train-corpus trains tokenizer + mined text pairs + embedder in one Manta job from a raw text corpus.")
 	fmt.Println("train-embed reloads a training package, fits or --eval-only evaluates token JSONL or text JSONL (with --tokenizer or a sibling .tokenizer.mll; use --no-tokenizer for token JSONL beside a tokenizer), and writes it back.")
 	fmt.Println("compare-train-metrics summarizes metrics JSON and prints deltas against a baseline metrics JSON when provided.")
 	fmt.Println("diagnose-train-metrics explains backend use, transfer pressure, and suspicious training/eval counters from metrics JSON.")
 	fmt.Println("gate-train-metrics checks metrics JSON against MANTA_* thresholds from the environment or a thresholds env file.")
+	fmt.Println("gate-retrieval-metrics checks BEIR retrieval metrics against dataset-specific MANTA_* thresholds.")
 	fmt.Println("run loads an artifact, binds stub weights and inputs, and executes one entrypoint.")
 	fmt.Println("demo creates a tiny inference-style module and loads it through the runtime.")
 }

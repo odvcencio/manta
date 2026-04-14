@@ -1064,6 +1064,126 @@ func (t *EmbeddingTrainer) TrainContrastiveStep(batch []EmbeddingContrastiveExam
 	}, nil
 }
 
+// TrainHardNegativeContrastiveStep runs one InfoNCE update over query-positive-negative batches.
+func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHardNegativeExample) (EmbeddingTrainMetrics, error) {
+	if t == nil {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("embedding trainer is not initialized")
+	}
+	if len(batch) == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("hard-negative training batch is empty")
+	}
+	queryInputs := make([]embeddingSequenceInput, len(batch))
+	candidateInputs := make([]embeddingSequenceInput, 0, len(batch)*2)
+	targetIndexes := make([]int, len(batch))
+	for i, example := range batch {
+		queryInputs[i] = embeddingSequenceInput{
+			tokens: example.QueryTokens,
+			mask:   example.QueryMask,
+			label:  fmt.Sprintf("batch %d query", i),
+		}
+		targetIndexes[i] = len(candidateInputs)
+		candidateInputs = append(candidateInputs, embeddingSequenceInput{
+			tokens: example.PositiveTokens,
+			mask:   example.PositiveMask,
+			label:  fmt.Sprintf("batch %d positive", i),
+		})
+		for j, tokens := range example.NegativeTokens {
+			var mask []int32
+			if j < len(example.NegativeMasks) {
+				mask = example.NegativeMasks[j]
+			}
+			candidateInputs = append(candidateInputs, embeddingSequenceInput{
+				tokens: tokens,
+				mask:   mask,
+				label:  fmt.Sprintf("batch %d negative %d", i, j),
+			})
+		}
+	}
+	if len(candidateInputs) < 2 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("hard-negative training batch needs at least two candidate documents")
+	}
+	for _, target := range targetIndexes {
+		if target < 0 || target >= len(candidateInputs) {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("hard-negative target index %d is outside %d candidates", target, len(candidateInputs))
+		}
+	}
+
+	forward := t.prepareForwardWeights()
+	t.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	allInputs := make([]embeddingSequenceInput, 0, len(queryInputs)+len(candidateInputs))
+	allInputs = append(allInputs, queryInputs...)
+	allInputs = append(allInputs, candidateInputs...)
+	encoded, err := t.encodeSequenceInputs(allInputs, forward, true)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	defer t.releaseEncodedSequences(encoded)
+	queries := encoded[:len(queryInputs)]
+	candidates := encoded[len(queryInputs):]
+
+	gradToken := make([]float32, len(t.tokenEmbed.F32))
+	gradAttnQ := make([]float32, tensorDataLen(t.attentionQuery))
+	gradAttnK := make([]float32, tensorDataLen(t.attentionKey))
+	gradAttnV := make([]float32, tensorDataLen(t.attentionValue))
+	gradAttnO := make([]float32, tensorDataLen(t.attentionOutput))
+	gradHidden := make([]float32, len(t.hiddenProjectionData()))
+	gradProj := make([]float32, len(t.projection.F32))
+	queryGrads := make([][]float32, len(queries))
+	candidateGrads := make([][]float32, len(candidates))
+	for i := range queries {
+		queryGrads[i] = make([]float32, len(queries[i].pooled))
+	}
+	for i := range candidates {
+		candidateGrads[i] = make([]float32, len(candidates[i].pooled))
+	}
+
+	totalLoss, totalScore := accumulateInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, t.config.Temperature, queryGrads, candidateGrads)
+	if !t.tryBackpropContrastiveBatch(
+		queries,
+		candidates,
+		queryGrads,
+		candidateGrads,
+		forward.attnQ,
+		forward.attnK,
+		forward.attnV,
+		forward.attnO,
+		forward.hidden,
+		forward.proj,
+		gradToken,
+		gradAttnQ,
+		gradAttnK,
+		gradAttnV,
+		gradAttnO,
+		gradHidden,
+		gradProj,
+	) {
+		for i, query := range queries {
+			inputGrad := t.backpropEncodedSequence(query, queryGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
+			accumulateTokenGrad(query.tokens, inputGrad, gradToken, t.tokenEmbed.Shape[1], t.tokenEmbed.Shape[0])
+		}
+		for i, candidate := range candidates {
+			inputGrad := t.backpropEncodedSequence(candidate, candidateGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
+			accumulateTokenGrad(candidate.tokens, inputGrad, gradToken, t.tokenEmbed.Shape[1], t.tokenEmbed.Shape[0])
+		}
+	}
+
+	pairCount := len(queries) * len(candidates)
+	batchScale := float32(1) / float32(len(queries))
+	t.step++
+	t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
+	t.applyOptimizerUpdate(t.attnQParam.Name, t.attentionQuery, t.attnQMom1, t.attnQMom2, gradAttnQ, batchScale)
+	t.applyOptimizerUpdate(t.attnKParam.Name, t.attentionKey, t.attnKMom1, t.attnKMom2, gradAttnK, batchScale)
+	t.applyOptimizerUpdate(t.attnVParam.Name, t.attentionValue, t.attnVMom1, t.attnVMom2, gradAttnV, batchScale)
+	t.applyOptimizerUpdate(t.attnOParam.Name, t.attentionOutput, t.attnOMom1, t.attnOMom2, gradAttnO, batchScale)
+	t.applyOptimizerUpdate(t.hiddenParam.Name, t.hiddenProjection, t.hiddenMom1, t.hiddenMom2, gradHidden, batchScale)
+	t.applyOptimizerUpdate(t.projParam.Name, t.projection, t.projMom1, t.projMom2, gradProj, batchScale)
+	return EmbeddingTrainMetrics{
+		Loss:         totalLoss * batchScale,
+		AverageScore: totalScore / float32(pairCount),
+		BatchSize:    pairCount,
+	}, nil
+}
+
 // ExportInferenceWeights returns runtime-loadable weights in the module's declared dtypes.
 func (t *EmbeddingTrainer) ExportInferenceWeights() (map[string]*backend.Tensor, error) {
 	if t == nil {
@@ -1407,6 +1527,12 @@ type embeddingBatchSequenceSlot struct {
 	sequence *embeddingBatchSequence
 }
 
+type embeddingSequenceInput struct {
+	tokens []int32
+	mask   []int32
+	label  string
+}
+
 func embeddingBatchSequenceKey(tokens, mask []int32) string {
 	var b strings.Builder
 	b.Grow((len(tokens)+len(mask))*4 + 1)
@@ -1442,6 +1568,68 @@ func (t *EmbeddingTrainer) cachedEmbeddingBatchSequence(cache map[string]*embedd
 	}
 	groups[seqLen] = append(groups[seqLen], embeddingBatchSequenceSlot{sequence: sequence})
 	return sequence, nil
+}
+
+func (t *EmbeddingTrainer) encodeSequenceInputs(inputs []embeddingSequenceInput, forward *embeddingForwardWeights, captureBindings bool) ([]*embeddingEncodedSequence, error) {
+	if forward == nil {
+		return nil, fmt.Errorf("missing forward weights")
+	}
+	if seqs, ok, err := t.tryEncodeSequenceInputsBatchedForward(inputs, forward, captureBindings); ok || err != nil {
+		return seqs, err
+	}
+	out := make([]*embeddingEncodedSequence, 0, len(inputs))
+	for i, input := range inputs {
+		mask, err := t.prepareMask(input.tokens, input.mask)
+		if err != nil {
+			t.releaseEncodedSequences(out)
+			return nil, fmt.Errorf("%s: %w", embeddingSequenceInputLabel(input, i), err)
+		}
+		seq, err := t.encodeSequence(input.tokens, mask, forward.token, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, captureBindings)
+		if err != nil {
+			t.releaseEncodedSequences(out)
+			return nil, fmt.Errorf("%s: %w", embeddingSequenceInputLabel(input, i), err)
+		}
+		out = append(out, seq)
+	}
+	return out, nil
+}
+
+func (t *EmbeddingTrainer) tryEncodeSequenceInputsBatchedForward(inputs []embeddingSequenceInput, forward *embeddingForwardWeights, captureBindings bool) ([]*embeddingEncodedSequence, bool, error) {
+	if t == nil || t.forwardMatMul == nil || forward == nil || len(inputs) == 0 || !batchedContrastiveForwardEnabled() {
+		return nil, false, nil
+	}
+	sequences := make([]*embeddingBatchSequence, 0, len(inputs))
+	out := make([]*embeddingEncodedSequence, len(inputs))
+	groups := map[int][]embeddingBatchSequenceSlot{}
+	lengths := make([]int, 0)
+	sequenceCache := map[string]*embeddingBatchSequence{}
+	for i, input := range inputs {
+		mask, err := t.prepareMask(input.tokens, input.mask)
+		if err != nil {
+			return nil, true, fmt.Errorf("%s: %w", embeddingSequenceInputLabel(input, i), err)
+		}
+		seq, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, input.tokens, mask, forward.token)
+		if err != nil {
+			t.releaseBatchEncodedSequences(sequences)
+			return nil, true, fmt.Errorf("%s: %w", embeddingSequenceInputLabel(input, i), err)
+		}
+		out[i] = seq.encoded
+	}
+	if len(sequences) == 0 {
+		return nil, false, nil
+	}
+	if err := t.encodeBatchSequencesByLength(sequences, groups, lengths, forward, captureBindings); err != nil {
+		t.releaseBatchEncodedSequences(sequences)
+		return nil, true, err
+	}
+	return out, true, nil
+}
+
+func embeddingSequenceInputLabel(input embeddingSequenceInput, index int) string {
+	if input.label != "" {
+		return input.label
+	}
+	return fmt.Sprintf("sequence %d", index)
 }
 
 func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []EmbeddingContrastiveExample, forward *embeddingForwardWeights, captureBindings bool) ([]*embeddingEncodedSequence, []*embeddingEncodedSequence, bool, error) {
@@ -2409,6 +2597,42 @@ func accumulateInfoNCEContrastiveGrads(queries, positives []*embeddingEncodedSeq
 			}
 			scale := (prob - target) / temperature
 			accumulateCosineGradFromScore(query, positiveMatrix.row(j), queryNorm, positiveMatrix.norms[j], rowScores[j], scale, queryGrads[i], positiveGrads[j])
+		}
+	}
+	return totalLoss, totalScore
+}
+
+func accumulateInfoNCEHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, targetIndexes []int, temperature float32, queryGrads, candidateGrads [][]float32) (float32, float32) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	if temperature <= 0 {
+		temperature = 0.05
+	}
+	queryMatrix := newContrastivePooledMatrix(queries)
+	candidateMatrix := newContrastivePooledMatrix(candidates)
+	rowScores := make([]float32, len(candidates))
+	rowProbs := make([]float32, len(candidates))
+	for i := range queries {
+		query := queryMatrix.row(i)
+		queryNorm := queryMatrix.norms[i]
+		for j := range candidates {
+			score := cosineScoreWithNorms(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j])
+			rowScores[j] = score
+			totalScore += score
+		}
+		targetIndex := -1
+		if i < len(targetIndexes) {
+			targetIndex = targetIndexes[i]
+		}
+		rowLoss := infoNCERowProbsAndLossInto(rowScores, targetIndex, temperature, rowProbs)
+		totalLoss += rowLoss
+		for j, prob := range rowProbs {
+			target := float32(0)
+			if j == targetIndex {
+				target = 1
+			}
+			scale := (prob - target) / temperature
+			accumulateCosineGradFromScore(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j], rowScores[j], scale, queryGrads[i], candidateGrads[j])
 		}
 	}
 	return totalLoss, totalScore

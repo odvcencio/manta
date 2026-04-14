@@ -422,6 +422,33 @@ func TestEmbeddingTrainerFitContrastiveUsesFinalEvalAsBestWhenNoEpochEvalRuns(t 
 	assertClose(t, summary.BestEval.PairAccuracy, summary.FinalEval.PairAccuracy, 0.000001)
 }
 
+func TestEmbeddingTrainerFitHardNegativesTracksPairwiseEval(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
+	trainSet := tinyEmbeddingHardNegativeDataset()
+	evalSet := tinyEmbeddingPairDataset()
+	summary, err := trainer.FitHardNegatives(trainSet, evalSet, EmbeddingTrainRunConfig{
+		Epochs:                2,
+		BatchSize:             2,
+		EvalEveryEpoch:        1,
+		SelectMetric:          "mrr",
+		RestoreBest:           true,
+		HardNegativeTrain:     true,
+		HardNegativesPerQuery: 1,
+	})
+	if err != nil {
+		t.Fatalf("fit hard negatives: %v", err)
+	}
+	if summary.Workload.TrainMode != "hard_negative_contrastive" {
+		t.Fatalf("train mode = %q", summary.Workload.TrainMode)
+	}
+	if summary.FinalEval == nil || summary.FinalEval.PairCount != len(evalSet) {
+		t.Fatalf("final eval = %+v, want %d pairs", summary.FinalEval, len(evalSet))
+	}
+	if summary.StepsRun == 0 {
+		t.Fatal("expected optimizer steps")
+	}
+}
+
 func TestEmbeddingTrainerFitContrastiveFFNImprovesEval(t *testing.T) {
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
 	trainSet := tinyEmbeddingContrastiveDataset()
@@ -672,6 +699,27 @@ func TestEmbeddingTrainerTrainContrastiveStepSupportsInfoNCE(t *testing.T) {
 	}
 }
 
+func TestEmbeddingTrainerTrainHardNegativeContrastiveStep(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
+	trainer.config.ContrastiveLoss = "infonce"
+	trainer.config.Temperature = 0.05
+	batch := tinyEmbeddingHardNegativeDataset()
+
+	metrics, err := trainer.TrainHardNegativeContrastiveStep(batch)
+	if err != nil {
+		t.Fatalf("train hard-negative step: %v", err)
+	}
+	if metrics.BatchSize != 8 {
+		t.Fatalf("batch size = %d, want 8 rectangular query-candidate scores", metrics.BatchSize)
+	}
+	if metrics.Loss <= 0 {
+		t.Fatalf("loss = %f, want positive", metrics.Loss)
+	}
+	if trainer.step != 1 {
+		t.Fatalf("step = %d, want 1", trainer.step)
+	}
+}
+
 func TestContrastiveCosineFastPathMatchesCosineGrad(t *testing.T) {
 	left := []float32{0.25, -0.5, 0.75, 1.25}
 	right := []float32{-0.75, 0.5, 0.125, 1.5}
@@ -789,6 +837,13 @@ func tinyEmbeddingContrastiveDataset() []EmbeddingContrastiveExample {
 	return []EmbeddingContrastiveExample{
 		{QueryTokens: []int32{0}, PositiveTokens: []int32{0}, QueryMask: []int32{1}, PositiveMask: []int32{1}},
 		{QueryTokens: []int32{1}, PositiveTokens: []int32{1}, QueryMask: []int32{1}, PositiveMask: []int32{1}},
+	}
+}
+
+func tinyEmbeddingHardNegativeDataset() []EmbeddingHardNegativeExample {
+	return []EmbeddingHardNegativeExample{
+		{QueryTokens: []int32{0}, PositiveTokens: []int32{0}, NegativeTokens: [][]int32{{1}}, QueryMask: []int32{1}, PositiveMask: []int32{1}, NegativeMasks: [][]int32{{1}}},
+		{QueryTokens: []int32{1}, PositiveTokens: []int32{1}, NegativeTokens: [][]int32{{0}}, QueryMask: []int32{1}, PositiveMask: []int32{1}, NegativeMasks: [][]int32{{1}}},
 	}
 }
 

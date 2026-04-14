@@ -23,6 +23,8 @@ type EmbeddingTrainRunConfig struct {
 	RestoreBest           bool
 	EvalOnly              bool
 	PairwiseTrain         bool
+	HardNegativeTrain     bool
+	HardNegativesPerQuery int
 	LengthBucketBatches   bool
 	LearningRate          float32
 	ContrastiveLoss       string
@@ -521,6 +523,225 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 	return summary, nil
 }
 
+// FitHardNegatives trains over query-positive examples with explicit hard negatives.
+func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExample, evalSet []EmbeddingPairExample, cfg EmbeddingTrainRunConfig) (EmbeddingTrainRunSummary, error) {
+	if t == nil {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("embedding trainer is not initialized")
+	}
+	cfg = normalizedTrainRunConfig(cfg)
+	if cfg.EvalOnly {
+		if len(evalSet) == 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval dataset is empty")
+		}
+	} else {
+		if len(trainSet) == 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("training dataset is empty")
+		}
+		if cfg.Epochs <= 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("epochs must be positive")
+		}
+		if cfg.BatchSize <= 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("batch_size must be positive")
+		}
+	}
+	if cfg.EvalEveryEpoch <= 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("eval_every_epoch must be positive")
+	}
+	if cfg.EvalEverySteps < 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("eval_every_steps must be non-negative")
+	}
+	if cfg.EarlyStoppingPatience < 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("early_stopping_patience must be non-negative")
+	}
+	if cfg.ProgressEverySteps < 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("progress_every_steps must be non-negative")
+	}
+	if !validTrainSelectionMetric(cfg.SelectMetric) {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("unsupported select_metric %q", cfg.SelectMetric)
+	}
+	if err := t.applyTrainRunOverrides(cfg); err != nil {
+		return EmbeddingTrainRunSummary{}, err
+	}
+
+	runStart := time.Now()
+	startStep := t.step
+	summary := EmbeddingTrainRunSummary{
+		Config:       cfg,
+		StartProfile: t.TrainProfile(),
+		Workload:     EstimateHardNegativeTrainWorkload(len(trainSet), cfg.HardNegativesPerQuery, len(evalSet), cfg),
+	}
+	if cfg.EvalOnly {
+		evalStart := time.Now()
+		finalEval, err := t.EvaluatePairs(evalSet)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval: %w", err)
+		}
+		summary.EvalDuration = time.Since(evalStart)
+		summary.StepsCompleted = t.step
+		summary.FinalEval = cloneEvalMetrics(finalEval)
+		summary.LastEval = cloneEvalMetrics(finalEval)
+		summary.BestEval = cloneEvalMetrics(finalEval)
+		summary.BestStep = t.step
+		summary.Workload.ActualEvalPasses = 1
+		summary.Workload.ActualEvalPairs = int64(len(evalSet))
+		summary.Workload.ActualEvalExamples = int64(len(evalSet))
+		summary.EndProfile = t.TrainProfile()
+		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
+		summary.Workload.ActualTotalPairs = summary.Workload.ActualEvalPairs
+		summary.Workload.ActualTotalExamples = summary.Workload.ActualEvalExamples
+		summary.Elapsed = time.Since(runStart)
+		return summary, nil
+	}
+
+	indices := make([]int, len(trainSet))
+	for i := range indices {
+		indices[i] = i
+	}
+	rng := rand.New(rand.NewSource(cfg.Seed))
+	var (
+		bestCheckpoint EmbeddingTrainCheckpoint
+		haveBest       bool
+		noImproveEvals int
+	)
+	recordEval := func(epoch int) (*EmbeddingEvalMetrics, bool, error) {
+		evalStart := time.Now()
+		evalMetrics, err := t.EvaluatePairs(evalSet)
+		if err != nil {
+			return nil, false, err
+		}
+		summary.EvalDuration += time.Since(evalStart)
+		summary.Workload.ActualEvalPasses++
+		summary.Workload.ActualEvalPairs += int64(len(evalSet))
+		summary.Workload.ActualEvalExamples += int64(len(evalSet))
+		summary.LastEval = cloneEvalMetrics(evalMetrics)
+		improved := false
+		if !haveBest || betterEvalMetrics(evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta) {
+			bestCheckpoint, err = t.Checkpoint()
+			if err != nil {
+				return nil, false, err
+			}
+			haveBest = true
+			improved = true
+			summary.BestEval = cloneEvalMetrics(evalMetrics)
+			summary.BestEpoch = epoch
+			summary.BestStep = t.step
+			noImproveEvals = 0
+		} else {
+			noImproveEvals++
+		}
+		return cloneEvalMetrics(evalMetrics), improved, nil
+	}
+	if len(evalSet) > 0 && cfg.RestoreBest {
+		if _, _, err := recordEval(0); err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("initial eval: %w", err)
+		}
+	}
+
+	for epoch := 1; epoch <= cfg.Epochs; epoch++ {
+		if cfg.Shuffle {
+			rng.Shuffle(len(indices), func(i, j int) {
+				indices[i], indices[j] = indices[j], indices[i]
+			})
+		}
+		if cfg.LengthBucketBatches {
+			bucketHardNegativeOrderByLength(trainSet, indices, cfg.BatchSize)
+		}
+		trainStart := time.Now()
+		var afterBatch contrastiveEpochBatchHook
+		if len(evalSet) > 0 && cfg.EvalEverySteps > 0 {
+			afterBatch = func(progress EmbeddingTrainProgress) error {
+				if progress.Batch <= 0 || progress.Batch%cfg.EvalEverySteps != 0 {
+					return nil
+				}
+				if _, _, err := recordEval(epoch); err != nil {
+					return fmt.Errorf("step %d eval: %w", progress.Step, err)
+				}
+				return nil
+			}
+		}
+		trainMetrics, err := t.runHardNegativeEpoch(trainSet, indices, cfg.BatchSize, cfg, epoch, runStart, afterBatch)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d: %w", epoch, err)
+		}
+		summary.TrainDuration += time.Since(trainStart)
+		record := EmbeddingTrainEpochSummary{
+			Epoch: epoch,
+			Step:  t.step,
+			Train: trainMetrics,
+		}
+		summary.FinalTrain = trainMetrics
+		summary.EpochsCompleted = epoch
+		summary.Workload.CompletedEpochs = epoch
+		summary.Workload.ActualTrainPairs += int64(trainMetrics.BatchSize)
+		summary.Workload.ActualTrainExamples += int64(len(indices))
+
+		if len(evalSet) > 0 && epoch%cfg.EvalEveryEpoch == 0 {
+			evalMetrics, improved, err := recordEval(epoch)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d eval: %w", epoch, err)
+			}
+			record.Eval = evalMetrics
+			record.Improved = improved
+			if !improved && cfg.EarlyStoppingPatience > 0 && noImproveEvals >= cfg.EarlyStoppingPatience {
+				summary.StoppedEarly = true
+				summary.History = append(summary.History, record)
+				break
+			}
+		}
+
+		summary.History = append(summary.History, record)
+	}
+
+	summary.StepsCompleted = t.step
+	summary.StepsRun = t.step - startStep
+	preRestoreEndProfile := t.TrainProfile()
+	restoreStartProfile := EmbeddingTrainProfile{}
+	restored := false
+	if cfg.RestoreBest && haveBest {
+		if err := t.restoreCheckpoint(bestCheckpoint); err != nil {
+			return EmbeddingTrainRunSummary{}, err
+		}
+		summary.RestoredBest = true
+		restoreStartProfile = t.TrainProfile()
+		restored = true
+	}
+	if len(evalSet) > 0 {
+		evalStart := time.Now()
+		finalEval, err := t.EvaluatePairs(evalSet)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("final eval: %w", err)
+		}
+		summary.EvalDuration += time.Since(evalStart)
+		summary.Workload.ActualEvalPasses++
+		summary.Workload.ActualEvalPairs += int64(len(evalSet))
+		summary.Workload.ActualEvalExamples += int64(len(evalSet))
+		summary.FinalEval = cloneEvalMetrics(finalEval)
+		if summary.BestEval == nil {
+			summary.BestEval = cloneEvalMetrics(finalEval)
+			if summary.BestEpoch == 0 {
+				summary.BestEpoch = summary.EpochsCompleted
+			}
+			if summary.BestStep == 0 {
+				summary.BestStep = summary.StepsCompleted
+			}
+		}
+	}
+	finalProfile := t.TrainProfile()
+	if restored {
+		preRestoreDelta := diffTrainProfile(summary.StartProfile, preRestoreEndProfile)
+		postRestoreDelta := diffTrainProfile(restoreStartProfile, finalProfile)
+		summary.DeltaProfile = addTrainProfileDelta(preRestoreDelta, postRestoreDelta)
+		summary.EndProfile = applyTrainProfileDelta(preRestoreEndProfile, postRestoreDelta)
+	} else {
+		summary.EndProfile = finalProfile
+		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
+	}
+	summary.Workload.ActualTotalPairs = summary.Workload.ActualTrainPairs + summary.Workload.ActualEvalPairs
+	summary.Workload.ActualTotalExamples = summary.Workload.ActualTrainExamples + summary.Workload.ActualEvalExamples
+	summary.Elapsed = time.Since(runStart)
+	return summary, nil
+}
+
 // EstimatePairwiseTrainWorkload returns planned pairwise work for supervised pair training.
 func EstimatePairwiseTrainWorkload(trainExamples, evalExamples int, cfg EmbeddingTrainRunConfig) EmbeddingTrainWorkload {
 	cfg = normalizedTrainRunConfig(cfg)
@@ -574,6 +795,45 @@ func EstimateContrastiveTrainWorkload(trainExamples, evalExamples int, cfg Embed
 	return EmbeddingTrainWorkload{
 		TrainMode:            "contrastive",
 		EvalMode:             workloadEvalMode(evalExamples, "contrastive"),
+		TrainExamples:        trainExamples,
+		EvalExamples:         evalExamples,
+		BatchSize:            cfg.BatchSize,
+		PlannedEpochs:        cfg.Epochs,
+		TrainBatchesPerEpoch: batches,
+		TrainPairsPerEpoch:   trainPairsPerEpoch,
+		EvalPairsPerPass:     evalPairsPerPass,
+		PlannedEvalPasses:    evalPasses,
+		PlannedTrainPairs:    trainPairsPerEpoch * int64(cfg.Epochs),
+		PlannedEvalPairs:     evalPairsPerPass * int64(evalPasses),
+		PlannedTotalPairs:    trainPairsPerEpoch*int64(cfg.Epochs) + evalPairsPerPass*int64(evalPasses),
+	}
+}
+
+// EstimateHardNegativeTrainWorkload returns planned work for explicit hard-negative contrastive training.
+func EstimateHardNegativeTrainWorkload(trainExamples, negativesPerExample, evalExamples int, cfg EmbeddingTrainRunConfig) EmbeddingTrainWorkload {
+	cfg = normalizedTrainRunConfig(cfg)
+	if negativesPerExample < 0 {
+		negativesPerExample = 0
+	}
+	batches, trainPairsPerEpoch := hardNegativeBatchWork(trainExamples, cfg.BatchSize, negativesPerExample)
+	evalPasses := plannedEvalPassCount(evalExamples, cfg.Epochs, cfg.EvalEveryEpoch)
+	if cfg.RestoreBest && evalExamples > 0 {
+		evalPasses++
+	}
+	if cfg.EvalEverySteps > 0 && evalExamples > 0 {
+		evalPasses += (batches / cfg.EvalEverySteps) * cfg.Epochs
+	}
+	if cfg.EvalOnly {
+		batches = 0
+		trainPairsPerEpoch = 0
+		if evalExamples > 0 {
+			evalPasses = 1
+		}
+	}
+	evalPairsPerPass := int64(evalExamples)
+	return EmbeddingTrainWorkload{
+		TrainMode:            "hard_negative_contrastive",
+		EvalMode:             workloadEvalMode(evalExamples, "pairwise"),
 		TrainExamples:        trainExamples,
 		EvalExamples:         evalExamples,
 		BatchSize:            cfg.BatchSize,
@@ -650,6 +910,46 @@ func contrastiveEvalPairs(total int) int64 {
 		return 0
 	}
 	return int64(total) * int64(total)
+}
+
+func hardNegativeBatchWork(total, batchSize, negativesPerExample int) (int, int64) {
+	if total <= 0 || batchSize <= 0 {
+		return 0, 0
+	}
+	if negativesPerExample < 0 {
+		negativesPerExample = 0
+	}
+	var pairs int64
+	batches := 0
+	candidatesPerExample := int64(1 + negativesPerExample)
+	for start := 0; start < total; start += batchSize {
+		end := start + batchSize
+		if end > total {
+			end = total
+		}
+		n := end - start
+		if n <= 0 {
+			break
+		}
+		candidates := int64(n) * candidatesPerExample
+		if candidates < 2 {
+			break
+		}
+		batches++
+		pairs += int64(n) * candidates
+	}
+	return batches, pairs
+}
+
+func hardNegativeBatchPairCount(batch []EmbeddingHardNegativeExample) int64 {
+	if len(batch) == 0 {
+		return 0
+	}
+	candidates := 0
+	for _, example := range batch {
+		candidates += 1 + len(example.NegativeTokens)
+	}
+	return int64(len(batch)) * int64(candidates)
 }
 
 func plannedEvalPassCount(evalExamples, epochs, evalEvery int) int {
@@ -782,6 +1082,68 @@ func (t *EmbeddingTrainer) runContrastiveEpoch(trainSet []EmbeddingContrastiveEx
 	}, nil
 }
 
+func (t *EmbeddingTrainer) runHardNegativeEpoch(trainSet []EmbeddingHardNegativeExample, order []int, batchSize int, cfg EmbeddingTrainRunConfig, epoch int, runStart time.Time, afterBatch contrastiveEpochBatchHook) (EmbeddingTrainMetrics, error) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	totalExamples := 0
+	totalTrainExamples := 0
+	var totalPairs int64
+	batchIndex := 0
+	totalBatches, plannedEpochPairs := hardNegativeBatchWork(len(order), batchSize, cfg.HardNegativesPerQuery)
+	for start := 0; start < len(order); start += batchSize {
+		end := start + batchSize
+		if end > len(order) {
+			end = len(order)
+		}
+		batch := make([]EmbeddingHardNegativeExample, 0, end-start)
+		for _, idx := range order[start:end] {
+			batch = append(batch, trainSet[idx])
+		}
+		if hardNegativeBatchPairCount(batch) < 2 {
+			break
+		}
+		metrics, err := t.TrainHardNegativeContrastiveStep(batch)
+		if err != nil {
+			return EmbeddingTrainMetrics{}, err
+		}
+		totalLoss += metrics.Loss * float32(metrics.BatchSize)
+		totalScore += metrics.AverageScore * float32(metrics.BatchSize)
+		totalExamples += metrics.BatchSize
+		totalTrainExamples += end - start
+		totalPairs += int64(metrics.BatchSize)
+		batchIndex++
+		progress := EmbeddingTrainProgress{
+			Epoch:              epoch,
+			Batch:              batchIndex,
+			Batches:            totalBatches,
+			Step:               t.step,
+			BatchExamples:      end - start,
+			BatchPairs:         int64(metrics.BatchSize),
+			EpochTrainExamples: int64(totalTrainExamples),
+			EpochTrainPairs:    totalPairs,
+			PlannedEpochPairs:  plannedEpochPairs,
+			Loss:               metrics.Loss,
+			AverageScore:       metrics.AverageScore,
+			Elapsed:            time.Since(runStart),
+		}
+		maybeReportTrainProgress(cfg, progress)
+		if afterBatch != nil {
+			if err := afterBatch(progress); err != nil {
+				return EmbeddingTrainMetrics{}, err
+			}
+		}
+	}
+	if totalExamples == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("training epoch has no usable hard-negative batches")
+	}
+	inv := float32(1) / float32(totalExamples)
+	return EmbeddingTrainMetrics{
+		Loss:         totalLoss * inv,
+		AverageScore: totalScore * inv,
+		BatchSize:    totalExamples,
+	}, nil
+}
+
 func (t *EmbeddingTrainer) restoreCheckpoint(checkpoint EmbeddingTrainCheckpoint) error {
 	restored, err := NewEmbeddingTrainerFromCheckpoint(t.module, checkpoint)
 	if err != nil {
@@ -820,6 +1182,25 @@ func bucketContrastiveOrderByLength(trainSet []EmbeddingContrastiveExample, orde
 	}
 }
 
+func bucketHardNegativeOrderByLength(trainSet []EmbeddingHardNegativeExample, order []int, batchSize int) {
+	if len(trainSet) == 0 || len(order) == 0 || batchSize <= 0 {
+		return
+	}
+	windowSize := contrastiveLengthBucketWindow(batchSize, len(order))
+	for start := 0; start < len(order); start += windowSize {
+		end := start + windowSize
+		if end > len(order) {
+			end = len(order)
+		}
+		window := order[start:end]
+		sort.SliceStable(window, func(i, j int) bool {
+			left := hardNegativeExampleSortLength(trainSet[window[i]])
+			right := hardNegativeExampleSortLength(trainSet[window[j]])
+			return left < right
+		})
+	}
+}
+
 func contrastiveLengthBucketWindow(batchSize, total int) int {
 	if batchSize <= 1 || total <= 0 {
 		return 0
@@ -843,6 +1224,19 @@ func contrastiveExampleSortLength(example EmbeddingContrastiveExample) int {
 	length := len(example.QueryTokens)
 	if len(example.PositiveTokens) > length {
 		length = len(example.PositiveTokens)
+	}
+	return length
+}
+
+func hardNegativeExampleSortLength(example EmbeddingHardNegativeExample) int {
+	length := len(example.QueryTokens)
+	if len(example.PositiveTokens) > length {
+		length = len(example.PositiveTokens)
+	}
+	for _, tokens := range example.NegativeTokens {
+		if len(tokens) > length {
+			length = len(tokens)
+		}
 	}
 	return length
 }
@@ -893,6 +1287,9 @@ func normalizedTrainRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConf
 	}
 	if cfg.Seed == 0 {
 		cfg.Seed = 1
+	}
+	if cfg.HardNegativesPerQuery == 0 {
+		cfg.HardNegativesPerQuery = 1
 	}
 	return cfg
 }

@@ -1,0 +1,222 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+type sweepConfig struct {
+	Root       string
+	RunRoot    string
+	Seeds      []string
+	Leaderboard string
+}
+
+type trainMetrics struct {
+	FinalEval *struct {
+		MeanReciprocalRank float64 `json:"mean_reciprocal_rank"`
+		Top1Accuracy float64 `json:"top1_accuracy"`
+		ScoreMargin float64 `json:"score_margin"`
+	} `json:"final_eval"`
+	Throughput struct {
+		TrainPairsPerSecond float64 `json:"train_pairs_per_second"`
+		OptimizerStepsPerSecond float64 `json:"optimizer_steps_per_second"`
+	} `json:"throughput"`
+}
+
+func usage() {
+	fmt.Println(`Run a hard-negative manta-embed-v1 multi-seed candidate sweep.
+
+Required:
+  MANTA_TRAIN_JSONL=/path/to/train-pairs-or-train-hard-negatives.jsonl
+  MANTA_EVAL_JSONL=/path/to/eval.jsonl
+  MANTA_HARD_EVAL_JSONL=/path/to/hard-eval.jsonl
+  MANTA_THRESHOLDS_ENV=/path/to/thresholds.env
+
+Run:
+  MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/sweep_manta_embed_v1_candidates.fw
+
+Optional:
+  MANTA_SWEEP_SEEDS=1,2,3
+  MANTA_SWEEP_RUN_ROOT=$PWD/runs/manta-embed-v1-sweep-20260414
+  MANTA_HARD_NEGATIVES_PER_QUERY=1`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func splitList(value string) []string {
+	out := []string{}
+	for _, raw := range strings.Split(value, ",") {
+		item := strings.TrimSpace(raw)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+func findRoot() (string, error) {
+	explicit := os.Getenv("MANTA_REPO_ROOT")
+	if hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	pwd := os.Getenv("PWD")
+	if hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+}
+
+func prepareConfig(root string) (sweepConfig, error) {
+	for _, name := range []string{"MANTA_TRAIN_JSONL", "MANTA_EVAL_JSONL", "MANTA_HARD_EVAL_JSONL", "MANTA_THRESHOLDS_ENV"} {
+		value := os.Getenv(name)
+		guard value != "" else return sweepConfig{}, fmt.Errorf("%s is required", name)
+		_, err := os.Stat(value)
+		guard err == nil else return sweepConfig{}, fmt.Errorf("%s does not exist: %s", name, value)
+	}
+	seeds := splitList(getenv("MANTA_SWEEP_SEEDS", "1,2,3"))
+	guard len(seeds) > 0 else return sweepConfig{}, fmt.Errorf("MANTA_SWEEP_SEEDS is empty")
+	runRoot, err := filepath.Abs(getenv("MANTA_SWEEP_RUN_ROOT", filepath.Join(root, "runs", "manta-embed-v1-sweep-"+time.Now().UTC().Format("20060102T150405Z"))))
+	guard err == nil else return sweepConfig{}, err
+	err = os.MkdirAll(runRoot, 0o755)
+	guard err == nil else return sweepConfig{}, err
+	return sweepConfig{
+		Root: root,
+		RunRoot: runRoot,
+		Seeds: seeds,
+		Leaderboard: filepath.Join(runRoot, "leaderboard.tsv"),
+	}, nil
+}
+
+func readMetrics(path string) (trainMetrics, error) {
+	data, err := os.ReadFile(path)
+	guard err == nil else return trainMetrics{}, err
+	var metrics trainMetrics
+	err = json.Unmarshal(data, &metrics)
+	guard err == nil else return trainMetrics{}, err
+	return metrics, nil
+}
+
+func runSeed(cfg sweepConfig, seed string) error {
+	runID := "manta-embed-v1-seed-" + seed
+	runDir := filepath.Join(cfg.RunRoot, runID)
+	logPath := filepath.Join(cfg.RunRoot, runID+".log")
+	logFile, err := os.Create(logPath)
+	guard err == nil else return err
+	defer logFile.Close()
+
+	args := []string{"run", "scripts/train_manta_embed_v1_candidate.fw"}
+	fmt.Println(f"\n== Seed {seed} ==")
+	fmt.Println("+ ferrous-wheel " + strings.Join(args, " "))
+	cmd := exec.Command("ferrous-wheel", args...)
+	cmd.Dir = cfg.Root
+	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+	cmd.Env = append(os.Environ(),
+		"MANTA_REPO_ROOT="+cfg.Root,
+		"MANTA_RUN_ROOT="+cfg.RunRoot,
+		"MANTA_RUN_ID="+runID,
+		"MANTA_INIT_SEED="+seed,
+		"MANTA_HARD_NEGATIVE_TRAIN=1",
+		"MANTA_PAIRWISE_TRAIN=0",
+		"MANTA_HARD_NEGATIVES_PER_QUERY="+getenv("MANTA_HARD_NEGATIVES_PER_QUERY", "1"),
+		"MANTA_RETRIEVAL_EVAL="+getenv("MANTA_RETRIEVAL_EVAL", "1"),
+	)
+	err = cmd.Run()
+	status := "pass"
+	if err != nil {
+		status = "fail"
+	}
+	metricsPath := filepath.Join(runDir, "train.metrics.json")
+	metrics, metricsErr := readMetrics(metricsPath)
+	mrr := 0.0
+	top1 := 0.0
+	margin := 0.0
+	trainPairsPerSecond := 0.0
+	optimizerStepsPerSecond := 0.0
+	if metricsErr == nil {
+		if metrics.FinalEval != nil {
+			mrr = metrics.FinalEval.MeanReciprocalRank
+			top1 = metrics.FinalEval.Top1Accuracy
+			margin = metrics.FinalEval.ScoreMargin
+		}
+		trainPairsPerSecond = metrics.Throughput.TrainPairsPerSecond
+		optimizerStepsPerSecond = metrics.Throughput.OptimizerStepsPerSecond
+	}
+	line := fmt.Sprintf("%s\t%s\t%s\t%.6f\t%.6f\t%.6f\t%.2f\t%.4f\t%s\n", seed, status, runDir, mrr, top1, margin, trainPairsPerSecond, optimizerStepsPerSecond, logPath)
+	file, openErr := os.OpenFile(cfg.Leaderboard, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	guard openErr == nil else return openErr
+	_, writeErr := file.WriteString(line)
+	closeErr := file.Close()
+	guard writeErr == nil else return writeErr
+	guard closeErr == nil else return closeErr
+	guard err == nil else return fmt.Errorf("seed %s failed; see %s: %w", seed, logPath, err)
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	cfg, err := prepareConfig(root)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	header := "seed\tstatus\trun_dir\tmrr\ttop1\tmargin\ttrain_pairs_per_second\toptimizer_steps_per_second\tlog\n"
+	err = os.WriteFile(cfg.Leaderboard, []byte(header), 0o644)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	for _, seed := range cfg.Seeds {
+		if err := runSeed(cfg, seed); err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+	}
+	data, err := os.ReadFile(cfg.Leaderboard)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	fmt.Println("\n== Sweep leaderboard ==")
+	fmt.Print(string(data))
+	fmt.Println(f"sweep_run_root={cfg.RunRoot}")
+	fmt.Println(f"leaderboard={cfg.Leaderboard}")
+}

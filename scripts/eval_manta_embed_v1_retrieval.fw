@@ -26,6 +26,7 @@ type evalConfig struct {
 	MaxDocs     string
 	MaxQueries  string
 	Leaderboard string
+	ThresholdsEnv string
 }
 
 type retrievalMetrics struct {
@@ -68,7 +69,8 @@ Optional:
   MANTA_EVAL_BATCH_SIZE=64
   MANTA_EVAL_TOP_K=100
   MANTA_EVAL_MAX_DOCS=0
-  MANTA_EVAL_MAX_QUERIES=0`)
+  MANTA_EVAL_MAX_QUERIES=0
+  MANTA_THRESHOLDS_ENV=/path/to/thresholds.env`)
 }
 
 func getenv(name string, fallback string) string {
@@ -182,6 +184,13 @@ func prepareConfig(root string) (evalConfig, error) {
 	guard err == nil else return evalConfig{}, err
 	datasets := splitList(getenv("MANTA_EVAL_DATASETS", "scifact,nfcorpus,fiqa"))
 	guard len(datasets) > 0 else return evalConfig{}, fmt.Errorf("MANTA_EVAL_DATASETS is empty")
+	thresholdsEnv := os.Getenv("MANTA_THRESHOLDS_ENV")
+	if thresholdsEnv != "" {
+		thresholdsEnv, err = filepath.Abs(thresholdsEnv)
+		guard err == nil else return evalConfig{}, err
+		_, err = os.Stat(thresholdsEnv)
+		guard err == nil else return evalConfig{}, fmt.Errorf("MANTA_THRESHOLDS_ENV does not exist: %s", thresholdsEnv)
+	}
 	return evalConfig{
 		Root:        root,
 		RunID:       runID,
@@ -197,6 +206,7 @@ func prepareConfig(root string) (evalConfig, error) {
 		MaxDocs:     getenv("MANTA_EVAL_MAX_DOCS", "0"),
 		MaxQueries:  getenv("MANTA_EVAL_MAX_QUERIES", "0"),
 		Leaderboard: filepath.Join(runDir, "leaderboard.tsv"),
+		ThresholdsEnv: thresholdsEnv,
 	}, nil
 }
 
@@ -265,6 +275,11 @@ func runEval(cfg evalConfig) error {
 		args = append(args, cfg.Artifact, dir)
 		err = runCmd(cfg, "Evaluate "+dataset, dataset+"-eval.log", cfg.MantaBin, args)
 		guard err == nil else return err
+		if cfg.ThresholdsEnv != "" {
+			gateArgs := []string{"gate-retrieval-metrics", "--thresholds", cfg.ThresholdsEnv, metricsPath}
+			err = runCmd(cfg, "Gate retrieval "+dataset, dataset+"-gate.log", cfg.MantaBin, gateArgs)
+			guard err == nil else return err
+		}
 		metrics, err := readMetrics(metricsPath)
 		guard err == nil else return err
 		err = appendLeaderboard(cfg.Leaderboard, metrics)

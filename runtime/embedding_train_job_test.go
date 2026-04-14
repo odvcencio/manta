@@ -449,6 +449,57 @@ func TestTrainEmbeddingPackageFromTextContrastiveFilesPairwiseTrain(t *testing.T
 	}
 }
 
+func TestTrainEmbeddingPackageFromTextContrastiveFilesHardNegativeTrain(t *testing.T) {
+	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
+	path := writeTinyTrainingPackage(t, trainer)
+
+	tokenizerPath := DefaultTokenizerPath(path)
+	tokenizerFile := TokenizerFile{
+		Version:      TokenizerFileVersion,
+		Tokens:       []string{"a", "b", "[UNK]"},
+		UnknownToken: "[UNK]",
+	}
+	if err := tokenizerFile.WriteFile(tokenizerPath); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+
+	trainPath := path[:len(path)-len(".mll")] + ".text-hard-pairs.jsonl"
+	evalPath := path[:len(path)-len(".mll")] + ".text-hard-eval.jsonl"
+	trainData := "" +
+		"{\"query\":\"a\",\"document\":\"a\",\"label\":1}\n" +
+		"{\"query\":\"a\",\"document\":\"b\",\"label\":-1}\n" +
+		"{\"query\":\"b\",\"document\":\"b\",\"label\":1}\n" +
+		"{\"query\":\"b\",\"document\":\"a\",\"label\":-1}\n"
+	evalData := "" +
+		"{\"query\":\"a\",\"document\":\"a\",\"label\":1}\n" +
+		"{\"left\":\"a\",\"right\":\"b\",\"label\":0}\n"
+	if err := os.WriteFile(trainPath, []byte(trainData), 0o644); err != nil {
+		t.Fatalf("write train text pairs: %v", err)
+	}
+	if err := os.WriteFile(evalPath, []byte(evalData), 0o644); err != nil {
+		t.Fatalf("write eval text pairs: %v", err)
+	}
+
+	summary, _, err := TrainEmbeddingPackageFromTextContrastiveFiles(path, tokenizerPath, trainPath, evalPath, EmbeddingTrainRunConfig{
+		Epochs:                2,
+		BatchSize:             2,
+		Shuffle:               true,
+		Seed:                  7,
+		RestoreBest:           true,
+		HardNegativeTrain:     true,
+		HardNegativesPerQuery: 1,
+	})
+	if err != nil {
+		t.Fatalf("train text package hard negative: %v", err)
+	}
+	if summary.Workload.TrainMode != "hard_negative_contrastive" || summary.Workload.TrainExamples != 2 {
+		t.Fatalf("workload = %+v, want hard-negative train with 2 examples", summary.Workload)
+	}
+	if summary.FinalEval == nil || summary.FinalEval.PairCount != 2 {
+		t.Fatalf("final eval = %+v, want 2 pair eval examples", summary.FinalEval)
+	}
+}
+
 func writeTinyTrainingPackage(t *testing.T, trainer *EmbeddingTrainer) string {
 	t.Helper()
 	path := t.TempDir() + "/tiny_train_embed_q8.mll"

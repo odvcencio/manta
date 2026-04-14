@@ -33,6 +33,8 @@ type candidateConfig struct {
 	ThresholdsEnv       string
 	TrainMode           string
 	PairwiseTrain       string
+	HardNegativeTrain   string
+	HardNegativesPerQuery string
 	VocabSize           string
 	MaxSeq              string
 	EmbeddingDim        string
@@ -95,6 +97,8 @@ Common knobs:
   MANTA_EVAL_EVERY_STEPS=0
   MANTA_PRETOKENIZE_JSONL=0
   MANTA_PAIRWISE_TRAIN=1
+  MANTA_HARD_NEGATIVE_TRAIN=1
+  MANTA_HARD_NEGATIVES_PER_QUERY=1
   MANTA_TRAIN_ENABLE_FAST_GELU=1
   MANTA_MIN_MRR=0.90
   MANTA_MIN_TOP1=0.85
@@ -288,6 +292,24 @@ func runMetricsDiagnosis(cfg candidateConfig, label string, logName string, metr
 	return runCmd(cfg, label, logName, cfg.MantaBin, []string{"diagnose-train-metrics", metricsPath})
 }
 
+func runRetrievalEval(cfg candidateConfig) error {
+	args := []string{
+		"MANTA_REPO_ROOT=" + cfg.Root,
+		"MANTA_EVAL_ARTIFACT=" + cfg.SealedArtifact,
+		"MANTA_EVAL_RUN_ROOT=" + filepath.Join(cfg.RunDir, "retrieval"),
+	}
+	if cfg.ThresholdsEnv != "" {
+		args = append(args, "MANTA_THRESHOLDS_ENV="+cfg.ThresholdsEnv)
+	}
+	for _, name := range []string{"MANTA_DATASET_ROOT", "MANTA_EVAL_DATASETS", "MANTA_EVAL_SPLIT", "MANTA_EVAL_BATCH_SIZE", "MANTA_EVAL_TOP_K", "MANTA_EVAL_MAX_DOCS", "MANTA_EVAL_MAX_QUERIES"} {
+		if value := os.Getenv(name); value != "" {
+			args = append(args, name+"="+value)
+		}
+	}
+	args = append(args, "ferrous-wheel", "run", "scripts/eval_manta_embed_v1_retrieval.fw")
+	return runCmd(cfg, "Full-corpus retrieval metrics gate", "retrieval-eval.log", "env", args)
+}
+
 func renderCommand(name string, args []string) string {
 	parts := []string{shellQuote(name)}
 	for arg in args {
@@ -419,6 +441,8 @@ func writeManifest(cfg candidateConfig, status string) error {
   "training": {
     "mode": %s,
     "pairwise_train": %s,
+    "hard_negative_train": %s,
+    "hard_negatives_per_query": %s,
     "epochs": %s,
     "batch_size": %s,
     "learning_rate": %s,
@@ -466,6 +490,8 @@ func writeManifest(cfg candidateConfig, status string) error {
 		cfg.InitSeed,
 		jsonString(cfg.TrainMode),
 		jsonBool(envEnabled("MANTA_PAIRWISE_TRAIN") || cfg.PairwiseTrain == "1" || strings.ToLower(cfg.PairwiseTrain) == "true"),
+		jsonBool(hardNegativeTrainEnabled(cfg)),
+		cfg.HardNegativesPerQuery,
 		cfg.Epochs,
 		cfg.BatchSize,
 		cfg.LR,
@@ -573,6 +599,8 @@ func prepareConfig(root string) (candidateConfig, error) {
 		MinDelta:            getenv("MANTA_MIN_DELTA", "0"),
 		SelectMetric:        getenv("MANTA_SELECT_METRIC", "score_margin"),
 		PairwiseTrain:       getenv("MANTA_PAIRWISE_TRAIN", "0"),
+		HardNegativeTrain:   getenv("MANTA_HARD_NEGATIVE_TRAIN", "0"),
+		HardNegativesPerQuery: getenv("MANTA_HARD_NEGATIVES_PER_QUERY", "1"),
 		MinFreq:             getenv("MANTA_MIN_FREQ", "1"),
 		MinChars:            getenv("MANTA_MIN_CHARS", "20"),
 		MaxPairs:            getenv("MANTA_MAX_PAIRS", "0"),
@@ -604,9 +632,11 @@ func prepareConfig(root string) (candidateConfig, error) {
 	cfg.TokenizerPath = os.Getenv("MANTA_TOKENIZER")
 	cfg.TokenizerCorpus = os.Getenv("MANTA_TOKENIZER_CORPUS")
 	cfg.ThresholdsEnv = thresholdsEnv
+	guard !(pairwiseTrainEnabled(cfg) && hardNegativeTrainEnabled(cfg)) else return candidateConfig{}, fmt.Errorf("choose MANTA_PAIRWISE_TRAIN or MANTA_HARD_NEGATIVE_TRAIN, not both")
 
 	if cfg.Corpus != "" {
 		guard cfg.TrainJSONL == "" && cfg.EvalJSONL == "" else return candidateConfig{}, fmt.Errorf("choose MANTA_CORPUS or MANTA_TRAIN_JSONL/MANTA_EVAL_JSONL, not both")
+		guard !hardNegativeTrainEnabled(cfg) else return candidateConfig{}, fmt.Errorf("MANTA_HARD_NEGATIVE_TRAIN requires prepared labeled-pair JSONL, not MANTA_CORPUS")
 		cfg.Corpus, err = requireFile(cfg.Corpus, "MANTA_CORPUS")
 		guard err == nil else return candidateConfig{}, err
 		err = rejectTmpPath("corpus", cfg.Corpus)
@@ -690,6 +720,10 @@ func pairwiseTrainEnabled(cfg candidateConfig) bool {
 	return envEnabled("MANTA_PAIRWISE_TRAIN") || cfg.PairwiseTrain == "1" || strings.ToLower(cfg.PairwiseTrain) == "true"
 }
 
+func hardNegativeTrainEnabled(cfg candidateConfig) bool {
+	return envEnabled("MANTA_HARD_NEGATIVE_TRAIN") || cfg.HardNegativeTrain == "1" || strings.ToLower(cfg.HardNegativeTrain) == "true"
+}
+
 func applyCandidateRuntimeEnv(cfg candidateConfig) {
 	if !envEnabled("MANTA_TRAIN_DISABLE_ACTIVATION_ACCEL") && cfg.ActivationAccel != "" {
 		os.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", cfg.ActivationAccel)
@@ -760,12 +794,15 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		trainTokenizeMode := "contrastive"
 		if pairwiseTrainEnabled(cfg) {
 			trainTokenizeMode = "pair"
+		} else if hardNegativeTrainEnabled(cfg) {
+			trainTokenizeMode = "hard-negative"
 		}
 		trainJSONLForRun = filepath.Join(cfg.RunDir, cfg.ModelName+".train.tokens.jsonl")
 		evalJSONLForRun = filepath.Join(cfg.RunDir, cfg.ModelName+".eval.tokens.jsonl")
 		err = runCmd(cfg, "Tokenize prepared train JSONL", "tokenize-train.log", cfg.MantaBin, []string{
 			"tokenize-embed",
 			"--mode", trainTokenizeMode,
+			"--hard-negatives-per-query", cfg.HardNegativesPerQuery,
 			"--tokenizer", tokenizerForEval,
 			cfg.Artifact,
 			cfg.TrainJSONL,
@@ -838,6 +875,8 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		args = append(args, "--metrics-json", cfg.TrainMetricsJSON)
 		if pairwiseTrainEnabled(cfg) {
 			args = append(args, "--pairwise-train")
+		} else if hardNegativeTrainEnabled(cfg) {
+			args = append(args, "--hard-negative-train", "--hard-negatives-per-query", cfg.HardNegativesPerQuery)
 		}
 		if trainTokenizer != "" {
 			args = append(args, "--tokenizer", trainTokenizer)
@@ -848,6 +887,8 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		planArgs := append([]string{"train-embed", "--plan-only"}, common...)
 		if pairwiseTrainEnabled(cfg) {
 			planArgs = append(planArgs, "--pairwise-train")
+		} else if hardNegativeTrainEnabled(cfg) {
+			planArgs = append(planArgs, "--hard-negative-train", "--hard-negatives-per-query", cfg.HardNegativesPerQuery)
 		}
 		if trainTokenizer != "" {
 			planArgs = append(planArgs, "--tokenizer", trainTokenizer)
@@ -921,6 +962,11 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	sealedData, err := os.ReadFile(filepath.Join(cfg.LogDir, "inspect-sealed.log"))
 	guard err == nil else return cfg, err
 	guard strings.Contains(string(sealedData), "package verify: OK") else return cfg, fmt.Errorf("sealed package verification did not pass")
+
+	if envEnabled("MANTA_RETRIEVAL_EVAL") {
+		err = runRetrievalEval(cfg)
+		guard err == nil else return cfg, err
+	}
 
 	err = writeArtifactSHA256(cfg)
 	guard err == nil else return cfg, err
