@@ -25,6 +25,7 @@ type bm25Document struct {
 type bm25Index struct {
 	Documents []bm25Document
 	DocFreq   map[string]int
+	Postings  map[string][]int
 	AvgLength float64
 	K1        float64
 	B         float64
@@ -124,6 +125,7 @@ func buildBM25Index(ctx context.Context, records []retrievalTextRecord) (bm25Ind
 	index := bm25Index{
 		Documents: make([]bm25Document, 0, len(records)),
 		DocFreq:   map[string]int{},
+		Postings:  map[string][]int{},
 		K1:        defaultBM25K1,
 		B:         defaultBM25B,
 	}
@@ -142,6 +144,7 @@ func buildBM25Index(ctx context.Context, records []retrievalTextRecord) (bm25Ind
 			tf[token]++
 			if !seen[token] {
 				index.DocFreq[token]++
+				index.Postings[token] = append(index.Postings[token], len(index.Documents))
 				seen[token] = true
 			}
 		}
@@ -232,15 +235,18 @@ func topBM25Scores(queryTokens []string, index bm25Index, topK int) []retrievalS
 		topK = len(index.Documents)
 	}
 	h := make(retrievalScoreHeap, 0, topK)
-	for _, doc := range index.Documents {
+	candidates, candidateSet := bm25CandidateDocIndices(queryTokens, index)
+	for _, docIndex := range candidates {
+		doc := index.Documents[docIndex]
 		score := retrievalScoredDoc{ID: doc.ID, Score: float32(scoreBM25Document(queryTokens, doc, index))}
-		if len(h) < topK {
-			heap.Push(&h, score)
-			continue
-		}
-		if retrievalScoreBetter(score, h[0]) {
-			h[0] = score
-			heap.Fix(&h, 0)
+		pushBM25Score(&h, score, topK)
+	}
+	if len(h) < topK {
+		for docIndex, doc := range index.Documents {
+			if candidateSet[docIndex] {
+				continue
+			}
+			pushBM25Score(&h, retrievalScoredDoc{ID: doc.ID}, topK)
 		}
 	}
 	scores := []retrievalScoredDoc(h)
@@ -254,6 +260,80 @@ func topBM25Scores(queryTokens []string, index bm25Index, topK int) []retrievalS
 		return 0
 	})
 	return scores
+}
+
+func bm25CandidateDocIndices(queryTokens []string, index bm25Index) ([]int, map[int]bool) {
+	candidateSet := map[int]bool{}
+	candidates := []int{}
+	for _, token := range queryTokens {
+		if token == "" {
+			continue
+		}
+		for _, docIndex := range index.Postings[token] {
+			if candidateSet[docIndex] {
+				continue
+			}
+			candidateSet[docIndex] = true
+			candidates = append(candidates, docIndex)
+		}
+	}
+	return candidates, candidateSet
+}
+
+func pushBM25Score(h *retrievalScoreHeap, score retrievalScoredDoc, topK int) {
+	if topK <= 0 {
+		return
+	}
+	if len(*h) < topK {
+		heap.Push(h, score)
+		return
+	}
+	if retrievalScoreBetter(score, (*h)[0]) {
+		(*h)[0] = score
+		heap.Fix(h, 0)
+	}
+}
+
+func topBM25NonPositiveScores(queryTokens []string, positiveIDs map[string]bool, index bm25Index, topK int) []retrievalScoredDoc {
+	if topK <= 0 || topK > len(index.Documents) {
+		topK = len(index.Documents)
+	}
+	h := make(retrievalScoreHeap, 0, topK)
+	candidates, _ := bm25CandidateDocIndices(queryTokens, index)
+	for _, docIndex := range candidates {
+		doc := index.Documents[docIndex]
+		if positiveIDs[doc.ID] {
+			continue
+		}
+		score := retrievalScoredDoc{ID: doc.ID, Score: float32(scoreBM25Document(queryTokens, doc, index))}
+		pushBM25Score(&h, score, topK)
+	}
+	scores := []retrievalScoredDoc(h)
+	slices.SortFunc(scores, func(a, b retrievalScoredDoc) int {
+		if retrievalScoreBetter(a, b) {
+			return -1
+		}
+		if retrievalScoreBetter(b, a) {
+			return 1
+		}
+		return 0
+	})
+	return scores
+}
+
+func topBM25NonPositiveTexts(queryTokens []string, positiveIDs map[string]bool, index bm25Index, docText map[string]string, topK int) []string {
+	scores := topBM25NonPositiveScores(queryTokens, positiveIDs, index, topK)
+	texts := make([]string, 0, len(scores))
+	seen := map[string]bool{}
+	for _, score := range scores {
+		text := strings.TrimSpace(docText[score.ID])
+		if text == "" || seen[text] {
+			continue
+		}
+		seen[text] = true
+		texts = append(texts, text)
+	}
+	return texts
 }
 
 func scoreBM25Document(queryTokens []string, doc bm25Document, index bm25Index) float64 {

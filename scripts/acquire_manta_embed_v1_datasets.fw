@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -85,6 +86,7 @@ type acquireConfig struct {
 	MaxEval        int
 	MaxHard        int
 	Negatives      int
+	BM25CandidateTopK int
 	ThresholdsPath string
 	TrainPath      string
 	TrainPairPath  string
@@ -103,6 +105,7 @@ Run:
 Defaults:
   MANTA_DATASET_ROOT=$PWD/datasets/manta-embed-v1
   MANTA_BEIR_DATASETS=scifact,nfcorpus,fiqa
+  MANTA_DATASET_BM25_CANDIDATE_TOP_K=100
 
 Outputs:
   processed/train.jsonl
@@ -182,6 +185,16 @@ func parseIntEnv(name string, fallback int) (int, error) {
 	return value, nil
 }
 
+func commandOutput(dir string, name string, args []string) (string, error) {
+	let cmd = exec.Command(name, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("%s %s: %w\n%s", name, strings.Join(args, " "), err, string(out))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func datasetForName(name string) (datasetSpec, error) {
 	switch strings.TrimSpace(strings.ToLower(name)) {
 	case "scifact":
@@ -223,6 +236,9 @@ func prepareConfig(root string) (acquireConfig, error) {
 	negatives, err := parseIntEnv("MANTA_DATASET_NEGATIVES_PER_POSITIVE", 1)
 	guard err == nil else return acquireConfig{}, err
 	guard negatives > 0 else return acquireConfig{}, fmt.Errorf("MANTA_DATASET_NEGATIVES_PER_POSITIVE must be positive")
+	bm25CandidateTopK, err := parseIntEnv("MANTA_DATASET_BM25_CANDIDATE_TOP_K", 100)
+	guard err == nil else return acquireConfig{}, err
+	guard bm25CandidateTopK > 0 else return acquireConfig{}, fmt.Errorf("MANTA_DATASET_BM25_CANDIDATE_TOP_K must be positive")
 	specs, err := parseDatasets()
 	guard err == nil else return acquireConfig{}, err
 	cfg := acquireConfig{
@@ -237,6 +253,7 @@ func prepareConfig(root string) (acquireConfig, error) {
 		MaxEval:        maxEval,
 		MaxHard:        maxHard,
 		Negatives:      negatives,
+		BM25CandidateTopK: bm25CandidateTopK,
 		ThresholdsPath: filepath.Join(outRoot, "processed", "thresholds.env"),
 		TrainPath:      filepath.Join(outRoot, "processed", "train.jsonl"),
 		TrainPairPath:  filepath.Join(outRoot, "processed", "train-pairs.jsonl"),
@@ -445,6 +462,57 @@ func readQrels(path string) ([]qrelRecord, error) {
 	return out, scanner.Err()
 }
 
+func readHardNegativeRecords(path string) ([]hardNegativeRecord, error) {
+	f, err := os.Open(path)
+	guard err == nil else return nil, err
+	defer f.Close()
+	out := []hardNegativeRecord{}
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 1024*1024)
+	scanner.Buffer(buf, 16*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var rec hardNegativeRecord
+		err = json.Unmarshal([]byte(line), &rec)
+		guard err == nil else return nil, err
+		if strings.TrimSpace(rec.Query) != "" && strings.TrimSpace(rec.Positive) != "" && len(rec.Negatives) > 0 {
+			out = append(out, rec)
+		}
+	}
+	return out, scanner.Err()
+}
+
+func mineBM25HardNegativeRecords(cfg acquireConfig, dataset string, dir string, limit int) ([]hardNegativeRecord, error) {
+	outPath := filepath.Join(cfg.ProcessedDir, dataset+".train-hard-negatives.jsonl")
+	args := []string{
+		"run",
+		"./cmd/manta",
+		"mine-retrieval-hard-negatives",
+		"--dataset", dataset,
+		"--split", "train",
+		"--negatives", strconv.Itoa(cfg.Negatives),
+		"--candidate-top-k", strconv.Itoa(cfg.BM25CandidateTopK),
+	}
+	if limit > 0 {
+		args = append(args, "--max-queries", strconv.Itoa(limit))
+	}
+	args = append(args, dir, outPath)
+	output, err := commandOutput(cfg.Root, "go", args)
+	guard err == nil else return nil, err
+	if output != "" {
+		fmt.Println(output)
+	}
+	records, err := readHardNegativeRecords(outPath)
+	guard err == nil else return nil, err
+	for i := range records {
+		records[i].Source = dataset
+	}
+	return records, nil
+}
+
 func positiveDocSets(qrels []qrelRecord) map[string]map[string]bool {
 	out := map[string]map[string]bool{}
 	for _, qrel := range qrels {
@@ -530,60 +598,6 @@ func textTrainPairRecords(dataset string, qrels []qrelRecord, queries map[string
 			}
 			seen[negKey] = true
 			out = append(out, evalRecord{Left: query, Right: negDoc, Label: -1, Source: dataset})
-		}
-	}
-	return out
-}
-
-func textHardNegativeRecords(records []evalRecord, maxNegatives int) []hardNegativeRecord {
-	type group struct {
-		source    string
-		positives []string
-		negatives []string
-	}
-	groups := map[string]*group{}
-	order := []string{}
-	for _, record := range records {
-		query := firstNonEmpty(record.Query, record.Left)
-		doc := firstNonEmpty(record.Document, record.Right)
-		if strings.TrimSpace(query) == "" || strings.TrimSpace(doc) == "" {
-			continue
-		}
-		key := record.Source + "\x00" + query
-		item := groups[key]
-		if item == nil {
-			item = &group{source: record.Source}
-			groups[key] = item
-			order = append(order, key)
-		}
-		if record.Label > 0 {
-			item.positives = append(item.positives, doc)
-		} else {
-			item.negatives = append(item.negatives, doc)
-		}
-	}
-	out := []hardNegativeRecord{}
-	for _, key := range order {
-		item := groups[key]
-		query := strings.SplitN(key, "\x00", 2)[1]
-		if len(item.positives) == 0 || len(item.negatives) == 0 {
-			continue
-		}
-		limit := maxNegatives
-		if limit <= 0 || limit > len(item.negatives) {
-			limit = len(item.negatives)
-		}
-		for i, positive := range item.positives {
-			negatives := []string{}
-			for j := 0; j < limit; j++ {
-				negatives = append(negatives, item.negatives[(i+j)%len(item.negatives)])
-			}
-			out = append(out, hardNegativeRecord{
-				Query:     query,
-				Positive:  positive,
-				Negatives: negatives,
-				Source:    item.source,
-			})
 		}
 	}
 	return out
@@ -730,20 +744,20 @@ func positiveSplits(dir string, dataset string) ([]qrelRecord, []qrelRecord, []q
 	return train, dev, test, nil
 }
 
-func acquireDataset(cfg acquireConfig, spec datasetSpec) ([]trainRecord, []evalRecord, []evalRecord, []evalRecord, int, error) {
+func acquireDataset(cfg acquireConfig, spec datasetSpec) ([]trainRecord, []evalRecord, []hardNegativeRecord, []evalRecord, []evalRecord, int, error) {
 	zipPath := filepath.Join(cfg.RawDir, spec.Name+".zip")
 	err := downloadFile(spec, zipPath)
-	guard err == nil else return nil, nil, nil, nil, 0, err
+	guard err == nil else return nil, nil, nil, nil, nil, 0, err
 	extractRoot := filepath.Join(cfg.RawDir, spec.Name)
 	err = unzip(zipPath, extractRoot)
-	guard err == nil else return nil, nil, nil, nil, 0, err
+	guard err == nil else return nil, nil, nil, nil, nil, 0, err
 	dir := datasetDir(extractRoot, spec.Name)
 	corpus, ids, err := readCorpus(filepath.Join(dir, "corpus.jsonl"))
-	guard err == nil else return nil, nil, nil, nil, 0, err
+	guard err == nil else return nil, nil, nil, nil, nil, 0, err
 	queries, err := readQueries(filepath.Join(dir, "queries.jsonl"))
-	guard err == nil else return nil, nil, nil, nil, 0, err
+	guard err == nil else return nil, nil, nil, nil, nil, 0, err
 	trainQrels, evalQrels, hardQrels, err := positiveSplits(dir, spec.Name)
-	guard err == nil else return nil, nil, nil, nil, 0, err
+	guard err == nil else return nil, nil, nil, nil, nil, 0, err
 	trainLimit := cfg.MaxTrain
 	evalLimit := cfg.MaxEval
 	hardLimit := cfg.MaxHard
@@ -754,14 +768,17 @@ func acquireDataset(cfg acquireConfig, spec datasetSpec) ([]trainRecord, []evalR
 	}
 	train := textTrainRecords(spec.Name, trainQrels, queries, corpus, trainLimit)
 	trainPairs := textTrainPairRecords(spec.Name, trainQrels, queries, corpus, ids, cfg.Negatives, trainLimit)
+	hardTrain, err := mineBM25HardNegativeRecords(cfg, spec.Name, dir, trainLimit)
+	guard err == nil else return nil, nil, nil, nil, nil, 0, err
 	eval := textEvalRecords(spec.Name, evalQrels, queries, corpus, ids, cfg.Negatives, evalLimit)
 	hard := textEvalRecords(spec.Name, hardQrels, queries, corpus, ids, cfg.Negatives, hardLimit)
-	guard len(train) > 0 else return nil, nil, nil, nil, 0, fmt.Errorf("%s produced no train records", spec.Name)
-	guard len(trainPairs) > 0 else return nil, nil, nil, nil, 0, fmt.Errorf("%s produced no train pair records", spec.Name)
-	guard len(eval) > 0 else return nil, nil, nil, nil, 0, fmt.Errorf("%s produced no eval records", spec.Name)
-	guard len(hard) > 0 else return nil, nil, nil, nil, 0, fmt.Errorf("%s produced no hard eval records", spec.Name)
-	fmt.Println(f"{spec.Name}: train={len(train)} train_pairs={len(trainPairs)} eval={len(eval)} hard={len(hard)} corpus_docs={len(ids)}")
-	return train, trainPairs, eval, hard, len(ids), nil
+	guard len(train) > 0 else return nil, nil, nil, nil, nil, 0, fmt.Errorf("%s produced no train records", spec.Name)
+	guard len(trainPairs) > 0 else return nil, nil, nil, nil, nil, 0, fmt.Errorf("%s produced no train pair records", spec.Name)
+	guard len(hardTrain) > 0 else return nil, nil, nil, nil, nil, 0, fmt.Errorf("%s produced no BM25 hard-negative records", spec.Name)
+	guard len(eval) > 0 else return nil, nil, nil, nil, nil, 0, fmt.Errorf("%s produced no eval records", spec.Name)
+	guard len(hard) > 0 else return nil, nil, nil, nil, nil, 0, fmt.Errorf("%s produced no hard eval records", spec.Name)
+	fmt.Println(f"{spec.Name}: train={len(train)} train_pairs={len(trainPairs)} train_bm25_hard={len(hardTrain)} eval={len(eval)} hard={len(hard)} corpus_docs={len(ids)}")
+	return train, trainPairs, hardTrain, eval, hard, len(ids), nil
 }
 
 func writeThresholds(path string) error {
@@ -834,7 +851,9 @@ func writeManifest(cfg acquireConfig, counts outputCounts) error {
   },
   "negative_sampling": {
     "negatives_per_positive": %d,
-    "strategy": "deterministic fnv64 query/doc offset excluding known positive docs for the query"
+    "train_hard_negative_strategy": "BM25 top non-positive corpus documents from train qrels",
+    "bm25_candidate_top_k": %d,
+    "pair_eval_strategy": "deterministic fnv64 query/doc offset excluding known positive docs for the query"
   }
 }
 `,
@@ -855,6 +874,7 @@ func writeManifest(cfg acquireConfig, counts outputCounts) error {
 		counts.HardPairs,
 		counts.CorpusDocs,
 		cfg.Negatives,
+		cfg.BM25CandidateTopK,
 	)
 	return os.WriteFile(cfg.ManifestPath, []byte(body), 0o644)
 }
@@ -896,14 +916,14 @@ func main() {
 	allHard := []evalRecord{}
 	counts := outputCounts{}
 	for _, spec := range cfg.Datasets {
-		train, trainPairs, eval, hard, docs, err := acquireDataset(cfg, spec)
+		train, trainPairs, hardTrain, eval, hard, docs, err := acquireDataset(cfg, spec)
 		guard err == nil else {
 			fmt.Println(f"acquire {spec.Name} failed: {err}")
 			os.Exit(1)
 		}
 		allTrain = append(allTrain, train...)
 		allTrainPairs = append(allTrainPairs, trainPairs...)
-		allHardTrain = append(allHardTrain, textHardNegativeRecords(trainPairs, cfg.Negatives)...)
+		allHardTrain = append(allHardTrain, hardTrain...)
 		allEval = append(allEval, eval...)
 		allHard = append(allHard, hard...)
 		counts.CorpusDocs += docs

@@ -103,6 +103,8 @@ func run(args []string) error {
 		return runEvalRetrieval(args[1:])
 	case "eval-retrieval-bm25":
 		return runEvalRetrievalBM25(args[1:])
+	case "mine-retrieval-hard-negatives":
+		return runMineRetrievalHardNegatives(args[1:])
 	case "demo":
 		return runDemo(args[1:])
 	case "inspect":
@@ -464,6 +466,61 @@ func runEvalRetrievalBM25(args []string) error {
 	if *metricsPath != "" {
 		fmt.Printf("metrics: %s\n", *metricsPath)
 	}
+	return nil
+}
+
+func runMineRetrievalHardNegatives(args []string) error {
+	fs := flag.NewFlagSet("mine-retrieval-hard-negatives", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for status output")
+	split := fs.String("split", "train", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
+	negatives := fs.Int("negatives", 1, "BM25 hard negatives per positive qrel")
+	candidateTopK := fs.Int("candidate-top-k", 100, "BM25 candidate depth to mine negatives from")
+	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
+	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
+		return fmt.Errorf("usage: manta mine-retrieval-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
+	}
+	if *negatives <= 0 {
+		return fmt.Errorf("negatives must be positive")
+	}
+	if *candidateTopK <= 0 {
+		return fmt.Errorf("candidate-top-k must be positive")
+	}
+	datasetDir := fs.Arg(0)
+	outputPath := fs.Arg(1)
+	corpusPath, queriesPath, defaultQrelsPath := mantaruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+	examples, summary, err := mantaruntime.MineBM25TextHardNegatives(context.Background(), mantaruntime.RetrievalHardNegativeMiningConfig{
+		DatasetName:          *datasetName,
+		CorpusPath:           corpusPath,
+		QueriesPath:          queriesPath,
+		QrelsPath:            *qrelsPath,
+		NegativesPerPositive: *negatives,
+		CandidateTopK:        *candidateTopK,
+		MaxDocs:              *maxDocs,
+		MaxQueries:           *maxQueries,
+	})
+	if err != nil {
+		return err
+	}
+	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(outputPath, examples); err != nil {
+		return err
+	}
+	fmt.Printf("mined retrieval hard negatives: dataset=%s examples=%d positives=%d negatives=%d queries=%d\n",
+		summary.DatasetName, summary.Examples, summary.PositivePairs, summary.Negatives, summary.Queries)
+	fmt.Printf("skipped: queries_without_text=%d positives_without_text=%d queries_without_negatives=%d\n",
+		summary.SkippedQueriesNoText, summary.SkippedPositiveDocs, summary.SkippedQueriesNoNegative)
+	fmt.Printf("output: %s\n", outputPath)
 	return nil
 }
 
@@ -2669,6 +2726,7 @@ func printUsage() {
 	fmt.Println("  manta embed-text <artifact.mll> <text...>")
 	fmt.Println("  manta eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
 	fmt.Println("  manta eval-retrieval-bm25 [flags] <beir-dataset-dir>")
+	fmt.Println("  manta mine-retrieval-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  manta init-model [flags] <artifact.mll>")
 	fmt.Println("  manta init-mirage [flags] <artifact.mll>")
 	fmt.Println("  manta init-train [flags] <artifact.mll>")
@@ -2691,6 +2749,7 @@ func printUsage() {
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("eval-retrieval scores a sealed embedding .mll on BEIR-style corpus/query/qrels files with nDCG/MRR/Recall metrics.")
 	fmt.Println("eval-retrieval-bm25 scores the same BEIR files with an in-repo BM25 lexical baseline.")
+	fmt.Println("mine-retrieval-hard-negatives creates text hard-negative training JSONL from BEIR qrels using the BM25 baseline.")
 	fmt.Println("init-model creates the Manta-owned default quantized embedding training package.")
 	fmt.Println("init-mirage creates the Manta-owned Mirage Image v1 host-reference artifact.")
 	fmt.Println("init-train creates a native training package next to an artifact.")

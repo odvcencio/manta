@@ -369,6 +369,44 @@ func TestRunEvalRetrievalBM25WritesMetricsJSON(t *testing.T) {
 	}
 }
 
+func TestRunMineRetrievalHardNegativesWritesTextJSONL(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "corpus.jsonl"), []byte(
+		`{"_id":"d1","text":"alpha target"}`+"\n"+
+			`{"_id":"d2","text":"alpha distractor"}`+"\n"+
+			`{"_id":"d3","text":"omega unrelated"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(`{"_id":"q1","text":"alpha"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "train.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	outputPath := filepath.Join(dir, "hard-negatives.jsonl")
+
+	output := captureRunOutput(t, []string{"mine-retrieval-hard-negatives", "--dataset", "tiny", "--negatives", "1", datasetDir, outputPath})
+	for _, want := range []string{
+		"mined retrieval hard negatives: dataset=tiny examples=1 positives=1 negatives=1 queries=1",
+		"output: " + outputPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("mine-retrieval-hard-negatives output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	if err != nil {
+		t.Fatalf("read hard negatives: %v", err)
+	}
+	if len(examples) != 1 || examples[0].Query != "alpha" || examples[0].Positive != "alpha target" || len(examples[0].Negatives) != 1 || examples[0].Negatives[0] != "alpha distractor" {
+		t.Fatalf("examples = %+v", examples)
+	}
+}
+
 func TestRunCompareRetrievalMetricsCanRequireBaselineWin(t *testing.T) {
 	dir := t.TempDir()
 	currentPath := filepath.Join(dir, "current.retrieval.metrics.json")

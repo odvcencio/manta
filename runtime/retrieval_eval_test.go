@@ -223,3 +223,44 @@ func TestEvaluateBM25RetrievalRanksLexicalMatch(t *testing.T) {
 		t.Fatalf("quality = %+v, want perfect lexical ranking", metrics.Quality)
 	}
 }
+
+func TestMineBM25TextHardNegativesUsesTopLexicalNonPositive(t *testing.T) {
+	dir := t.TempDir()
+	qrelsDir := filepath.Join(dir, "qrels")
+	if err := os.Mkdir(qrelsDir, 0o755); err != nil {
+		t.Fatalf("mkdir qrels: %v", err)
+	}
+	corpusPath := filepath.Join(dir, "corpus.jsonl")
+	queriesPath := filepath.Join(dir, "queries.jsonl")
+	qrelsPath := filepath.Join(qrelsDir, "train.tsv")
+	if err := os.WriteFile(corpusPath, []byte(
+		`{"_id":"d1","text":"alpha target"}`+"\n"+
+			`{"_id":"d2","text":"alpha distractor"}`+"\n"+
+			`{"_id":"d3","text":"omega unrelated"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(queriesPath, []byte(`{"_id":"q1","text":"alpha"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+
+	examples, summary, err := MineBM25TextHardNegatives(context.Background(), RetrievalHardNegativeMiningConfig{
+		DatasetName:          "tiny",
+		CorpusPath:           corpusPath,
+		QueriesPath:          queriesPath,
+		QrelsPath:            qrelsPath,
+		NegativesPerPositive: 1,
+		CandidateTopK:        2,
+	})
+	if err != nil {
+		t.Fatalf("mine hard negatives: %v", err)
+	}
+	if summary.DatasetName != "tiny" || summary.Examples != 1 || summary.PositivePairs != 1 || summary.Negatives != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if len(examples) != 1 || examples[0].Query != "alpha" || examples[0].Positive != "alpha target" || len(examples[0].Negatives) != 1 || examples[0].Negatives[0] != "alpha distractor" {
+		t.Fatalf("examples = %+v", examples)
+	}
+}
