@@ -66,7 +66,7 @@ Optional:
   MANTA_DATASET_ROOT=$PWD/datasets/manta-embed-v1
   MANTA_EVAL_DATASETS=scifact,nfcorpus,fiqa
   MANTA_EVAL_SPLIT=test
-  MANTA_EVAL_BATCH_SIZE=64
+  MANTA_EVAL_BATCH_SIZE=512
   MANTA_EVAL_TOP_K=100
   MANTA_EVAL_MAX_DOCS=0
   MANTA_EVAL_MAX_QUERIES=0
@@ -201,7 +201,7 @@ func prepareConfig(root string) (evalConfig, error) {
 		DatasetRoot: datasetRoot,
 		Datasets:    datasets,
 		Split:       getenv("MANTA_EVAL_SPLIT", "test"),
-		BatchSize:   getenv("MANTA_EVAL_BATCH_SIZE", "64"),
+		BatchSize:   getenv("MANTA_EVAL_BATCH_SIZE", "512"),
 		TopK:        getenv("MANTA_EVAL_TOP_K", "100"),
 		MaxDocs:     getenv("MANTA_EVAL_MAX_DOCS", "0"),
 		MaxQueries:  getenv("MANTA_EVAL_MAX_QUERIES", "0"),

@@ -9,9 +9,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -86,6 +88,12 @@ type RetrievalEvalSkippedCounts struct {
 type retrievalTextRecord struct {
 	ID   string
 	Text string
+}
+
+type tokenizedRetrievalTextRecord struct {
+	Index  int
+	ID     string
+	Tokens []int32
 }
 
 type retrievalVectorRecord struct {
@@ -324,29 +332,153 @@ func readBEIRQrels(path string) (retrievalQrels, error) {
 }
 
 func embedRetrievalTexts(ctx context.Context, model *EmbeddingModel, records []retrievalTextRecord, batchSize int) ([]retrievalVectorRecord, error) {
-	out := make([]retrievalVectorRecord, 0, len(records))
-	for start := 0; start < len(records); start += batchSize {
-		end := start + batchSize
-		if end > len(records) {
-			end = len(records)
+	if batchSize <= 0 {
+		batchSize = 64
+	}
+	tokenized, lengths, err := tokenizeRetrievalTexts(ctx, model, records)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]retrievalVectorRecord, len(records))
+	for _, length := range lengths {
+		group := tokenized[length]
+		for start := 0; start < len(group); start += batchSize {
+			end := start + batchSize
+			if end > len(group) {
+				end = len(group)
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			chunk := group[start:end]
+			batches := make([][]int32, len(chunk))
+			for i, record := range chunk {
+				batches[i] = record.Tokens
+			}
+			result, err := model.EmbedBatch(ctx, batches)
+			if err != nil {
+				return nil, err
+			}
+			rows, err := embeddingRows(result.Embeddings, len(chunk))
+			if err != nil {
+				return nil, err
+			}
+			for i, row := range rows {
+				record := chunk[i]
+				out[record.Index] = retrievalVectorRecord{
+					ID:     record.ID,
+					Vector: normalizeRetrievalVector(row),
+				}
+			}
 		}
-		texts := make([]string, end-start)
-		for i := range texts {
-			texts[i] = records[start+i].Text
+	}
+	return out, nil
+}
+
+func tokenizeRetrievalTexts(ctx context.Context, model *EmbeddingModel, records []retrievalTextRecord) (map[int][]tokenizedRetrievalTextRecord, []int, error) {
+	tokenized, err := tokenizeRetrievalTextRecords(ctx, model, records)
+	if err != nil {
+		return nil, nil, err
+	}
+	groups := make(map[int][]tokenizedRetrievalTextRecord)
+	lengths := []int{}
+	for _, record := range tokenized {
+		length := len(record.Tokens)
+		if len(groups[length]) == 0 {
+			lengths = append(lengths, length)
 		}
-		result, err := model.EmbedTextBatch(ctx, texts)
-		if err != nil {
+		groups[length] = append(groups[length], record)
+	}
+	slices.Sort(lengths)
+	return groups, lengths, nil
+}
+
+func tokenizeRetrievalTextRecords(ctx context.Context, model *EmbeddingModel, records []retrievalTextRecord) ([]tokenizedRetrievalTextRecord, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	workers := min(runtime.GOMAXPROCS(0), len(records))
+	if workers <= 1 || len(records) < 128 {
+		return tokenizeRetrievalTextRecordsSerial(ctx, model, records)
+	}
+	out := make([]tokenizedRetrievalTextRecord, len(records))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var firstErr error
+	setErr := func(err error) {
+		if err == nil {
+			return
+		}
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		errMu.Unlock()
+	}
+	hasErr := func() bool {
+		errMu.Lock()
+		ok := firstErr != nil
+		errMu.Unlock()
+		return ok
+	}
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				if err := ctx.Err(); err != nil {
+					setErr(err)
+					continue
+				}
+				tokens, _, err := model.TokenizeText(records[i].Text)
+				if err != nil {
+					setErr(fmt.Errorf("text %d: %w", i, err))
+					continue
+				}
+				out[i] = tokenizedRetrievalTextRecord{
+					Index:  i,
+					ID:     records[i].ID,
+					Tokens: tokens,
+				}
+			}
+		}()
+	}
+	for i := range records {
+		if err := ctx.Err(); err != nil {
+			setErr(err)
+			break
+		}
+		if hasErr() {
+			break
+		}
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	errMu.Lock()
+	err := firstErr
+	errMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func tokenizeRetrievalTextRecordsSerial(ctx context.Context, model *EmbeddingModel, records []retrievalTextRecord) ([]tokenizedRetrievalTextRecord, error) {
+	out := make([]tokenizedRetrievalTextRecord, len(records))
+	for i, record := range records {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		rows, err := embeddingRows(result.Embeddings, len(texts))
+		tokens, _, err := model.TokenizeText(record.Text)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("text %d: %w", i, err)
 		}
-		for i, row := range rows {
-			out = append(out, retrievalVectorRecord{
-				ID:     records[start+i].ID,
-				Vector: normalizeRetrievalVector(row),
-			})
+		out[i] = tokenizedRetrievalTextRecord{
+			Index:  i,
+			ID:     record.ID,
+			Tokens: tokens,
 		}
 	}
 	return out, nil

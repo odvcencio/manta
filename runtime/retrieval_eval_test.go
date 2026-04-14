@@ -1,10 +1,16 @@
 package mantaruntime
 
 import (
+	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/odvcencio/manta/compiler"
+	"github.com/odvcencio/manta/runtime/backends/cuda"
+	"github.com/odvcencio/manta/runtime/backends/metal"
 )
 
 func TestComputeRetrievalQualityPerfectRanking(t *testing.T) {
@@ -61,6 +67,53 @@ func TestComputeRetrievalQualityUsesBoundedTopK(t *testing.T) {
 	}
 	if quality.RecallAt100 != 0.75 {
 		t.Fatalf("recall@100 = %v, want 0.75", quality.RecallAt100)
+	}
+}
+
+func TestEmbedRetrievalTextsGroupsByTokenLengthAndPreservesOrder(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed_masked_pooled", Preset: compiler.PresetTinyEmbedMaskedPooled})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	rt := New(cuda.New(), metal.New())
+	model, err := rt.LoadEmbedding(context.Background(), bundle.Artifact, tinyMaskedEmbeddingManifest(), tinyEmbedWeights()...)
+	if err != nil {
+		t.Fatalf("load embedding: %v", err)
+	}
+	if err := model.attachTokenizer(tinyEmbeddingTokenizerFile()); err != nil {
+		t.Fatalf("attach tokenizer: %v", err)
+	}
+	records := []retrievalTextRecord{
+		{ID: "long-1", Text: "aa"},
+		{ID: "short", Text: "a"},
+		{ID: "long-2", Text: "aa"},
+	}
+
+	got, err := embedRetrievalTexts(context.Background(), model, records, 2)
+	if err != nil {
+		t.Fatalf("embed retrieval texts: %v", err)
+	}
+	if len(got) != len(records) {
+		t.Fatalf("embedded rows = %d, want %d", len(got), len(records))
+	}
+	for i, record := range records {
+		if got[i].ID != record.ID {
+			t.Fatalf("row %d id = %q, want %q", i, got[i].ID, record.ID)
+		}
+		want, err := model.EmbedText(context.Background(), record.Text)
+		if err != nil {
+			t.Fatalf("embed text %q: %v", record.Text, err)
+		}
+		wantRows, err := embeddingRows(want.Embeddings, 1)
+		if err != nil {
+			t.Fatalf("embedding rows: %v", err)
+		}
+		wantVector := normalizeRetrievalVector(wantRows[0])
+		for j, wantValue := range wantVector {
+			if diff := math.Abs(float64(got[i].Vector[j] - wantValue)); diff > 1e-5 {
+				t.Fatalf("row %d vector[%d] = %v, want %v", i, j, got[i].Vector[j], wantValue)
+			}
+		}
 	}
 }
 
