@@ -37,7 +37,11 @@ type MirageV1ReferenceTrainConfig struct {
 // MirageV1ReferenceTrainHistory records loss movement through a reference run.
 type MirageV1ReferenceTrainHistory struct {
 	InitialLoss   float32
+	InitialMSE    float32
+	InitialRate   float32
 	FinalLoss     float32
+	FinalMSE      float32
+	FinalRate     float32
 	Losses        []float32
 	MSEs          []float32
 	Rates         []float32
@@ -137,6 +141,8 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 	}
 	history := MirageV1ReferenceTrainHistory{
 		InitialLoss:   initial.Loss,
+		InitialMSE:    initial.MSE,
+		InitialRate:   initial.Rate,
 		Losses:        make([]float32, 0, cfg.Steps+1),
 		MSEs:          make([]float32, 0, cfg.Steps+1),
 		Rates:         make([]float32, 0, cfg.Steps+1),
@@ -206,6 +212,8 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 		return MirageV1ReferenceTrainHistory{}, err
 	}
 	history.FinalLoss = final.Loss
+	history.FinalMSE = final.MSE
+	history.FinalRate = final.Rate
 	history.Losses = append(history.Losses, final.Loss)
 	history.MSEs = append(history.MSEs, final.MSE)
 	history.Rates = append(history.Rates, final.Rate)
