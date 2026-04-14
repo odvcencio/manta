@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/odvcencio/manta/runtime/backend"
 )
 
 const RetrievalEvalMetricsSchema = "manta.embedding_retrieval_metrics.v1"
@@ -359,7 +361,7 @@ func embedRetrievalTexts(ctx context.Context, model *EmbeddingModel, records []r
 			if err != nil {
 				return nil, err
 			}
-			rows, err := embeddingRows(result.Embeddings, len(chunk))
+			rows, err := embeddingRowViews(result.Embeddings, len(chunk))
 			if err != nil {
 				return nil, err
 			}
@@ -373,6 +375,37 @@ func embedRetrievalTexts(ctx context.Context, model *EmbeddingModel, records []r
 		}
 	}
 	return out, nil
+}
+
+func embeddingRowViews(t *backend.Tensor, wantRows int) ([][]float32, error) {
+	if t == nil {
+		return nil, fmt.Errorf("embedding tensor is nil")
+	}
+	if len(t.F32) == 0 {
+		return nil, fmt.Errorf("embedding tensor has no float data")
+	}
+	switch len(t.Shape) {
+	case 1:
+		if wantRows != 1 {
+			return nil, fmt.Errorf("embedding tensor shape %v cannot provide %d rows", t.Shape, wantRows)
+		}
+		return [][]float32{t.F32}, nil
+	case 2:
+		rows, cols := t.Shape[0], t.Shape[1]
+		if rows != wantRows {
+			return nil, fmt.Errorf("embedding tensor rows = %d, want %d", rows, wantRows)
+		}
+		if len(t.F32) < rows*cols {
+			return nil, fmt.Errorf("embedding tensor has %d values, want at least %d", len(t.F32), rows*cols)
+		}
+		out := make([][]float32, rows)
+		for i := 0; i < rows; i++ {
+			out[i] = t.F32[i*cols : (i+1)*cols]
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("embedding tensor shape %v is not rank 1 or 2", t.Shape)
+	}
 }
 
 func tokenizeRetrievalTexts(ctx context.Context, model *EmbeddingModel, records []retrievalTextRecord) (map[int][]tokenizedRetrievalTextRecord, []int, error) {

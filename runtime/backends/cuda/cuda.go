@@ -12,9 +12,10 @@ import (
 )
 
 type cachedLoad struct {
-	compiled map[string]backend.CompiledKernel
-	native   map[string]backend.NativeKernelProgram
-	device   *deviceRuntime
+	compiled             map[string]backend.CompiledKernel
+	native               map[string]backend.NativeKernelProgram
+	device               *deviceRuntime
+	residentMatMulParams map[string]bool
 }
 
 // Backend is the CUDA backend stub.
@@ -66,7 +67,7 @@ func (b *Backend) LoadWithCacheKey(ctx context.Context, mod *mantaartifact.Modul
 func (b *Backend) load(_ context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	if cacheKey != "" {
 		if cached, ok := b.cachedLoad(cacheKey); ok {
-			return &executor{module: mod, weights: weights, compiled: cached.compiled, native: cached.native, device: cached.device}, nil
+			return &executor{module: mod, weights: weights, compiled: cached.compiled, native: cached.native, device: cached.device, residentMatMulParams: cloneBoolMap(cached.residentMatMulParams)}, nil
 		}
 	}
 	compiled, err := backend.CompileVariants(mod, mantaartifact.BackendCUDA)
@@ -94,10 +95,17 @@ func (b *Backend) load(_ context.Context, mod *mantaartifact.Module, weights map
 		}
 		native[kernel.Name] = prog
 	}
-	if cacheKey != "" {
-		b.storeCachedLoad(cacheKey, cachedLoad{compiled: compiled, native: native, device: device})
+	residentMatMulParams, err := bindResidentMatMulParams(mod, weights, device)
+	if err != nil {
+		if device != nil {
+			device.close()
+		}
+		return nil, err
 	}
-	return &executor{module: mod, weights: weights, compiled: compiled, native: native, device: device}, nil
+	if cacheKey != "" {
+		b.storeCachedLoad(cacheKey, cachedLoad{compiled: compiled, native: native, device: device, residentMatMulParams: cloneBoolMap(residentMatMulParams)})
+	}
+	return &executor{module: mod, weights: weights, compiled: compiled, native: native, device: device, residentMatMulParams: residentMatMulParams}, nil
 }
 
 func (b *Backend) cachedLoad(cacheKey string) (cachedLoad, bool) {
@@ -118,12 +126,93 @@ func (b *Backend) storeCachedLoad(cacheKey string, cached cachedLoad) {
 	b.loadCache[cacheKey] = cached
 }
 
+func bindResidentMatMulParams(mod *mantaartifact.Module, weights map[string]backend.WeightBinding, device *deviceRuntime) (map[string]bool, error) {
+	if mod == nil || device == nil {
+		return nil, nil
+	}
+	candidates := matMulParamInputs(mod)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	params := make(map[string]mantaartifact.Param, len(mod.Params))
+	for _, param := range mod.Params {
+		params[param.Name] = param
+	}
+	bindings := map[string]int{}
+	resident := make(map[string]bool, len(candidates))
+	for name := range candidates {
+		param, ok := params[name]
+		if !ok {
+			continue
+		}
+		weight, ok := weights[name]
+		if !ok || !deviceResidentWeight(weight) {
+			continue
+		}
+		value, _, err := backend.PreviewValueWithBindings(param.Type, weight.Data, bindings)
+		if err != nil {
+			return nil, fmt.Errorf("bind resident matmul param %q: %w", name, err)
+		}
+		tensor, ok := value.(*backend.Tensor)
+		if !ok || tensor == nil || len(tensor.Shape) != 2 || !autoResidentMatMulDType(tensor.DType) {
+			continue
+		}
+		if err := device.bindMatMulRight(name, tensor); err != nil {
+			return nil, fmt.Errorf("bind resident matmul param %q: %w", name, err)
+		}
+		resident[name] = true
+	}
+	if len(resident) == 0 {
+		return nil, nil
+	}
+	return resident, nil
+}
+
+func matMulParamInputs(mod *mantaartifact.Module) map[string]bool {
+	params := make(map[string]bool, len(mod.Params))
+	for _, param := range mod.Params {
+		params[param.Name] = true
+	}
+	out := map[string]bool{}
+	for _, step := range mod.Steps {
+		if step.Kind != mantaartifact.StepMatMul {
+			continue
+		}
+		for _, input := range step.Inputs {
+			if params[input] {
+				out[input] = true
+			}
+		}
+	}
+	return out
+}
+
+func deviceResidentWeight(weight backend.WeightBinding) bool {
+	return weight.Residency == "" || weight.Residency == "device_resident"
+}
+
+func autoResidentMatMulDType(dtype string) bool {
+	return dtype == "f32" || dtype == "f16"
+}
+
+func cloneBoolMap(in map[string]bool) map[string]bool {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 type executor struct {
-	module   *mantaartifact.Module
-	weights  map[string]backend.WeightBinding
-	compiled map[string]backend.CompiledKernel
-	native   map[string]backend.NativeKernelProgram
-	device   *deviceRuntime
+	module               *mantaartifact.Module
+	weights              map[string]backend.WeightBinding
+	compiled             map[string]backend.CompiledKernel
+	native               map[string]backend.NativeKernelProgram
+	device               *deviceRuntime
+	residentMatMulParams map[string]bool
 }
 
 func (e *executor) Backend() mantaartifact.BackendKind {
@@ -131,7 +220,24 @@ func (e *executor) Backend() mantaartifact.BackendKind {
 }
 
 func (e *executor) Run(ctx context.Context, req backend.Request) (backend.Result, error) {
-	return backend.ExecuteSymbolic(ctx, e.module, e.weights, e.compiled, e.dispatchKernel, e.dispatchStep, mantaartifact.BackendCUDA, req)
+	var before backend.MatMulAcceleratorStats
+	if e.device != nil {
+		before = e.device.matMulStatsSnapshot()
+	}
+	result, err := backend.ExecuteSymbolic(ctx, e.module, e.weights, e.compiled, e.dispatchKernel, e.dispatchStep, mantaartifact.BackendCUDA, req)
+	if err != nil {
+		return backend.Result{}, err
+	}
+	if e.device != nil {
+		stats := e.device.matMulStatsSnapshot()
+		if result.Metadata == nil {
+			result.Metadata = map[string]string{}
+		}
+		result.Metadata["cuda_matmul_bound_matrices"] = strconv.FormatInt(stats.BoundMatrices, 10)
+		result.Metadata["cuda_matmul_bound_right_runs"] = strconv.FormatInt(stats.BoundRightCalls-before.BoundRightCalls, 10)
+		result.Metadata["cuda_matmul_run_uploaded_bytes"] = strconv.FormatInt(stats.RunUploadedBytes-before.RunUploadedBytes, 10)
+	}
+	return result, nil
 }
 
 func (e *executor) dispatchKernel(_ context.Context, kernel mantaartifact.Kernel, inputs []*backend.Tensor) (backend.KernelDispatchResult, error) {
@@ -169,6 +275,22 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 		}
 		if !supportsBuiltinMatMul(inputs) {
 			return backend.StepDispatchResult{}, false, nil
+		}
+		if len(step.Inputs) == 2 {
+			if e.residentMatMulParams[step.Inputs[1]] {
+				result, err := e.device.runMatMulWithBoundRight(inputs[0], step.Inputs[1], outputType, false, false)
+				if err != nil {
+					return backend.StepDispatchResult{}, false, err
+				}
+				return result, true, nil
+			}
+			if e.residentMatMulParams[step.Inputs[0]] {
+				result, err := e.device.runMatMulWithBoundLeft(step.Inputs[0], inputs[1], outputType, false, false)
+				if err != nil {
+					return backend.StepDispatchResult{}, false, err
+				}
+				return result, true, nil
+			}
 		}
 		result, err := e.device.runMatMul(inputs, outputType)
 		if err != nil {

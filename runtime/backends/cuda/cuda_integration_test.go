@@ -61,6 +61,54 @@ func TestCUDADeviceExecutionTinyEmbed(t *testing.T) {
 	})
 }
 
+func TestCUDADeviceExecutionUsesResidentMatMulParam(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed", Preset: compiler.PresetTinyEmbed})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	rt := mantaruntime.New(New())
+	prog, err := rt.Load(
+		context.Background(),
+		bundle.Artifact,
+		mantaruntime.WithWeight("token_embedding", backend.NewTensorF16([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			1, 1,
+		})),
+		mantaruntime.WithWeight("projection", backend.NewTensorF16([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		})),
+	)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	result, err := prog.Run(context.Background(), backend.Request{
+		Entry:  "embed",
+		Inputs: map[string]any{"tokens": backend.NewTensorI32([]int{2}, []int32{0, 2})},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.Metadata["cuda_matmul_bound_matrices"] != "1" {
+		t.Fatalf("bound matrices = %q, want 1", result.Metadata["cuda_matmul_bound_matrices"])
+	}
+	if result.Metadata["cuda_matmul_bound_right_runs"] != "1" {
+		t.Fatalf("bound right runs = %q, want 1", result.Metadata["cuda_matmul_bound_right_runs"])
+	}
+
+	tensor, ok := result.Outputs["embeddings"].Data.(*backend.Tensor)
+	if !ok {
+		t.Fatalf("output type = %T, want *backend.Tensor", result.Outputs["embeddings"].Data)
+	}
+	assertTensorClose(t, tensor, []int{2, 2}, []float32{
+		1, 0,
+		0.70710677, 0.70710677,
+	})
+}
+
 func TestCUDADeviceExecutionTinyScore(t *testing.T) {
 	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_score", Preset: compiler.PresetTinyScore})
 	if err != nil {
