@@ -365,9 +365,23 @@ func Conv2DGradWithAccelerator(input, weight, bias *GradTensor, attrs map[string
 	if input == nil || weight == nil {
 		return nil, fmt.Errorf("conv2d autograd expects input and weight")
 	}
-	out, err := conv2DTensor(input.Value, weight.Value, valueOrNil(bias), attrs)
-	if err != nil {
-		return nil, err
+	var out *Tensor
+	var err error
+	if imageGrad != nil {
+		var ok bool
+		out, ok, err = imageGrad.RunConv2D(input.Value, weight.Value, valueOrNil(bias), attrs)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			out = nil
+		}
+	}
+	if out == nil {
+		out, err = conv2DTensor(input.Value, weight.Value, valueOrNil(bias), attrs)
+		if err != nil {
+			return nil, err
+		}
 	}
 	parents := compactParents(input, weight, bias)
 	node := gradOpTensor("conv2d", out, parents, func(self *GradTensor) error {
@@ -413,9 +427,23 @@ func Conv2DTransposeGradWithAccelerator(input, weight, bias *GradTensor, attrs m
 	if input == nil || weight == nil {
 		return nil, fmt.Errorf("conv2d_transpose autograd expects input and weight")
 	}
-	out, err := conv2DTransposeTensor(input.Value, weight.Value, valueOrNil(bias), attrs)
-	if err != nil {
-		return nil, err
+	var out *Tensor
+	var err error
+	if imageGrad != nil {
+		var ok bool
+		out, ok, err = imageGrad.RunConv2DTranspose(input.Value, weight.Value, valueOrNil(bias), attrs)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			out = nil
+		}
+	}
+	if out == nil {
+		out, err = conv2DTransposeTensor(input.Value, weight.Value, valueOrNil(bias), attrs)
+		if err != nil {
+			return nil, err
+		}
 	}
 	parents := compactParents(input, weight, bias)
 	node := gradOpTensor("conv2d_transpose", out, parents, func(self *GradTensor) error {
@@ -461,9 +489,23 @@ func GDNGradWithAccelerator(input, beta, gamma *GradTensor, inverse bool, imageG
 	if input == nil {
 		return nil, fmt.Errorf("gdn autograd expects input")
 	}
-	out, err := gdnTensor(input.Value, valueOrNil(beta), valueOrNil(gamma), inverse)
-	if err != nil {
-		return nil, err
+	var out *Tensor
+	var err error
+	if imageGrad != nil && beta != nil && gamma != nil {
+		var ok bool
+		out, ok, err = imageGrad.RunGDN(input.Value, beta.Value, gamma.Value, inverse)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			out = nil
+		}
+	}
+	if out == nil {
+		out, err = gdnTensor(input.Value, valueOrNil(beta), valueOrNil(gamma), inverse)
+		if err != nil {
+			return nil, err
+		}
 	}
 	name := "gdn"
 	if inverse {

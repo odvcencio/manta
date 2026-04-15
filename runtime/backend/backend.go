@@ -154,8 +154,11 @@ type ContrastiveGradResult struct {
 // primitives used by reference autograd.
 type ImageGradAccelerator interface {
 	Backend() mantaartifact.BackendKind
+	RunConv2D(input, weight, bias *Tensor, attrs map[string]string) (*Tensor, bool, error)
 	RunConv2DBackward(input, weight, bias, gradOut *Tensor, attrs map[string]string) (*Tensor, *Tensor, *Tensor, bool, error)
+	RunConv2DTranspose(input, weight, bias *Tensor, attrs map[string]string) (*Tensor, bool, error)
 	RunConv2DTransposeBackward(input, weight, bias, gradOut *Tensor, attrs map[string]string) (*Tensor, *Tensor, *Tensor, bool, error)
+	RunGDN(input, beta, gamma *Tensor, inverse bool) (*Tensor, bool, error)
 	RunGDNBackward(input, beta, gamma, gradOut *Tensor, inverse bool) (*Tensor, *Tensor, *Tensor, bool, error)
 	Close()
 }
