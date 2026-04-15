@@ -29,6 +29,7 @@ type candidateConfig struct {
 	EvalJSONL           string
 	HardEvalJSONL       string
 	TokenizerPath       string
+	PackageTokenizerPath string
 	TokenizerCorpus     string
 	NoTokenizer         bool
 	ThresholdsEnv       string
@@ -100,6 +101,7 @@ Common knobs:
   MANTA_RESTORE_BEST=false
   MANTA_PRETOKENIZE_JSONL=0
   MANTA_NO_TOKENIZER=1
+  MANTA_PACKAGE_TOKENIZER=/path/to/tokenizer.mll
   MANTA_PAIRWISE_TRAIN=1
   MANTA_HARD_NEGATIVE_TRAIN=1
   MANTA_HARD_NEGATIVES_PER_QUERY=1
@@ -469,6 +471,7 @@ func writeManifest(cfg candidateConfig, status string) error {
     "eval_jsonl": %s,
     "hard_eval_jsonl": %s,
     "tokenizer": %s,
+    "package_tokenizer": %s,
     "tokenizer_corpus": %s,
     "thresholds_env": %s
   },
@@ -517,6 +520,7 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonString(cfg.EvalJSONL),
 		jsonString(cfg.HardEvalJSONL),
 		jsonString(cfg.TokenizerPath),
+		jsonString(cfg.PackageTokenizerPath),
 		jsonString(cfg.TokenizerCorpus),
 		jsonString(cfg.ThresholdsEnv),
 		jsonString(cfg.Artifact),
@@ -644,6 +648,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 	cfg.EvalJSONL = os.Getenv("MANTA_EVAL_JSONL")
 	cfg.HardEvalJSONL = os.Getenv("MANTA_HARD_EVAL_JSONL")
 	cfg.TokenizerPath = os.Getenv("MANTA_TOKENIZER")
+	cfg.PackageTokenizerPath = os.Getenv("MANTA_PACKAGE_TOKENIZER")
 	cfg.TokenizerCorpus = os.Getenv("MANTA_TOKENIZER_CORPUS")
 	cfg.ThresholdsEnv = thresholdsEnv
 	guard !(pairwiseTrainEnabled(cfg) && hardNegativeTrainEnabled(cfg)) else return candidateConfig{}, fmt.Errorf("choose MANTA_PAIRWISE_TRAIN or MANTA_HARD_NEGATIVE_TRAIN, not both")
@@ -694,6 +699,14 @@ func prepareConfig(root string) (candidateConfig, error) {
 		err = rejectTmpPath("tokenizer", cfg.TokenizerPath)
 		guard err == nil else return candidateConfig{}, err
 		err = appendSHA256(cfg.DatasetSHAFile, cfg.TokenizerPath)
+		guard err == nil else return candidateConfig{}, err
+	}
+	if cfg.PackageTokenizerPath != "" {
+		cfg.PackageTokenizerPath, err = requireFile(cfg.PackageTokenizerPath, "MANTA_PACKAGE_TOKENIZER")
+		guard err == nil else return candidateConfig{}, err
+		err = rejectTmpPath("package tokenizer", cfg.PackageTokenizerPath)
+		guard err == nil else return candidateConfig{}, err
+		err = appendSHA256(cfg.DatasetSHAFile, cfg.PackageTokenizerPath)
 		guard err == nil else return candidateConfig{}, err
 	}
 	if cfg.TokenizerCorpus != "" {
@@ -964,6 +977,11 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 
 	if hasQualityGateThresholds() {
 		err = runMetricsGate(cfg, "Candidate quality metrics gate", "quality-gate.log", "quality", gateMetrics)
+		guard err == nil else return cfg, err
+	}
+
+	if cfg.PackageTokenizerPath != "" {
+		err = copyFile(cfg.PackageTokenizerPath, filepath.Join(cfg.RunDir, cfg.ModelName+".tokenizer.mll"))
 		guard err == nil else return cfg, err
 	}
 
