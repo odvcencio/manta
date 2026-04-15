@@ -69,11 +69,12 @@ func BackwardWithGradient(output *GradTensor, grad *Tensor) error {
 
 // GradRequest describes one reference-autograd execution of a Manta entrypoint.
 type GradRequest struct {
-	Entry           string
-	Inputs          map[string]*Tensor
-	Weights         map[string]*Tensor
-	Loss            string
-	TrainableInputs map[string]bool
+	Entry                string
+	Inputs               map[string]*Tensor
+	Weights              map[string]*Tensor
+	Loss                 string
+	TrainableInputs      map[string]bool
+	ImageGradAccelerator ImageGradAccelerator
 }
 
 // GradResult contains forward outputs and accumulated gradients for trainable
@@ -127,7 +128,7 @@ func ExecuteAutograd(mod *mantaartifact.Module, req GradRequest) (GradResult, er
 		Trace:          make([]TraceStep, 0, len(stepsForEntry(mod, entry.Name))),
 	}
 	for _, step := range stepsForEntry(mod, entry.Name) {
-		values, err := executeAutogradStep(step, env)
+		values, err := executeAutogradStep(step, env, req.ImageGradAccelerator)
 		if err != nil {
 			return GradResult{}, fmt.Errorf("entrypoint %q step %q: %w", entry.Name, step.Name, err)
 		}
@@ -191,7 +192,7 @@ func ExecuteAutograd(mod *mantaartifact.Module, req GradRequest) (GradResult, er
 	return result, nil
 }
 
-func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([]*GradTensor, error) {
+func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor, imageGrad ImageGradAccelerator) ([]*GradTensor, error) {
 	switch step.Kind {
 	case mantaartifact.StepReturn:
 		return nil, nil
@@ -212,7 +213,7 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 		if err != nil {
 			return nil, err
 		}
-		out, err := Conv2DGrad(input, weight, bias, step.Attributes)
+		out, err := Conv2DGradWithAccelerator(input, weight, bias, step.Attributes, imageGrad)
 		if err != nil {
 			return nil, err
 		}
@@ -225,7 +226,7 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 		if err != nil {
 			return nil, err
 		}
-		out, err := Conv2DTransposeGrad(input, weight, bias, step.Attributes)
+		out, err := Conv2DTransposeGradWithAccelerator(input, weight, bias, step.Attributes, imageGrad)
 		if err != nil {
 			return nil, err
 		}
@@ -242,7 +243,7 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 		if err != nil {
 			return nil, err
 		}
-		out, err := GDNGrad(input, beta, gamma, step.Kind == mantaartifact.StepIGDN)
+		out, err := GDNGradWithAccelerator(input, beta, gamma, step.Kind == mantaartifact.StepIGDN, imageGrad)
 		if err != nil {
 			return nil, err
 		}
@@ -355,6 +356,12 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 
 // Conv2DGrad applies conv2d and records gradients for input, weight, and bias.
 func Conv2DGrad(input, weight, bias *GradTensor, attrs map[string]string) (*GradTensor, error) {
+	return Conv2DGradWithAccelerator(input, weight, bias, attrs, nil)
+}
+
+// Conv2DGradWithAccelerator applies conv2d and optionally dispatches its
+// backward pass through a backend-owned accelerator.
+func Conv2DGradWithAccelerator(input, weight, bias *GradTensor, attrs map[string]string, imageGrad ImageGradAccelerator) (*GradTensor, error) {
 	if input == nil || weight == nil {
 		return nil, fmt.Errorf("conv2d autograd expects input and weight")
 	}
@@ -364,9 +371,22 @@ func Conv2DGrad(input, weight, bias *GradTensor, attrs map[string]string) (*Grad
 	}
 	parents := compactParents(input, weight, bias)
 	node := gradOpTensor("conv2d", out, parents, func(self *GradTensor) error {
-		gradIn, gradW, gradB, err := conv2DBackwardTensors(input.Value, weight.Value, valueOrNil(bias), self.Grad, attrs)
-		if err != nil {
-			return err
+		var gradIn, gradW, gradB *Tensor
+		if imageGrad != nil {
+			var ok bool
+			gradIn, gradW, gradB, ok, err = imageGrad.RunConv2DBackward(input.Value, weight.Value, valueOrNil(bias), self.Grad, attrs)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				gradIn, gradW, gradB = nil, nil, nil
+			}
+		}
+		if gradIn == nil || gradW == nil {
+			gradIn, gradW, gradB, err = conv2DBackwardTensors(input.Value, weight.Value, valueOrNil(bias), self.Grad, attrs)
+			if err != nil {
+				return err
+			}
 		}
 		if err := accumulateGrad(input, gradIn); err != nil {
 			return err
@@ -384,6 +404,12 @@ func Conv2DGrad(input, weight, bias *GradTensor, attrs map[string]string) (*Grad
 
 // Conv2DTransposeGrad applies conv2d_transpose and records gradients.
 func Conv2DTransposeGrad(input, weight, bias *GradTensor, attrs map[string]string) (*GradTensor, error) {
+	return Conv2DTransposeGradWithAccelerator(input, weight, bias, attrs, nil)
+}
+
+// Conv2DTransposeGradWithAccelerator applies conv2d_transpose and optionally
+// dispatches its backward pass through a backend-owned accelerator.
+func Conv2DTransposeGradWithAccelerator(input, weight, bias *GradTensor, attrs map[string]string, imageGrad ImageGradAccelerator) (*GradTensor, error) {
 	if input == nil || weight == nil {
 		return nil, fmt.Errorf("conv2d_transpose autograd expects input and weight")
 	}
@@ -393,9 +419,22 @@ func Conv2DTransposeGrad(input, weight, bias *GradTensor, attrs map[string]strin
 	}
 	parents := compactParents(input, weight, bias)
 	node := gradOpTensor("conv2d_transpose", out, parents, func(self *GradTensor) error {
-		gradIn, gradW, gradB, err := conv2DTransposeBackwardTensors(input.Value, weight.Value, valueOrNil(bias), self.Grad, attrs)
-		if err != nil {
-			return err
+		var gradIn, gradW, gradB *Tensor
+		if imageGrad != nil {
+			var ok bool
+			gradIn, gradW, gradB, ok, err = imageGrad.RunConv2DTransposeBackward(input.Value, weight.Value, valueOrNil(bias), self.Grad, attrs)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				gradIn, gradW, gradB = nil, nil, nil
+			}
+		}
+		if gradIn == nil || gradW == nil {
+			gradIn, gradW, gradB, err = conv2DTransposeBackwardTensors(input.Value, weight.Value, valueOrNil(bias), self.Grad, attrs)
+			if err != nil {
+				return err
+			}
 		}
 		if err := accumulateGrad(input, gradIn); err != nil {
 			return err
@@ -413,6 +452,12 @@ func Conv2DTransposeGrad(input, weight, bias *GradTensor, attrs map[string]strin
 
 // GDNGrad applies GDN or IGDN and records gradients for input, beta, and gamma.
 func GDNGrad(input, beta, gamma *GradTensor, inverse bool) (*GradTensor, error) {
+	return GDNGradWithAccelerator(input, beta, gamma, inverse, nil)
+}
+
+// GDNGradWithAccelerator applies GDN/IGDN and optionally dispatches its
+// backward pass through a backend-owned accelerator.
+func GDNGradWithAccelerator(input, beta, gamma *GradTensor, inverse bool, imageGrad ImageGradAccelerator) (*GradTensor, error) {
 	if input == nil {
 		return nil, fmt.Errorf("gdn autograd expects input")
 	}
@@ -426,9 +471,22 @@ func GDNGrad(input, beta, gamma *GradTensor, inverse bool) (*GradTensor, error) 
 	}
 	parents := compactParents(input, beta, gamma)
 	node := gradOpTensor(name, out, parents, func(self *GradTensor) error {
-		gradIn, gradBeta, gradGamma, err := gdnBackwardTensors(input.Value, valueOrNil(beta), valueOrNil(gamma), self.Grad, inverse)
-		if err != nil {
-			return err
+		var gradIn, gradBeta, gradGamma *Tensor
+		if imageGrad != nil && beta != nil && gamma != nil {
+			var ok bool
+			gradIn, gradBeta, gradGamma, ok, err = imageGrad.RunGDNBackward(input.Value, beta.Value, gamma.Value, self.Grad, inverse)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				gradIn, gradBeta, gradGamma = nil, nil, nil
+			}
+		}
+		if gradIn == nil {
+			gradIn, gradBeta, gradGamma, err = gdnBackwardTensors(input.Value, valueOrNil(beta), valueOrNil(gamma), self.Grad, inverse)
+			if err != nil {
+				return err
+			}
 		}
 		if err := accumulateGrad(input, gradIn); err != nil {
 			return err

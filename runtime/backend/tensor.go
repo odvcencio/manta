@@ -8,14 +8,24 @@ import (
 	mantaartifact "github.com/odvcencio/manta/artifact/manta"
 )
 
+// Device describes where a tensor's authoritative storage lives.
+type Device int
+
+const (
+	DeviceCPU Device = iota
+	DeviceCUDA
+)
+
 // Tensor is the bootstrap dense runtime tensor representation.
 // f16 values are stored in F32 with DType=f16 until a real device path exists.
 type Tensor struct {
-	DType string
-	Shape []int
-	F32   []float32
-	I32   []int32
-	I64   []int64
+	DType     string
+	Shape     []int
+	F32       []float32
+	I32       []int32
+	I64       []int64
+	Device    Device  `json:"-"`
+	DevicePtr uintptr `json:"-"`
 }
 
 // KVCache is the mutable runtime cache object used by kv_read/kv_write.

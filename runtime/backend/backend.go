@@ -150,6 +150,16 @@ type ContrastiveGradResult struct {
 	ScoreSum      float32
 }
 
+// ImageGradAccelerator exposes backend-owned backward kernels for image-codec
+// primitives used by reference autograd.
+type ImageGradAccelerator interface {
+	Backend() mantaartifact.BackendKind
+	RunConv2DBackward(input, weight, bias, gradOut *Tensor, attrs map[string]string) (*Tensor, *Tensor, *Tensor, bool, error)
+	RunConv2DTransposeBackward(input, weight, bias, gradOut *Tensor, attrs map[string]string) (*Tensor, *Tensor, *Tensor, bool, error)
+	RunGDNBackward(input, beta, gamma, gradOut *Tensor, inverse bool) (*Tensor, *Tensor, *Tensor, bool, error)
+	Close()
+}
+
 // MatMulAccelerator exposes a backend-owned matmul fast path for non-plan callers.
 type MatMulAccelerator interface {
 	Backend() mantaartifact.BackendKind
@@ -219,6 +229,7 @@ var matMulAcceleratorFactories []matMulAcceleratorFactory
 var optimizerAcceleratorFactories []optimizerAcceleratorFactory
 var activationAcceleratorFactories []activationAcceleratorFactory
 var contrastiveAcceleratorFactories []contrastiveAcceleratorFactory
+var imageGradAcceleratorFactories []imageGradAcceleratorFactory
 
 type matMulAcceleratorFactory struct {
 	kind    mantaartifact.BackendKind
@@ -238,6 +249,11 @@ type activationAcceleratorFactory struct {
 type contrastiveAcceleratorFactory struct {
 	kind    mantaartifact.BackendKind
 	factory func() (ContrastiveAccelerator, error)
+}
+
+type imageGradAcceleratorFactory struct {
+	kind    mantaartifact.BackendKind
+	factory func() (ImageGradAccelerator, error)
 }
 
 // KernelDispatcher executes a launch_kernel step through a backend-owned path.
@@ -350,6 +366,17 @@ func RegisterContrastiveAccelerator(kind mantaartifact.BackendKind, factory func
 	})
 }
 
+// RegisterImageGradAccelerator registers optional backend-owned image backward kernels.
+func RegisterImageGradAccelerator(kind mantaartifact.BackendKind, factory func() (ImageGradAccelerator, error)) {
+	if factory == nil {
+		return
+	}
+	imageGradAcceleratorFactories = append(imageGradAcceleratorFactories, imageGradAcceleratorFactory{
+		kind:    kind,
+		factory: factory,
+	})
+}
+
 // NewPreferredMatMulAccelerator returns the first available registered accelerator.
 func NewPreferredMatMulAccelerator(preferred ...mantaartifact.BackendKind) (MatMulAccelerator, mantaartifact.BackendKind, error) {
 	for _, kind := range preferred {
@@ -373,6 +400,25 @@ func NewPreferredMatMulAccelerator(preferred ...mantaartifact.BackendKind) (MatM
 func NewPreferredContrastiveAccelerator(preferred ...mantaartifact.BackendKind) (ContrastiveAccelerator, mantaartifact.BackendKind, error) {
 	for _, kind := range preferred {
 		for _, candidate := range contrastiveAcceleratorFactories {
+			if candidate.kind != kind {
+				continue
+			}
+			accel, err := candidate.factory()
+			if err != nil {
+				continue
+			}
+			if accel != nil {
+				return accel, kind, nil
+			}
+		}
+	}
+	return nil, "", nil
+}
+
+// NewPreferredImageGradAccelerator returns the first available registered image-gradient accelerator.
+func NewPreferredImageGradAccelerator(preferred ...mantaartifact.BackendKind) (ImageGradAccelerator, mantaartifact.BackendKind, error) {
+	for _, kind := range preferred {
+		for _, candidate := range imageGradAcceleratorFactories {
 			if candidate.kind != kind {
 				continue
 			}
