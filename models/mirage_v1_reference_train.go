@@ -136,7 +136,7 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 	if err := setMirageReferenceTrainStepLambda(mod, mirageReferenceLambda(cfg, targetLambda, 0)); err != nil {
 		return MirageV1ReferenceTrainHistory{}, err
 	}
-	initial, err := MirageV1ReferenceEval(mod, weights, images)
+	initial, err := MirageV1ReferenceEvalWithAccelerator(mod, weights, images, cfg.ImageGradAccelerator)
 	if err != nil {
 		return MirageV1ReferenceTrainHistory{}, err
 	}
@@ -186,7 +186,7 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 		}
 		stepNumber := step + 1
 		if cfg.CheckpointEvery > 0 && stepNumber%cfg.CheckpointEvery == 0 {
-			checkpointMetrics, err := MirageV1ReferenceEval(mod, weights, images)
+			checkpointMetrics, err := MirageV1ReferenceEvalWithAccelerator(mod, weights, images, cfg.ImageGradAccelerator)
 			if err != nil {
 				return MirageV1ReferenceTrainHistory{}, err
 			}
@@ -209,7 +209,7 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 	if err := setMirageReferenceTrainStepLambda(mod, targetLambda); err != nil {
 		return MirageV1ReferenceTrainHistory{}, err
 	}
-	final, err := MirageV1ReferenceEval(mod, weights, images)
+	final, err := MirageV1ReferenceEvalWithAccelerator(mod, weights, images, cfg.ImageGradAccelerator)
 	if err != nil {
 		return MirageV1ReferenceTrainHistory{}, err
 	}
@@ -273,15 +273,23 @@ type MirageV1ReferenceMetrics struct {
 
 // MirageV1ReferenceEval evaluates the current weights using ExecuteAutograd.
 func MirageV1ReferenceEval(mod *mantaartifact.Module, weights map[string]*backend.Tensor, images []*backend.Tensor) (MirageV1ReferenceMetrics, error) {
+	return MirageV1ReferenceEvalWithAccelerator(mod, weights, images, nil)
+}
+
+// MirageV1ReferenceEvalWithAccelerator evaluates the current weights using
+// ExecuteAutograd, optionally reusing image kernels for forward/backward image
+// primitives.
+func MirageV1ReferenceEvalWithAccelerator(mod *mantaartifact.Module, weights map[string]*backend.Tensor, images []*backend.Tensor, imageGrad backend.ImageGradAccelerator) (MirageV1ReferenceMetrics, error) {
 	if len(images) == 0 {
 		return MirageV1ReferenceMetrics{}, fmt.Errorf("at least one image is required")
 	}
 	total := MirageV1ReferenceMetrics{}
 	for _, image := range images {
 		result, err := backend.ExecuteAutograd(mod, backend.GradRequest{
-			Entry:   "train_step",
-			Inputs:  map[string]*backend.Tensor{"x": image},
-			Weights: weights,
+			Entry:                "train_step",
+			Inputs:               map[string]*backend.Tensor{"x": image},
+			Weights:              weights,
+			ImageGradAccelerator: imageGrad,
 		})
 		if err != nil {
 			return MirageV1ReferenceMetrics{}, err
