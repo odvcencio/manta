@@ -30,6 +30,7 @@ type candidateConfig struct {
 	HardEvalJSONL       string
 	TokenizerPath       string
 	TokenizerCorpus     string
+	NoTokenizer         bool
 	ThresholdsEnv       string
 	TrainMode           string
 	PairwiseTrain       string
@@ -96,6 +97,7 @@ Common knobs:
   MANTA_SELECT_METRIC=mrr
   MANTA_EVAL_EVERY_STEPS=0
   MANTA_PRETOKENIZE_JSONL=0
+  MANTA_NO_TOKENIZER=1
   MANTA_PAIRWISE_TRAIN=1
   MANTA_HARD_NEGATIVE_TRAIN=1
   MANTA_HARD_NEGATIVES_PER_QUERY=1
@@ -616,6 +618,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		TrainMetricsJSON:    filepath.Join(runDir, "train.metrics.json"),
 		FinalEvalMetricsJSON: filepath.Join(runDir, "final-eval.metrics.json"),
 		HardEvalMetricsJSON:  filepath.Join(runDir, "hard-eval.metrics.json"),
+		NoTokenizer:          envEnabled("MANTA_NO_TOKENIZER"),
 	}
 
 	err = os.WriteFile(cfg.DatasetSHAFile, []byte(""), 0o644)
@@ -634,6 +637,9 @@ func prepareConfig(root string) (candidateConfig, error) {
 	cfg.TokenizerCorpus = os.Getenv("MANTA_TOKENIZER_CORPUS")
 	cfg.ThresholdsEnv = thresholdsEnv
 	guard !(pairwiseTrainEnabled(cfg) && hardNegativeTrainEnabled(cfg)) else return candidateConfig{}, fmt.Errorf("choose MANTA_PAIRWISE_TRAIN or MANTA_HARD_NEGATIVE_TRAIN, not both")
+	guard !(cfg.NoTokenizer && cfg.TokenizerPath != "") else return candidateConfig{}, fmt.Errorf("set either MANTA_NO_TOKENIZER or MANTA_TOKENIZER, not both")
+	guard !(cfg.NoTokenizer && cfg.TokenizerCorpus != "") else return candidateConfig{}, fmt.Errorf("set either MANTA_NO_TOKENIZER or MANTA_TOKENIZER_CORPUS, not both")
+	guard !(cfg.NoTokenizer && envEnabled("MANTA_PRETOKENIZE_JSONL")) else return candidateConfig{}, fmt.Errorf("set either MANTA_NO_TOKENIZER or MANTA_PRETOKENIZE_JSONL, not both")
 
 	if cfg.Corpus != "" {
 		guard cfg.TrainJSONL == "" && cfg.EvalJSONL == "" else return candidateConfig{}, fmt.Errorf("choose MANTA_CORPUS or MANTA_TRAIN_JSONL/MANTA_EVAL_JSONL, not both")
@@ -787,7 +793,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	hardEvalJSONLForRun := cfg.HardEvalJSONL
 	trainTokenizer := cfg.TokenizerPath
 	evalTokenizer := tokenizerForEval
-	tokenJSONLForRun := false
+	tokenJSONLForRun := cfg.NoTokenizer
 	if cfg.TrainMode == "prepared_jsonl" && trainTokenizer == "" && tokenizerForEval != "" {
 		trainTokenizer = tokenizerForEval
 	}

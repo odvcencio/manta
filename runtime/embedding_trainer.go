@@ -3929,27 +3929,19 @@ func (t *EmbeddingTrainer) backpropEncodedSequence(seq *embeddingEncodedSequence
 }
 
 type embeddingBackpropItem struct {
-	seq           *embeddingEncodedSequence
-	gradPooled    []float32
-	gradProjected []float32
+	seq             *embeddingEncodedSequence
+	gradPooled      []float32
+	gradPooledOwned bool
+	gradProjected   []float32
 }
 
 func (t *EmbeddingTrainer) tryBackpropContrastiveBatch(queries, positives []*embeddingEncodedSequence, queryGrads, positiveGrads [][]float32, attentionQuery, attentionKey, attentionValue, attentionOutput, hiddenProjection, projection *backend.Tensor, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj []float32) bool {
 	if t == nil || !batchedBackwardEnabled() || hiddenProjection == nil || projection == nil {
 		return false
 	}
-	items := make([]embeddingBackpropItem, 0, len(queries)+len(positives))
-	for i, seq := range queries {
-		if i >= len(queryGrads) || seq == nil || len(seq.layers) == 0 {
-			return false
-		}
-		items = append(items, embeddingBackpropItem{seq: seq, gradPooled: queryGrads[i]})
-	}
-	for i, seq := range positives {
-		if i >= len(positiveGrads) || seq == nil || len(seq.layers) == 0 {
-			return false
-		}
-		items = append(items, embeddingBackpropItem{seq: seq, gradPooled: positiveGrads[i]})
+	items, ok := collectContrastiveBackpropItems(queries, positives, queryGrads, positiveGrads)
+	if !ok {
+		return false
 	}
 	if len(items) == 0 {
 		return false
@@ -4020,6 +4012,41 @@ func (t *EmbeddingTrainer) tryBackpropContrastiveBatch(queries, positives []*emb
 		accumulateTokenGrad(items[i].seq.tokens, items[i].gradProjected, gradToken, d, t.tokenEmbed.Shape[0])
 	}
 	return true
+}
+
+func collectContrastiveBackpropItems(queries, positives []*embeddingEncodedSequence, queryGrads, positiveGrads [][]float32) ([]embeddingBackpropItem, bool) {
+	items := make([]embeddingBackpropItem, 0, len(queries)+len(positives))
+	indexes := make(map[*embeddingEncodedSequence]int, len(queries)+len(positives))
+	var ok bool
+	items, ok = appendContrastiveBackpropItems(items, indexes, queries, queryGrads)
+	if !ok {
+		return nil, false
+	}
+	items, ok = appendContrastiveBackpropItems(items, indexes, positives, positiveGrads)
+	if !ok {
+		return nil, false
+	}
+	return items, true
+}
+
+func appendContrastiveBackpropItems(items []embeddingBackpropItem, indexes map[*embeddingEncodedSequence]int, seqs []*embeddingEncodedSequence, grads [][]float32) ([]embeddingBackpropItem, bool) {
+	for i, seq := range seqs {
+		if i >= len(grads) || seq == nil || len(seq.layers) == 0 {
+			return nil, false
+		}
+		grad := grads[i]
+		if idx, ok := indexes[seq]; ok {
+			if !items[idx].gradPooledOwned {
+				items[idx].gradPooled = append([]float32(nil), items[idx].gradPooled...)
+				items[idx].gradPooledOwned = true
+			}
+			addFloat32Slice(items[idx].gradPooled, grad)
+			continue
+		}
+		indexes[seq] = len(items)
+		items = append(items, embeddingBackpropItem{seq: seq, gradPooled: grad})
+	}
+	return items, true
 }
 
 func (t *EmbeddingTrainer) backpropProjectedFFNSequences(states []*embeddingSequenceState, gradProjected [][]float32, hiddenProjection, projection *backend.Tensor, gradHidden, gradProj []float32, d, h, e int) ([][]float32, bool) {

@@ -746,6 +746,57 @@ func TestEmbeddingTrainerTrainHardNegativeContrastiveStepUsesRectangularAccelera
 	}
 }
 
+func TestCollectContrastiveBackpropItemsMergesDuplicateSequences(t *testing.T) {
+	shared := &embeddingEncodedSequence{layers: []*embeddingSequenceState{{}}, pooled: []float32{0, 0}}
+	other := &embeddingEncodedSequence{layers: []*embeddingSequenceState{{}}, pooled: []float32{0, 0}}
+	queryGrad := []float32{1, 2}
+	firstCandidateGrad := []float32{3, 4}
+	secondCandidateGrad := []float32{5, 6}
+
+	items, ok := collectContrastiveBackpropItems(
+		[]*embeddingEncodedSequence{shared},
+		[]*embeddingEncodedSequence{other, shared},
+		[][]float32{queryGrad},
+		[][]float32{firstCandidateGrad, secondCandidateGrad},
+	)
+	if !ok {
+		t.Fatal("collect backprop items failed")
+	}
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want 2 unique sequences", len(items))
+	}
+	if items[0].seq != shared {
+		t.Fatalf("first item seq = %p, want shared %p", items[0].seq, shared)
+	}
+	if got, want := items[0].gradPooled, []float32{6, 8}; !equalFloat32Slices(got, want) {
+		t.Fatalf("merged shared grad = %v, want %v", got, want)
+	}
+	if !items[0].gradPooledOwned {
+		t.Fatal("merged item should own copied gradient storage")
+	}
+	if got, want := queryGrad, []float32{1, 2}; !equalFloat32Slices(got, want) {
+		t.Fatalf("original query grad mutated to %v, want %v", got, want)
+	}
+	if items[1].seq != other {
+		t.Fatalf("second item seq = %p, want other %p", items[1].seq, other)
+	}
+	if got, want := items[1].gradPooled, firstCandidateGrad; !equalFloat32Slices(got, want) {
+		t.Fatalf("other grad = %v, want %v", got, want)
+	}
+}
+
+func equalFloat32Slices(left, right []float32) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
 type countingContrastiveAccelerator struct {
 	squareCalls   int
 	rectCalls     int
