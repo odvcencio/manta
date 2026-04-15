@@ -113,6 +113,7 @@ func TestMirageV1ReferenceTrainCosineScheduleAndCheckpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	var callbacks []MirageV1ReferenceCheckpoint
+	var stateCallbacks []int
 	history, err := TrainMirageV1Reference(mod, weights, []*backend.Tensor{mirageReferenceTrainImage()}, MirageV1ReferenceTrainConfig{
 		Steps:                4,
 		LearningRate:         0.01,
@@ -125,6 +126,13 @@ func TestMirageV1ReferenceTrainCosineScheduleAndCheckpoints(t *testing.T) {
 			if len(weights) == 0 {
 				t.Fatalf("checkpoint weights are empty")
 			}
+			return nil
+		},
+		CheckpointStateFunc: func(checkpoint MirageV1ReferenceCheckpoint, weights map[string]*backend.Tensor, state *MirageV1ReferenceOptimizerState) error {
+			if state == nil {
+				t.Fatalf("checkpoint optimizer state is nil")
+			}
+			stateCallbacks = append(stateCallbacks, state.Step)
 			return nil
 		},
 	})
@@ -146,11 +154,115 @@ func TestMirageV1ReferenceTrainCosineScheduleAndCheckpoints(t *testing.T) {
 	if len(history.Checkpoints) != 2 || len(callbacks) != 2 {
 		t.Fatalf("checkpoints=%d callbacks=%d want 2", len(history.Checkpoints), len(callbacks))
 	}
+	if len(stateCallbacks) != 2 || stateCallbacks[0] != 2 || stateCallbacks[1] != 4 {
+		t.Fatalf("checkpoint optimizer state steps = %v want [2 4]", stateCallbacks)
+	}
 	if history.Checkpoints[0].Step != 2 || history.Checkpoints[1].Step != 4 {
 		t.Fatalf("checkpoint steps = %+v", history.Checkpoints)
 	}
 	if history.Checkpoints[1].LearningRate != history.LearningRates[3] {
 		t.Fatalf("checkpoint learning rate = %.8f want %.8f", history.Checkpoints[1].LearningRate, history.LearningRates[3])
+	}
+	if history.OptimizerState == nil || history.OptimizerState.Step != 4 {
+		t.Fatalf("final optimizer state = %+v want step 4", history.OptimizerState)
+	}
+}
+
+func TestMirageV1ReferenceTrainAdamResumeMatchesContinuousRun(t *testing.T) {
+	continuousMod, err := DefaultMirageV1Module(MirageV1Config{
+		ImageHeight:    16,
+		ImageWidth:     16,
+		LatentChannels: 4,
+		HyperChannels:  4,
+		BitWidth:       2,
+		Lambda:         0,
+		LambdaSet:      true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuousWeights, err := InitMirageV1ReferenceWeights(continuousMod, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuous, err := TrainMirageV1Reference(continuousMod, continuousWeights, []*backend.Tensor{mirageReferenceTrainImage()}, MirageV1ReferenceTrainConfig{
+		Steps:                4,
+		ScheduleSteps:        4,
+		LearningRate:         0.01,
+		FinalLearningRate:    0.001,
+		LearningRateSchedule: "cosine",
+		Optimizer:            "adam",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resumeMod, err := DefaultMirageV1Module(MirageV1Config{
+		ImageHeight:    16,
+		ImageWidth:     16,
+		LatentChannels: 4,
+		HyperChannels:  4,
+		BitWidth:       2,
+		Lambda:         0,
+		LambdaSet:      true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeWeights, err := InitMirageV1ReferenceWeights(resumeMod, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := TrainMirageV1Reference(resumeMod, resumeWeights, []*backend.Tensor{mirageReferenceTrainImage()}, MirageV1ReferenceTrainConfig{
+		Steps:                2,
+		ScheduleSteps:        4,
+		LearningRate:         0.01,
+		FinalLearningRate:    0.001,
+		LearningRateSchedule: "cosine",
+		Optimizer:            "adam",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.OptimizerState == nil || first.OptimizerState.Step != 2 {
+		t.Fatalf("first optimizer state = %+v want step 2", first.OptimizerState)
+	}
+	second, err := TrainMirageV1Reference(resumeMod, resumeWeights, []*backend.Tensor{mirageReferenceTrainImage()}, MirageV1ReferenceTrainConfig{
+		Steps:                2,
+		InitialStep:          first.OptimizerState.Step,
+		ScheduleSteps:        4,
+		LearningRate:         0.01,
+		FinalLearningRate:    0.001,
+		LearningRateSchedule: "cosine",
+		Optimizer:            "adam",
+		OptimizerState:       first.OptimizerState,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.OptimizerState == nil || second.OptimizerState.Step != 4 {
+		t.Fatalf("second optimizer state = %+v want step 4", second.OptimizerState)
+	}
+	if len(second.LearningRates) != 2 || !nearFloat32(second.LearningRates[0], continuous.LearningRates[2], 1e-7) || !nearFloat32(second.LearningRates[1], continuous.LearningRates[3], 1e-7) {
+		t.Fatalf("resumed learning rates = %v want tail %v", second.LearningRates, continuous.LearningRates[2:])
+	}
+	for _, param := range continuousMod.Params {
+		if !param.Trainable {
+			continue
+		}
+		want := continuousWeights[param.Name]
+		got := resumeWeights[param.Name]
+		if want == nil || got == nil {
+			t.Fatalf("missing weights for %s", param.Name)
+		}
+		if len(want.F32) != len(got.F32) {
+			t.Fatalf("%s len = %d want %d", param.Name, len(got.F32), len(want.F32))
+		}
+		for i := range want.F32 {
+			if !nearFloat32(got.F32[i], want.F32[i], 1e-6) {
+				t.Fatalf("%s[%d] = %.8f want %.8f", param.Name, i, got.F32[i], want.F32[i])
+			}
+		}
 	}
 }
 
