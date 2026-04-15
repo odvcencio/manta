@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,6 +32,15 @@ type trainMetrics struct {
 	} `json:"throughput"`
 }
 
+type retrievalSummary struct {
+	Datasets int
+	NDCGAt10 float64
+	MRRAt10 float64
+	RecallAt10 float64
+	RecallAt100 float64
+	ScoresPerSecond float64
+}
+
 func usage() {
 	fmt.Println(`Run a hard-negative manta-embed-v1 multi-seed candidate sweep.
 
@@ -45,7 +56,9 @@ Run:
 Optional:
   MANTA_SWEEP_SEEDS=1,2,3
   MANTA_SWEEP_RUN_ROOT=$PWD/runs/manta-embed-v1-sweep-20260414
-  MANTA_HARD_NEGATIVES_PER_QUERY=1`)
+  MANTA_HARD_NEGATIVES_PER_QUERY=1
+  MANTA_QUALITY_TARGET=retrieval
+  MANTA_GATE_BM25_BASELINE=1`)
 }
 
 func getenv(name string, fallback string) string {
@@ -65,6 +78,10 @@ func splitList(value string) []string {
 		}
 	}
 	return out
+}
+
+func sweepQualityTarget() string {
+	return strings.ToLower(strings.TrimSpace(getenv("MANTA_QUALITY_TARGET", "retrieval")))
 }
 
 func hasRepoRoot(dir string) bool {
@@ -126,7 +143,61 @@ func readMetrics(path string) (trainMetrics, error) {
 	return metrics, nil
 }
 
+func parseFloatField(path string, line int, name string, value string) (float64, error) {
+	parsed, err := strconv.ParseFloat(value, 64)
+	guard err == nil else return 0, fmt.Errorf("%s:%d: parse %s=%q: %w", path, line, name, value, err)
+	return parsed, nil
+}
+
+func readRetrievalSummary(runDir string) (retrievalSummary, error) {
+	matches, err := filepath.Glob(filepath.Join(runDir, "retrieval", "*", "leaderboard.tsv"))
+	guard err == nil else return retrievalSummary{}, err
+	sort.Strings(matches)
+	guard len(matches) > 0 else return retrievalSummary{}, fmt.Errorf("no retrieval leaderboard found under %s", filepath.Join(runDir, "retrieval"))
+	summary := retrievalSummary{}
+	for _, path := range matches {
+		data, err := os.ReadFile(path)
+		guard err == nil else return retrievalSummary{}, err
+		for i, raw := range strings.Split(string(data), "\n") {
+			line := strings.TrimSpace(raw)
+			if line == "" || i == 0 {
+				continue
+			}
+			cols := strings.Split(line, "\t")
+			guard len(cols) >= 14 else return retrievalSummary{}, fmt.Errorf("%s:%d: expected 14 leaderboard columns, got %d", path, i+1, len(cols))
+			if cols[1] == "bm25" {
+				continue
+			}
+			ndcg, err := parseFloatField(path, i+1, "ndcg_at_10", cols[6])
+			guard err == nil else return retrievalSummary{}, err
+			mrr, err := parseFloatField(path, i+1, "mrr_at_10", cols[7])
+			guard err == nil else return retrievalSummary{}, err
+			recall10, err := parseFloatField(path, i+1, "recall_at_10", cols[8])
+			guard err == nil else return retrievalSummary{}, err
+			recall100, err := parseFloatField(path, i+1, "recall_at_100", cols[9])
+			guard err == nil else return retrievalSummary{}, err
+			scoresPerSecond, err := parseFloatField(path, i+1, "scores_per_second", cols[13])
+			guard err == nil else return retrievalSummary{}, err
+			summary.Datasets++
+			summary.NDCGAt10 += ndcg
+			summary.MRRAt10 += mrr
+			summary.RecallAt10 += recall10
+			summary.RecallAt100 += recall100
+			summary.ScoresPerSecond += scoresPerSecond
+		}
+	}
+	guard summary.Datasets > 0 else return retrievalSummary{}, fmt.Errorf("no non-BM25 retrieval rows found under %s", filepath.Join(runDir, "retrieval"))
+	denom := float64(summary.Datasets)
+	summary.NDCGAt10 /= denom
+	summary.MRRAt10 /= denom
+	summary.RecallAt10 /= denom
+	summary.RecallAt100 /= denom
+	summary.ScoresPerSecond /= denom
+	return summary, nil
+}
+
 func runSeed(cfg sweepConfig, seed string) error {
+	qualityTarget := sweepQualityTarget()
 	runID := "manta-embed-v1-seed-" + seed
 	runDir := filepath.Join(cfg.RunRoot, runID)
 	logPath := filepath.Join(cfg.RunRoot, runID+".log")
@@ -146,10 +217,10 @@ func runSeed(cfg sweepConfig, seed string) error {
 		"MANTA_RUN_ROOT="+cfg.RunRoot,
 		"MANTA_RUN_ID="+runID,
 		"MANTA_INIT_SEED="+seed,
+		"MANTA_QUALITY_TARGET="+qualityTarget,
 		"MANTA_HARD_NEGATIVE_TRAIN=1",
 		"MANTA_PAIRWISE_TRAIN=0",
 		"MANTA_HARD_NEGATIVES_PER_QUERY="+getenv("MANTA_HARD_NEGATIVES_PER_QUERY", "1"),
-		"MANTA_RETRIEVAL_EVAL="+getenv("MANTA_RETRIEVAL_EVAL", "1"),
 	)
 	err = cmd.Run()
 	status := "pass"
@@ -172,7 +243,14 @@ func runSeed(cfg sweepConfig, seed string) error {
 		trainPairsPerSecond = metrics.Throughput.TrainPairsPerSecond
 		optimizerStepsPerSecond = metrics.Throughput.OptimizerStepsPerSecond
 	}
-	line := fmt.Sprintf("%s\t%s\t%s\t%.6f\t%.6f\t%.6f\t%.2f\t%.4f\t%s\n", seed, status, runDir, mrr, top1, margin, trainPairsPerSecond, optimizerStepsPerSecond, logPath)
+	retrieval, retrievalErr := readRetrievalSummary(runDir)
+	if retrievalErr != nil && qualityTarget != "pairwise" {
+		if err == nil {
+			err = retrievalErr
+			status = "fail"
+		}
+	}
+	line := fmt.Sprintf("%s\t%s\t%s\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.2f\t%.6f\t%.6f\t%.6f\t%.2f\t%.4f\t%s\n", seed, status, runDir, retrieval.Datasets, retrieval.NDCGAt10, retrieval.MRRAt10, retrieval.RecallAt10, retrieval.RecallAt100, retrieval.ScoresPerSecond, mrr, top1, margin, trainPairsPerSecond, optimizerStepsPerSecond, logPath)
 	file, openErr := os.OpenFile(cfg.Leaderboard, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	guard openErr == nil else return openErr
 	_, writeErr := file.WriteString(line)
@@ -198,7 +276,7 @@ func main() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	header := "seed\tstatus\trun_dir\tmrr\ttop1\tmargin\ttrain_pairs_per_second\toptimizer_steps_per_second\tlog\n"
+	header := "seed\tstatus\trun_dir\tretrieval_datasets\tretrieval_ndcg_at_10\tretrieval_mrr_at_10\tretrieval_recall_at_10\tretrieval_recall_at_100\tretrieval_scores_per_second\tpair_mrr\tpair_top1\tpair_margin\ttrain_pairs_per_second\toptimizer_steps_per_second\tlog\n"
 	err = os.WriteFile(cfg.Leaderboard, []byte(header), 0o644)
 	if err != nil {
 		fmt.Println(err)
