@@ -131,11 +131,13 @@ func (t *Tensor) Clone() *Tensor {
 		return nil
 	}
 	return &Tensor{
-		DType: t.DType,
-		Shape: append([]int(nil), t.Shape...),
-		F32:   append([]float32(nil), t.F32...),
-		I32:   append([]int32(nil), t.I32...),
-		I64:   append([]int64(nil), t.I64...),
+		DType:     t.DType,
+		Shape:     append([]int(nil), t.Shape...),
+		F32:       append([]float32(nil), t.F32...),
+		I32:       append([]int32(nil), t.I32...),
+		I64:       append([]int64(nil), t.I64...),
+		Device:    t.Device,
+		DevicePtr: t.DevicePtr,
 	}
 }
 

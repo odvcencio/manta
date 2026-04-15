@@ -93,6 +93,10 @@ func ExecuteAutograd(mod *mantaartifact.Module, req GradRequest) (GradResult, er
 	if mod == nil {
 		return GradResult{}, fmt.Errorf("nil module")
 	}
+	if req.ImageGradAccelerator != nil {
+		req.ImageGradAccelerator.ReleaseStep()
+		defer req.ImageGradAccelerator.ReleaseStep()
+	}
 	entryName := req.Entry
 	if entryName == "" {
 		if len(mod.EntryPoints) == 0 {
@@ -145,6 +149,9 @@ func ExecuteAutograd(mod *mantaartifact.Module, req GradRequest) (GradResult, er
 				if !ok || value.Value == nil {
 					return GradResult{}, fmt.Errorf("return references unknown value %q", name)
 				}
+				if err := materializeTensorValue(req.ImageGradAccelerator, value.Value); err != nil {
+					return GradResult{}, err
+				}
 				result.Outputs[name] = value.Value.Clone()
 			}
 			continue
@@ -178,6 +185,9 @@ func ExecuteAutograd(mod *mantaartifact.Module, req GradRequest) (GradResult, er
 			continue
 		}
 		if node, ok := env[param.Name]; ok && node.Grad != nil {
+			if err := materializeTensorValue(req.ImageGradAccelerator, node.Grad); err != nil {
+				return GradResult{}, err
+			}
 			result.Gradients[param.Name] = node.Grad.Clone()
 		}
 	}
@@ -186,6 +196,9 @@ func ExecuteAutograd(mod *mantaartifact.Module, req GradRequest) (GradResult, er
 			continue
 		}
 		if node, ok := env[name]; ok && node.Grad != nil {
+			if err := materializeTensorValue(req.ImageGradAccelerator, node.Grad); err != nil {
+				return GradResult{}, err
+			}
 			result.InputGradients[name] = node.Grad.Clone()
 		}
 	}
@@ -256,6 +269,9 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor, im
 		if err != nil {
 			return nil, err
 		}
+		if err := materializeGradTensorValues(imageGrad, input); err != nil {
+			return nil, err
+		}
 		coords, norms, err := TurboQuantEncodeGrad(input, step.Attributes)
 		if err != nil {
 			return nil, err
@@ -271,6 +287,9 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor, im
 		}
 		norms, err := gradInput(env, step.Inputs[1])
 		if err != nil {
+			return nil, err
+		}
+		if err := materializeGradTensorValues(imageGrad, coords, norms); err != nil {
 			return nil, err
 		}
 		out, err := TurboQuantDecodeGrad(coords, norms, step.Attributes)
@@ -290,6 +309,9 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor, im
 		if err != nil {
 			return nil, err
 		}
+		if err := materializeGradTensorValues(imageGrad, codes, logits); err != nil {
+			return nil, err
+		}
 		out, err := CrossEntropyFactorizedGrad(codes, logits, step.Attributes)
 		if err != nil {
 			return nil, err
@@ -303,6 +325,9 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor, im
 		if err != nil {
 			return nil, err
 		}
+		if err := materializeGradTensorValues(imageGrad, lhs, rhs); err != nil {
+			return nil, err
+		}
 		out, err := MSELossGrad(lhs, rhs)
 		if err != nil {
 			return nil, err
@@ -314,6 +339,9 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor, im
 		}
 		lhs, rhs, err := gradInput2(env, step.Inputs)
 		if err != nil {
+			return nil, err
+		}
+		if err := materializeGradTensorValues(imageGrad, lhs, rhs); err != nil {
 			return nil, err
 		}
 		out, err := MSSSIMLossGrad(lhs, rhs)
@@ -330,6 +358,9 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor, im
 			}
 			inputs = append(inputs, input)
 		}
+		if err := materializeGradTensorValues(imageGrad, inputs...); err != nil {
+			return nil, err
+		}
 		out, err := ScalarAddGrad(inputs...)
 		if err != nil {
 			return nil, err
@@ -341,6 +372,9 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor, im
 		}
 		distortion, rate, err := gradInput2(env, step.Inputs)
 		if err != nil {
+			return nil, err
+		}
+		if err := materializeGradTensorValues(imageGrad, distortion, rate); err != nil {
 			return nil, err
 		}
 		rateWeight := attrFloat(step.Attributes, "lambda", 1) * attrFloat(step.Attributes, "rate_scale", 1)
@@ -1385,16 +1419,64 @@ func accumulateGrad(node *GradTensor, grad *Tensor) error {
 	if node.Value == nil {
 		return fmt.Errorf("cannot accumulate gradient into nil value")
 	}
-	if !sameTensorShape(node.Value, grad) || len(grad.F32) != node.Value.Elements() {
+	if !sameTensorShape(node.Value, grad) || !tensorHasHostOrDeviceData(grad) {
 		return fmt.Errorf("gradient shape %v does not match value shape %v", shapeOf(grad), node.Value.Shape)
+	}
+	if grad.Device == DeviceCUDA && grad.DevicePtr != 0 && len(grad.F32) != grad.Elements() {
+		if node.Grad == nil {
+			node.Grad = grad.Clone()
+			return nil
+		}
+		if node.Grad.Device == DeviceCUDA && node.Grad.DevicePtr == grad.DevicePtr {
+			return nil
+		}
+		return fmt.Errorf("cannot accumulate multiple device-resident gradients without materialization")
 	}
 	if node.Grad == nil {
 		node.Grad = zeroGradLike(node.Value)
+	}
+	if node.Grad.Device == DeviceCUDA && node.Grad.DevicePtr != 0 && len(node.Grad.F32) != node.Grad.Elements() {
+		return fmt.Errorf("cannot accumulate host gradient into device-resident gradient without materialization")
 	}
 	for i, v := range grad.F32 {
 		node.Grad.F32[i] += v
 	}
 	return nil
+}
+
+func tensorHasHostOrDeviceData(t *Tensor) bool {
+	if t == nil {
+		return false
+	}
+	if len(t.F32) == t.Elements() {
+		return true
+	}
+	return t.Device == DeviceCUDA && t.DevicePtr != 0
+}
+
+func materializeGradTensorValues(imageGrad ImageGradAccelerator, nodes ...*GradTensor) error {
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		if err := materializeTensorValue(imageGrad, node.Value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func materializeTensorValue(imageGrad ImageGradAccelerator, tensor *Tensor) error {
+	if tensor == nil || len(tensor.F32) == tensor.Elements() {
+		return nil
+	}
+	if tensor.Device == DeviceCUDA && tensor.DevicePtr != 0 && imageGrad != nil {
+		return imageGrad.Materialize(tensor)
+	}
+	if tensor.Elements() == 0 {
+		return nil
+	}
+	return fmt.Errorf("tensor shape %v is missing host storage", shapeOf(tensor))
 }
 
 func topoGradTensors(root *GradTensor) []*GradTensor {

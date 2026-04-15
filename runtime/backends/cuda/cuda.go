@@ -456,7 +456,7 @@ func supportsBuiltinGDN(inputs []*backend.Tensor) bool {
 		return false
 	}
 	input, beta, gamma := inputs[0], inputs[1], inputs[2]
-	if len(input.Shape) != 4 || len(input.F32) != input.Elements() {
+	if len(input.Shape) != 4 || !hasHostOrDeviceF32(input) {
 		return false
 	}
 	channels := input.Shape[1]
@@ -520,7 +520,7 @@ func planBuiltinConv2D(step mantaartifact.Step, inputs []*backend.Tensor) (cudaC
 		return cudaConv2DConfig{}, false
 	}
 	input, weight := inputs[0], inputs[1]
-	if len(input.Shape) != 4 || len(weight.Shape) != 4 || len(input.F32) != input.Elements() || len(weight.F32) != weight.Elements() {
+	if len(input.Shape) != 4 || len(weight.Shape) != 4 || !hasHostOrDeviceF32(input) || !hasHostOrDeviceF32(weight) {
 		return cudaConv2DConfig{}, false
 	}
 	n, inC, inH, inW := input.Shape[0], input.Shape[1], input.Shape[2], input.Shape[3]
@@ -575,7 +575,7 @@ func planBuiltinConv2DTranspose(step mantaartifact.Step, inputs []*backend.Tenso
 		return cudaConv2DTransposeConfig{}, false
 	}
 	input, weight := inputs[0], inputs[1]
-	if len(input.Shape) != 4 || len(weight.Shape) != 4 || len(input.F32) != input.Elements() || len(weight.F32) != weight.Elements() {
+	if len(input.Shape) != 4 || len(weight.Shape) != 4 || !hasHostOrDeviceF32(input) || !hasHostOrDeviceF32(weight) {
 		return cudaConv2DTransposeConfig{}, false
 	}
 	n, inC, inH, inW := input.Shape[0], input.Shape[1], input.Shape[2], input.Shape[3]
@@ -631,6 +631,16 @@ func planBuiltinConv2DTranspose(step mantaartifact.Step, inputs []*backend.Tenso
 		outPadW:     outPadW,
 		hasBias:     hasBias,
 	}, true
+}
+
+func hasHostOrDeviceF32(tensor *backend.Tensor) bool {
+	if tensor == nil {
+		return false
+	}
+	if len(tensor.F32) == tensor.Elements() {
+		return true
+	}
+	return tensor.Device == backend.DeviceCUDA && tensor.DevicePtr != 0
 }
 
 type cudaTurboQConfig struct {

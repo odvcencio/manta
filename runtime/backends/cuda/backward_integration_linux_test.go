@@ -225,6 +225,47 @@ func TestCUDAImageGradAcceleratorAutogradMatchesReference(t *testing.T) {
 	}
 }
 
+func TestCUDAImageGradAcceleratorKeepsForwardResident(t *testing.T) {
+	accel, kind, err := backend.NewPreferredImageGradAccelerator(mantaartifact.BackendCUDA)
+	if err != nil {
+		t.Fatalf("image grad accelerator: %v", err)
+	}
+	if accel == nil {
+		t.Skip("no cuda image grad accelerator available")
+	}
+	defer accel.Close()
+	if kind != mantaartifact.BackendCUDA {
+		t.Fatalf("accelerator backend = %q, want cuda", kind)
+	}
+
+	input := backend.NewTensorF32([]int{1, 2, 4, 5}, patternedFloats(1*2*4*5, 0.019))
+	weight := backend.NewTensorF32([]int{3, 2, 2, 3}, patternedFloats(3*2*2*3, -0.023))
+	bias := backend.NewTensorF32([]int{3}, patternedFloats(3, 0.011))
+	attrs := map[string]string{"stride_h": "1", "stride_w": "1", "pad_h": "0", "pad_w": "1"}
+	out, ok, err := accel.RunConv2D(input, weight, bias, attrs)
+	if err != nil {
+		t.Fatalf("run conv2d accelerator: %v", err)
+	}
+	if !ok {
+		t.Fatalf("conv2d accelerator did not handle supported shape")
+	}
+	if out.Device != backend.DeviceCUDA || out.DevicePtr == 0 {
+		t.Fatalf("accelerated conv2d output residency = (%v, %d), want CUDA ptr", out.Device, out.DevicePtr)
+	}
+	if len(out.F32) != 0 {
+		t.Fatalf("accelerated conv2d output was materialized eagerly")
+	}
+	if err := accel.Materialize(out); err != nil {
+		t.Fatalf("materialize output: %v", err)
+	}
+	step := mantaartifact.Step{Kind: mantaartifact.StepConv2D, Attributes: attrs}
+	cfg, ok := planBuiltinConv2D(step, []*backend.Tensor{input, weight, bias})
+	if !ok {
+		t.Fatalf("conv2d plan rejected supported shape")
+	}
+	assertTensorClose(t, out, []int{1, 3, 3, 5}, hostConv2D(input, weight, bias, cfg))
+}
+
 func runCUDAGDNBackwardMatchesHost(t *testing.T, inverse bool) {
 	t.Helper()
 	rt, err := newDeviceRuntime()

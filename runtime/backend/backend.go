@@ -160,6 +160,8 @@ type ImageGradAccelerator interface {
 	RunConv2DTransposeBackward(input, weight, bias, gradOut *Tensor, attrs map[string]string) (*Tensor, *Tensor, *Tensor, bool, error)
 	RunGDN(input, beta, gamma *Tensor, inverse bool) (*Tensor, bool, error)
 	RunGDNBackward(input, beta, gamma, gradOut *Tensor, inverse bool) (*Tensor, *Tensor, *Tensor, bool, error)
+	Materialize(tensor *Tensor) error
+	ReleaseStep()
 	Close()
 }
 
