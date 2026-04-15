@@ -32,6 +32,7 @@ type MirageV1ReferenceTrainConfig struct {
 	FreezeAnalysisSteps  int
 	CheckpointEvery      int
 	CheckpointFunc       func(MirageV1ReferenceCheckpoint, map[string]*backend.Tensor) error
+	ImageGradAccelerator backend.ImageGradAccelerator
 }
 
 // MirageV1ReferenceTrainHistory records loss movement through a reference run.
@@ -160,9 +161,10 @@ func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backe
 		}
 		image := images[step%len(images)]
 		result, err := backend.ExecuteAutograd(mod, backend.GradRequest{
-			Entry:   "train_step",
-			Inputs:  map[string]*backend.Tensor{"x": image},
-			Weights: weights,
+			Entry:                "train_step",
+			Inputs:               map[string]*backend.Tensor{"x": image},
+			Weights:              weights,
+			ImageGradAccelerator: cfg.ImageGradAccelerator,
 		})
 		if err != nil {
 			return MirageV1ReferenceTrainHistory{}, err
