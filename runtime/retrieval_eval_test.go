@@ -265,3 +265,30 @@ func TestMineBM25TextHardNegativesUsesTopLexicalNonPositive(t *testing.T) {
 		t.Fatalf("examples = %+v", examples)
 	}
 }
+
+func TestModelMiningNegativeTextsUsesTopModelNonPositive(t *testing.T) {
+	scores := []retrievalScoredDoc{
+		{ID: "positive", Score: 0.99},
+		{ID: "hard", Score: 0.98},
+		{ID: "duplicate", Score: 0.97},
+		{ID: "blank", Score: 0.96},
+		{ID: "easy", Score: 0.10},
+	}
+	positives := map[string]bool{"positive": true}
+	docText := map[string]string{
+		"positive":  "target",
+		"hard":      "hard negative",
+		"duplicate": "hard negative",
+		"blank":     " ",
+		"easy":      "easy negative",
+	}
+
+	negatives := modelMiningNegativeTexts(scores, positives, docText, RetrievalHardNegativeMiningConfig{
+		NegativesPerPositive: 2,
+		CandidateTopK:        4,
+	})
+
+	if len(negatives) != 2 || negatives[0] != "hard negative" || negatives[1] != "easy negative" {
+		t.Fatalf("negatives = %+v", negatives)
+	}
+}

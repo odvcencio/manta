@@ -1,0 +1,493 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type hardNegativeRecord struct {
+	Query     string   `json:"query"`
+	Positive  string   `json:"positive"`
+	Negatives []string `json:"negatives"`
+	Source    string   `json:"source,omitempty"`
+}
+
+type mineConfig struct {
+	Root             string
+	RunID            string
+	RunDir           string
+	LogDir           string
+	MantaBin         string
+	Artifact         string
+	DatasetRoot      string
+	Datasets         []string
+	Split            string
+	OutputPath       string
+	BlendOutputPath  string
+	BM25InputPath    string
+	ManifestPath     string
+	SHAPath          string
+	Negatives        int
+	CandidateTopK    int
+	BatchSize        int
+	MaxExamples      int
+	MaxDocs          int
+	MaxQueries       int
+	BlendBM25        bool
+}
+
+func usage() {
+	fmt.Println(`Mine retrieval hard negatives with an existing manta-embed-v1 .mll.
+
+Required:
+  MANTA_MODEL_HARD_NEGATIVE_ARTIFACT=/path/to/manta-embed-v1.sealed.mll
+
+Run:
+  MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/mine_manta_embed_v1_model_hard_negatives.fw
+
+Defaults:
+  MANTA_DATASET_ROOT=$PWD/datasets/manta-embed-v1
+  MANTA_MODEL_HARD_NEGATIVE_DATASETS=scifact,nfcorpus,fiqa
+  MANTA_MODEL_HARD_NEGATIVE_SPLIT=train
+  MANTA_MODEL_HARD_NEGATIVE_MAX_EXAMPLES=6000
+  MANTA_MODEL_HARD_NEGATIVE_CANDIDATE_TOP_K=100
+  MANTA_MODEL_HARD_NEGATIVE_BATCH_SIZE=512
+  MANTA_MODEL_HARD_NEGATIVE_BLEND_BM25=1`)
+}
+
+func getenv(name string, fallback string) string {
+	let value = os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envEnabled(name string) bool {
+	let value = strings.ToLower(os.Getenv(name))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func step(label string) {
+	fmt.Println(f"\n== {label} ==")
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+func findRoot() (string, error) {
+	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	if hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	let pwd = os.Getenv("PWD")
+	if hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+}
+
+func rejectTmpPath(label string, path string) error {
+	if envEnabled("MANTA_ALLOW_TMP") {
+		return nil
+	}
+	if strings.HasPrefix(path, "/tmp/") || strings.HasPrefix(path, "/var/tmp/") {
+		return fmt.Errorf("%s is under a temporary directory: %s (set MANTA_ALLOW_TMP=1 only for local smoke checks)", label, path)
+	}
+	return nil
+}
+
+func requireFile(path string, label string) (string, error) {
+	guard path != "" else return "", fmt.Errorf("%s is required", label)
+	abs, err := filepath.Abs(path)
+	guard err == nil else return "", err
+	info, err := os.Stat(abs)
+	guard err == nil else return "", fmt.Errorf("%s does not exist: %s", label, abs)
+	guard !info.IsDir() else return "", fmt.Errorf("%s is a directory: %s", label, abs)
+	return abs, nil
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	let raw = os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	guard err == nil else return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	return value, nil
+}
+
+func splitList(value string) []string {
+	out := []string{}
+	for _, raw := range strings.Split(value, ",") {
+		item := strings.TrimSpace(raw)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(name string, args []string) string {
+	parts := []string{shellQuote(name)}
+	for arg in args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runCmd(cfg mineConfig, label string, logName string, name string, args []string) error {
+	step(label)
+	logPath := filepath.Join(cfg.LogDir, logName)
+	rendered := renderCommand(name, args)
+	fmt.Println(f"+ {rendered}")
+	err := os.WriteFile(logPath+".cmd", []byte(rendered+"\n"), 0o644)
+	guard err == nil else return err
+	logFile, err := os.Create(logPath)
+	guard err == nil else return err
+	defer logFile.Close()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = cfg.Root
+	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+	err = cmd.Run()
+	guard err == nil else return fmt.Errorf("%s failed; see %s: %w", label, logPath, err)
+	return nil
+}
+
+func prepareConfig(root string) (mineConfig, error) {
+	artifact, err := requireFile(os.Getenv("MANTA_MODEL_HARD_NEGATIVE_ARTIFACT"), "MANTA_MODEL_HARD_NEGATIVE_ARTIFACT")
+	guard err == nil else return mineConfig{}, err
+	err = rejectTmpPath("model hard-negative artifact", artifact)
+	guard err == nil else return mineConfig{}, err
+	datasetRoot, err := filepath.Abs(getenv("MANTA_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
+	guard err == nil else return mineConfig{}, err
+	err = rejectTmpPath("dataset root", datasetRoot)
+	guard err == nil else return mineConfig{}, err
+	datasets := splitList(getenv("MANTA_MODEL_HARD_NEGATIVE_DATASETS", "scifact,nfcorpus,fiqa"))
+	guard len(datasets) > 0 else return mineConfig{}, fmt.Errorf("MANTA_MODEL_HARD_NEGATIVE_DATASETS is empty")
+	negatives, err := parseIntEnv("MANTA_MODEL_HARD_NEGATIVE_NEGATIVES", 1)
+	guard err == nil else return mineConfig{}, err
+	guard negatives > 0 else return mineConfig{}, fmt.Errorf("MANTA_MODEL_HARD_NEGATIVE_NEGATIVES must be positive")
+	candidateTopK, err := parseIntEnv("MANTA_MODEL_HARD_NEGATIVE_CANDIDATE_TOP_K", 100)
+	guard err == nil else return mineConfig{}, err
+	guard candidateTopK > 0 else return mineConfig{}, fmt.Errorf("MANTA_MODEL_HARD_NEGATIVE_CANDIDATE_TOP_K must be positive")
+	batchSize, err := parseIntEnv("MANTA_MODEL_HARD_NEGATIVE_BATCH_SIZE", 512)
+	guard err == nil else return mineConfig{}, err
+	guard batchSize > 0 else return mineConfig{}, fmt.Errorf("MANTA_MODEL_HARD_NEGATIVE_BATCH_SIZE must be positive")
+	maxExamples, err := parseIntEnv("MANTA_MODEL_HARD_NEGATIVE_MAX_EXAMPLES", 6000)
+	guard err == nil else return mineConfig{}, err
+	guard maxExamples >= 0 else return mineConfig{}, fmt.Errorf("MANTA_MODEL_HARD_NEGATIVE_MAX_EXAMPLES must be non-negative")
+	maxDocs, err := parseIntEnv("MANTA_MODEL_HARD_NEGATIVE_MAX_DOCS", 0)
+	guard err == nil else return mineConfig{}, err
+	guard maxDocs >= 0 else return mineConfig{}, fmt.Errorf("MANTA_MODEL_HARD_NEGATIVE_MAX_DOCS must be non-negative")
+	maxQueries, err := parseIntEnv("MANTA_MODEL_HARD_NEGATIVE_MAX_QUERIES", 0)
+	guard err == nil else return mineConfig{}, err
+	guard maxQueries >= 0 else return mineConfig{}, fmt.Errorf("MANTA_MODEL_HARD_NEGATIVE_MAX_QUERIES must be non-negative")
+	processedDir := filepath.Join(datasetRoot, "processed")
+	err = os.MkdirAll(processedDir, 0o755)
+	guard err == nil else return mineConfig{}, err
+	runID := getenv("MANTA_MODEL_HARD_NEGATIVE_RUN_ID", "manta-embed-v1-model-hard-negatives-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot := getenv("MANTA_MODEL_HARD_NEGATIVE_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir, err := filepath.Abs(filepath.Join(runRoot, runID))
+	guard err == nil else return mineConfig{}, err
+	err = rejectTmpPath("model hard-negative run directory", runDir)
+	guard err == nil else return mineConfig{}, err
+	if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
+		return mineConfig{}, fmt.Errorf("run directory already exists and is not empty: %s", runDir)
+	}
+	err = os.MkdirAll(filepath.Join(runDir, "bin"), 0o755)
+	guard err == nil else return mineConfig{}, err
+	err = os.MkdirAll(filepath.Join(runDir, "logs"), 0o755)
+	guard err == nil else return mineConfig{}, err
+	return mineConfig{
+		Root:            root,
+		RunID:           runID,
+		RunDir:          runDir,
+		LogDir:          filepath.Join(runDir, "logs"),
+		MantaBin:        filepath.Join(runDir, "bin", "manta"),
+		Artifact:        artifact,
+		DatasetRoot:     datasetRoot,
+		Datasets:        datasets,
+		Split:           getenv("MANTA_MODEL_HARD_NEGATIVE_SPLIT", "train"),
+		OutputPath:      filepath.Join(processedDir, "train-model-hard-negatives.jsonl"),
+		BlendOutputPath: filepath.Join(processedDir, "train-hard-negatives-plus-model.jsonl"),
+		BM25InputPath:   filepath.Join(processedDir, "train-hard-negatives.jsonl"),
+		ManifestPath:    filepath.Join(processedDir, "model-hard-negatives.manifest.json"),
+		SHAPath:         filepath.Join(processedDir, "model-hard-negatives.SHA256SUMS"),
+		Negatives:       negatives,
+		CandidateTopK:   candidateTopK,
+		BatchSize:       batchSize,
+		MaxExamples:     maxExamples,
+		MaxDocs:         maxDocs,
+		MaxQueries:      maxQueries,
+		BlendBM25:       getenv("MANTA_MODEL_HARD_NEGATIVE_BLEND_BM25", "1") != "0",
+	}, nil
+}
+
+func datasetDir(cfg mineConfig, dataset string) string {
+	return filepath.Join(cfg.DatasetRoot, "raw", dataset, dataset)
+}
+
+func readHardNegativeRecords(path string) ([]hardNegativeRecord, error) {
+	f, err := os.Open(path)
+	guard err == nil else return nil, err
+	defer f.Close()
+	dec := json.NewDecoder(f)
+	out := []hardNegativeRecord{}
+	for {
+		var rec hardNegativeRecord
+		err = dec.Decode(&rec)
+		if err == io.EOF {
+			break
+		}
+		guard err == nil else return nil, err
+		if strings.TrimSpace(rec.Query) != "" && strings.TrimSpace(rec.Positive) != "" && len(rec.Negatives) > 0 {
+			out = append(out, rec)
+		}
+	}
+	return out, nil
+}
+
+func writeJSONL(path string, records []hardNegativeRecord) error {
+	f, err := os.Create(path)
+	guard err == nil else return err
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for _, record := range records {
+		err = enc.Encode(record)
+		guard err == nil else return err
+	}
+	return nil
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	guard err == nil else return "", err
+	defer f.Close()
+	h := sha256.New()
+	_, err = io.Copy(h, f)
+	guard err == nil else return "", err
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func writeSHA256Sums(cfg mineConfig, paths []string) error {
+	f, err := os.Create(cfg.SHAPath)
+	guard err == nil else return err
+	defer f.Close()
+	for _, path := range paths {
+		sum, err := sha256File(path)
+		guard err == nil else return err
+		_, err = f.WriteString(fmt.Sprintf("%s  %s\n", sum, path))
+		guard err == nil else return err
+	}
+	return nil
+}
+
+func jsonString(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	value = strings.ReplaceAll(value, "\"", "\\\"")
+	value = strings.ReplaceAll(value, "\n", "\\n")
+	value = strings.ReplaceAll(value, "\r", "\\r")
+	value = strings.ReplaceAll(value, "\t", "\\t")
+	return "\"" + value + "\""
+}
+
+func writeManifest(cfg mineConfig, modelCount int, blendCount int) error {
+	datasets, err := json.Marshal(cfg.Datasets)
+	guard err == nil else return err
+	body := fmt.Sprintf(`{
+  "schema": "manta.embedding_model_hard_negative_mining.v1",
+  "created_utc": %s,
+  "artifact": %s,
+  "dataset_root": %s,
+  "datasets": %s,
+  "split": %s,
+  "negatives_per_positive": %d,
+  "candidate_top_k": %d,
+  "batch_size": %d,
+  "max_examples": %d,
+  "max_docs": %d,
+  "max_queries": %d,
+  "outputs": {
+    "model_hard_negative_jsonl": %s,
+    "blended_hard_negative_jsonl": %s,
+    "sha256": %s,
+    "run_dir": %s
+  },
+  "counts": {
+    "model_hard_negative_examples": %d,
+    "blended_hard_negative_examples": %d
+  }
+}
+`,
+		jsonString(time.Now().UTC().Format(time.RFC3339)),
+		jsonString(cfg.Artifact),
+		jsonString(cfg.DatasetRoot),
+		string(datasets),
+		jsonString(cfg.Split),
+		cfg.Negatives,
+		cfg.CandidateTopK,
+		cfg.BatchSize,
+		cfg.MaxExamples,
+		cfg.MaxDocs,
+		cfg.MaxQueries,
+		jsonString(cfg.OutputPath),
+		jsonString(cfg.BlendOutputPath),
+		jsonString(cfg.SHAPath),
+		jsonString(cfg.RunDir),
+		modelCount,
+		blendCount,
+	)
+	return os.WriteFile(cfg.ManifestPath, []byte(body), 0o644)
+}
+
+func perDatasetLimit(cfg mineConfig) int {
+	if cfg.MaxExamples <= 0 {
+		return 0
+	}
+	limit := cfg.MaxExamples / len(cfg.Datasets)
+	if limit == 0 {
+		return 1
+	}
+	return limit
+}
+
+func mineDataset(cfg mineConfig, dataset string, limit int) ([]hardNegativeRecord, error) {
+	dir := datasetDir(cfg, dataset)
+	if _, err := os.Stat(dir); err != nil {
+		return nil, fmt.Errorf("dataset directory missing for %s: %s", dataset, dir)
+	}
+	outputPath := filepath.Join(cfg.RunDir, dataset+".train-model-hard-negatives.jsonl")
+	args := []string{
+		"mine-retrieval-model-hard-negatives",
+		"--dataset", dataset,
+		"--split", cfg.Split,
+		"--negatives", strconv.Itoa(cfg.Negatives),
+		"--candidate-top-k", strconv.Itoa(cfg.CandidateTopK),
+		"--batch-size", strconv.Itoa(cfg.BatchSize),
+	}
+	if limit > 0 {
+		args = append(args, "--max-examples", strconv.Itoa(limit))
+	}
+	if cfg.MaxDocs > 0 {
+		args = append(args, "--max-docs", strconv.Itoa(cfg.MaxDocs))
+	}
+	if cfg.MaxQueries > 0 {
+		args = append(args, "--max-queries", strconv.Itoa(cfg.MaxQueries))
+	}
+	args = append(args, cfg.Artifact, dir, outputPath)
+	err := runCmd(cfg, "Mine model hard negatives "+dataset, dataset+"-mine.log", cfg.MantaBin, args)
+	guard err == nil else return nil, err
+	records, err := readHardNegativeRecords(outputPath)
+	guard err == nil else return nil, err
+	for i := range records {
+		records[i].Source = dataset + ":model"
+	}
+	return records, nil
+}
+
+func runMining(cfg mineConfig) error {
+	err := runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/manta"})
+	guard err == nil else return err
+	limit := perDatasetLimit(cfg)
+	allModel := []hardNegativeRecord{}
+	for _, dataset := range cfg.Datasets {
+		records, err := mineDataset(cfg, dataset, limit)
+		guard err == nil else return err
+		allModel = append(allModel, records...)
+		fmt.Println(f"{dataset}: model_hard_negatives={len(records)}")
+	}
+	guard len(allModel) > 0 else return fmt.Errorf("model hard-negative mining produced no records")
+	if cfg.MaxExamples > 0 && len(allModel) > cfg.MaxExamples {
+		allModel = allModel[:cfg.MaxExamples]
+	}
+	err = writeJSONL(cfg.OutputPath, allModel)
+	guard err == nil else return err
+	blend := []hardNegativeRecord{}
+	if cfg.BlendBM25 {
+		if _, err := os.Stat(cfg.BM25InputPath); err == nil {
+			bm25, err := readHardNegativeRecords(cfg.BM25InputPath)
+			guard err == nil else return err
+			blend = append(blend, bm25...)
+			blend = append(blend, allModel...)
+			err = writeJSONL(cfg.BlendOutputPath, blend)
+			guard err == nil else return err
+		} else {
+			fmt.Println(f"BM25 hard-negative input not found; skipped blend: {cfg.BM25InputPath}")
+		}
+	}
+	shaPaths := []string{cfg.OutputPath, cfg.ManifestPath}
+	blendCount := 0
+	if len(blend) > 0 {
+		blendCount = len(blend)
+		shaPaths = append(shaPaths, cfg.BlendOutputPath)
+	}
+	err = writeManifest(cfg, len(allModel), blendCount)
+	guard err == nil else return err
+	err = writeSHA256Sums(cfg, shaPaths)
+	guard err == nil else return err
+	step("Model hard-negative bundle ready")
+	fmt.Println(f"run_dir={cfg.RunDir}")
+	fmt.Println(f"model_hard_negative_jsonl={cfg.OutputPath}")
+	if len(blend) > 0 {
+		fmt.Println(f"blended_hard_negative_jsonl={cfg.BlendOutputPath}")
+	}
+	fmt.Println(f"manifest={cfg.ManifestPath}")
+	fmt.Println(f"sha256={cfg.SHAPath}")
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	cfg, err := prepareConfig(root)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if err := runMining(cfg); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}

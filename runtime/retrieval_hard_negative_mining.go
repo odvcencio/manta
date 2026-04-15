@@ -15,6 +15,7 @@ type RetrievalHardNegativeMiningConfig struct {
 	QrelsPath            string
 	NegativesPerPositive int
 	CandidateTopK        int
+	BatchSize            int
 	MaxExamples          int
 	MaxDocs              int
 	MaxQueries           int
@@ -120,6 +121,102 @@ func MineBM25TextHardNegatives(ctx context.Context, cfg RetrievalHardNegativeMin
 	return out, summary, nil
 }
 
+// MineModelTextHardNegatives mines text hard negatives from BEIR data using the embedding model's own retrieval ranking.
+func MineModelTextHardNegatives(ctx context.Context, model *EmbeddingModel, cfg RetrievalHardNegativeMiningConfig) ([]EmbeddingTextHardNegativeExample, RetrievalHardNegativeMiningSummary, error) {
+	if model == nil {
+		return nil, RetrievalHardNegativeMiningSummary{}, fmt.Errorf("embedding model is not loaded")
+	}
+	cfg = normalizeRetrievalHardNegativeMiningConfig(cfg)
+	if cfg.CorpusPath == "" || cfg.QueriesPath == "" || cfg.QrelsPath == "" {
+		return nil, RetrievalHardNegativeMiningSummary{}, fmt.Errorf("corpus, queries, and qrels paths are required")
+	}
+	qrels, err := readBEIRQrels(cfg.QrelsPath)
+	if err != nil {
+		return nil, RetrievalHardNegativeMiningSummary{}, err
+	}
+	corpus, err := readBEIRCorpus(cfg.CorpusPath, cfg.MaxDocs)
+	if err != nil {
+		return nil, RetrievalHardNegativeMiningSummary{}, err
+	}
+	queries, skippedQueries, err := readBEIRQueries(cfg.QueriesPath, qrels, cfg.MaxQueries)
+	if err != nil {
+		return nil, RetrievalHardNegativeMiningSummary{}, err
+	}
+	if len(corpus) == 0 {
+		return nil, RetrievalHardNegativeMiningSummary{}, fmt.Errorf("corpus is empty")
+	}
+	if len(queries) == 0 {
+		return nil, RetrievalHardNegativeMiningSummary{}, fmt.Errorf("no qrels queries found in queries file")
+	}
+	docVectors, err := embedRetrievalTexts(ctx, model, corpus, cfg.BatchSize)
+	if err != nil {
+		return nil, RetrievalHardNegativeMiningSummary{}, fmt.Errorf("embed corpus: %w", err)
+	}
+	queryVectors, err := embedRetrievalTexts(ctx, model, queries, cfg.BatchSize)
+	if err != nil {
+		return nil, RetrievalHardNegativeMiningSummary{}, fmt.Errorf("embed queries: %w", err)
+	}
+	queryText := make(map[string]string, len(queries))
+	for _, query := range queries {
+		queryText[query.ID] = query.Text
+	}
+	docText := make(map[string]string, len(corpus))
+	for _, doc := range corpus {
+		docText[doc.ID] = doc.Text
+	}
+	summary := RetrievalHardNegativeMiningSummary{
+		DatasetName:          cfg.DatasetName,
+		Queries:              len(queries),
+		SkippedQueriesNoText: skippedQueries,
+	}
+	out := []EmbeddingTextHardNegativeExample{}
+	for _, query := range queryVectors {
+		if err := ctx.Err(); err != nil {
+			return nil, RetrievalHardNegativeMiningSummary{}, err
+		}
+		positives, skippedPositiveDocs := bm25MiningPositiveDocs(qrels[query.ID], docText)
+		summary.SkippedPositiveDocs += skippedPositiveDocs
+		if len(positives) == 0 {
+			continue
+		}
+		positiveIDs := make(map[string]bool, len(positives))
+		for _, positive := range positives {
+			positiveIDs[positive.ID] = true
+		}
+		candidateDepth := cfg.CandidateTopK + len(positiveIDs)
+		scores := topRetrievalScores(query.Vector, docVectors, candidateDepth)
+		negativeTexts := modelMiningNegativeTexts(scores, positiveIDs, docText, cfg)
+		if len(negativeTexts) == 0 {
+			summary.SkippedQueriesNoNegative++
+			continue
+		}
+		for _, positive := range positives {
+			if cfg.MaxExamples > 0 && len(out) >= cfg.MaxExamples {
+				break
+			}
+			exampleNegatives := negativeTexts
+			if len(exampleNegatives) > cfg.NegativesPerPositive {
+				exampleNegatives = exampleNegatives[:cfg.NegativesPerPositive]
+			}
+			out = append(out, EmbeddingTextHardNegativeExample{
+				Query:     queryText[query.ID],
+				Positive:  positive.Text,
+				Negatives: append([]string(nil), exampleNegatives...),
+			})
+			summary.PositivePairs++
+			summary.Negatives += len(exampleNegatives)
+		}
+		if cfg.MaxExamples > 0 && len(out) >= cfg.MaxExamples {
+			break
+		}
+	}
+	summary.Examples = len(out)
+	if len(out) == 0 {
+		return nil, summary, fmt.Errorf("model hard-negative mining produced no examples")
+	}
+	return out, summary, nil
+}
+
 func normalizeRetrievalHardNegativeMiningConfig(cfg RetrievalHardNegativeMiningConfig) RetrievalHardNegativeMiningConfig {
 	if cfg.DatasetName == "" {
 		cfg.DatasetName = "retrieval"
@@ -132,6 +229,9 @@ func normalizeRetrievalHardNegativeMiningConfig(cfg RetrievalHardNegativeMiningC
 	}
 	if cfg.CandidateTopK < cfg.NegativesPerPositive {
 		cfg.CandidateTopK = cfg.NegativesPerPositive
+	}
+	if cfg.BatchSize <= 0 {
+		cfg.BatchSize = 64
 	}
 	return cfg
 }
@@ -170,6 +270,35 @@ func bm25MiningNegativeTexts(queryText string, positiveIDs map[string]bool, inde
 	negatives := topBM25NonPositiveTexts(queryTokens, positiveIDs, index, docText, cfg.CandidateTopK)
 	if len(negatives) > cfg.NegativesPerPositive {
 		negatives = negatives[:cfg.NegativesPerPositive]
+	}
+	return negatives
+}
+
+func modelMiningNegativeTexts(scores []retrievalScoredDoc, positiveIDs map[string]bool, docText map[string]string, cfg RetrievalHardNegativeMiningConfig) []string {
+	limit := cfg.NegativesPerPositive
+	if cfg.CandidateTopK > 0 && cfg.CandidateTopK < limit {
+		limit = cfg.CandidateTopK
+	}
+	negatives := make([]string, 0, limit)
+	seen := map[string]bool{}
+	candidates := 0
+	for _, score := range scores {
+		if positiveIDs[score.ID] {
+			continue
+		}
+		text := strings.TrimSpace(docText[score.ID])
+		if text == "" || seen[text] {
+			continue
+		}
+		candidates++
+		if cfg.CandidateTopK > 0 && candidates > cfg.CandidateTopK {
+			break
+		}
+		seen[text] = true
+		negatives = append(negatives, text)
+		if len(negatives) >= limit {
+			break
+		}
 	}
 	return negatives
 }
