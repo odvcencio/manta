@@ -451,6 +451,21 @@ static int mantaCudaLaunchConv2D(MantaCudaRuntime* rt, MantaCudaKernel* kernel, 
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
+static int mantaCudaLaunchConv2DInputGrad(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr gradOut, CUdeviceptr weight, CUdeviceptr gradInput, int elements, int inChannels, int inHeight, int inWidth, int outChannels, int outHeight, int outWidth, int inPerGroup, int outPerGroup, int kernelH, int kernelW, int strideH, int strideW, int padH, int padW, int dilationH, int dilationW, char** err) {
+	void* args[] = {&gradOut, &weight, &gradInput, &elements, &inChannels, &inHeight, &inWidth, &outChannels, &outHeight, &outWidth, &inPerGroup, &outPerGroup, &kernelH, &kernelW, &strideH, &strideW, &padH, &padW, &dilationH, &dilationW};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
+static int mantaCudaLaunchConv2DWeightGrad(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr gradOut, CUdeviceptr gradWeight, int elements, int batches, int inChannels, int inHeight, int inWidth, int outChannels, int outHeight, int outWidth, int inPerGroup, int outPerGroup, int kernelH, int kernelW, int strideH, int strideW, int padH, int padW, int dilationH, int dilationW, char** err) {
+	void* args[] = {&input, &gradOut, &gradWeight, &elements, &batches, &inChannels, &inHeight, &inWidth, &outChannels, &outHeight, &outWidth, &inPerGroup, &outPerGroup, &kernelH, &kernelW, &strideH, &strideW, &padH, &padW, &dilationH, &dilationW};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
+static int mantaCudaLaunchConv2DBiasGrad(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr gradOut, CUdeviceptr gradBias, int outChannels, int batches, int outHeight, int outWidth, char** err) {
+	void* args[] = {&gradOut, &gradBias, &outChannels, &batches, &outHeight, &outWidth};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
 static int mantaCudaLaunchConv2DTranspose(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr weight, CUdeviceptr bias, CUdeviceptr out0, int elements, int inChannels, int inHeight, int inWidth, int outChannels, int outHeight, int outWidth, int inPerGroup, int outPerGroup, int kernelH, int kernelW, int strideH, int strideW, int padH, int padW, int dilationH, int dilationW, int hasBias, char** err) {
 	void* args[] = {&input, &weight, &bias, &out0, &elements, &inChannels, &inHeight, &inWidth, &outChannels, &outHeight, &outWidth, &inPerGroup, &outPerGroup, &kernelH, &kernelW, &strideH, &strideW, &padH, &padW, &dilationH, &dilationW, &hasBias};
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
@@ -820,6 +835,152 @@ extern "C" __global__ void manta_conv2d_transpose_forward(
         }
     }
     out[idx] = sum;
+}
+`
+
+const convBackwardKernelSource = `
+extern "C" __global__ void manta_conv2d_input_grad(
+    const float* gradOut,
+    const float* weight,
+    float* gradInput,
+    int elements,
+    int inChannels,
+    int inHeight,
+    int inWidth,
+    int outChannels,
+    int outHeight,
+    int outWidth,
+    int inPerGroup,
+    int outPerGroup,
+    int kernelH,
+    int kernelW,
+    int strideH,
+    int strideW,
+    int padH,
+    int padW,
+    int dilationH,
+    int dilationW
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= elements) {
+        return;
+    }
+    int ix = idx % inWidth;
+    int rem = idx / inWidth;
+    int iy = rem % inHeight;
+    rem /= inHeight;
+    int ic = rem % inChannels;
+    int n = rem / inChannels;
+    int group = ic / inPerGroup;
+    int icg = ic - group * inPerGroup;
+    float sum = 0.0f;
+    for (int ocg = 0; ocg < outPerGroup; ++ocg) {
+        int oc = group * outPerGroup + ocg;
+        for (int ky = 0; ky < kernelH; ++ky) {
+            int oyNumerator = iy + padH - ky * dilationH;
+            if (oyNumerator % strideH != 0) {
+                continue;
+            }
+            int oy = oyNumerator / strideH;
+            if (oy < 0 || oy >= outHeight) {
+                continue;
+            }
+            for (int kx = 0; kx < kernelW; ++kx) {
+                int oxNumerator = ix + padW - kx * dilationW;
+                if (oxNumerator % strideW != 0) {
+                    continue;
+                }
+                int ox = oxNumerator / strideW;
+                if (ox < 0 || ox >= outWidth) {
+                    continue;
+                }
+                int gradOutIdx = ((n * outChannels + oc) * outHeight + oy) * outWidth + ox;
+                int weightIdx = ((oc * inPerGroup + icg) * kernelH + ky) * kernelW + kx;
+                sum += gradOut[gradOutIdx] * weight[weightIdx];
+            }
+        }
+    }
+    gradInput[idx] = sum;
+}
+
+extern "C" __global__ void manta_conv2d_weight_grad(
+    const float* input,
+    const float* gradOut,
+    float* gradWeight,
+    int elements,
+    int batches,
+    int inChannels,
+    int inHeight,
+    int inWidth,
+    int outChannels,
+    int outHeight,
+    int outWidth,
+    int inPerGroup,
+    int outPerGroup,
+    int kernelH,
+    int kernelW,
+    int strideH,
+    int strideW,
+    int padH,
+    int padW,
+    int dilationH,
+    int dilationW
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= elements) {
+        return;
+    }
+    int kx = idx % kernelW;
+    int rem = idx / kernelW;
+    int ky = rem % kernelH;
+    rem /= kernelH;
+    int icg = rem % inPerGroup;
+    int oc = rem / inPerGroup;
+    int group = oc / outPerGroup;
+    int ic = group * inPerGroup + icg;
+    float sum = 0.0f;
+    for (int n = 0; n < batches; ++n) {
+        for (int oy = 0; oy < outHeight; ++oy) {
+            int iy = oy * strideH + ky * dilationH - padH;
+            if (iy < 0 || iy >= inHeight) {
+                continue;
+            }
+            for (int ox = 0; ox < outWidth; ++ox) {
+                int ix = ox * strideW + kx * dilationW - padW;
+                if (ix < 0 || ix >= inWidth) {
+                    continue;
+                }
+                int inputIdx = ((n * inChannels + ic) * inHeight + iy) * inWidth + ix;
+                int gradOutIdx = ((n * outChannels + oc) * outHeight + oy) * outWidth + ox;
+                sum += input[inputIdx] * gradOut[gradOutIdx];
+            }
+        }
+    }
+    gradWeight[idx] = sum;
+}
+
+extern "C" __global__ void manta_conv2d_bias_grad(
+    const float* gradOut,
+    float* gradBias,
+    int outChannels,
+    int batches,
+    int outHeight,
+    int outWidth
+) {
+    int oc = blockIdx.x * blockDim.x + threadIdx.x;
+    if (oc >= outChannels) {
+        return;
+    }
+    float sum = 0.0f;
+    for (int n = 0; n < batches; ++n) {
+        for (int y = 0; y < outHeight; ++y) {
+            for (int x = 0; x < outWidth; ++x) {
+                int idx = ((n * outChannels + oc) * outHeight + y) * outWidth + x;
+                sum += gradOut[idx];
+            }
+        }
+    }
+    gradBias[oc] = sum;
 }
 `
 
@@ -1382,6 +1543,9 @@ type deviceRuntime struct {
 	quantizeKernel     *auxKernel
 	gdnKernel          *auxKernel
 	conv2DKernel       *auxKernel
+	conv2DInputGrad    *auxKernel
+	conv2DWeightGrad   *auxKernel
+	conv2DBiasGrad     *auxKernel
 	conv2DTransKernel  *auxKernel
 	turboQEncodeKernel *auxKernel
 	turboQDecodeKernel *auxKernel
@@ -1451,6 +1615,12 @@ func (rt *deviceRuntime) close() {
 	rt.gdnKernel = nil
 	rt.destroyAuxKernel(rt.conv2DKernel)
 	rt.conv2DKernel = nil
+	rt.destroyAuxKernel(rt.conv2DInputGrad)
+	rt.conv2DInputGrad = nil
+	rt.destroyAuxKernel(rt.conv2DWeightGrad)
+	rt.conv2DWeightGrad = nil
+	rt.destroyAuxKernel(rt.conv2DBiasGrad)
+	rt.conv2DBiasGrad = nil
 	rt.destroyAuxKernel(rt.conv2DTransKernel)
 	rt.conv2DTransKernel = nil
 	rt.destroyAuxKernel(rt.turboQEncodeKernel)
@@ -1916,6 +2086,51 @@ func (rt *deviceRuntime) ensureConv2DKernel() (*auxKernel, error) {
 	return kernel, nil
 }
 
+func (rt *deviceRuntime) ensureConv2DInputGradKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.conv2DInputGrad != nil {
+		return rt.conv2DInputGrad, nil
+	}
+	kernel, err := rt.compileAuxKernel(convBackwardKernelSource, "manta_conv2d_input_grad")
+	if err != nil {
+		return nil, err
+	}
+	rt.conv2DInputGrad = kernel
+	return kernel, nil
+}
+
+func (rt *deviceRuntime) ensureConv2DWeightGradKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.conv2DWeightGrad != nil {
+		return rt.conv2DWeightGrad, nil
+	}
+	kernel, err := rt.compileAuxKernel(convBackwardKernelSource, "manta_conv2d_weight_grad")
+	if err != nil {
+		return nil, err
+	}
+	rt.conv2DWeightGrad = kernel
+	return kernel, nil
+}
+
+func (rt *deviceRuntime) ensureConv2DBiasGradKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.conv2DBiasGrad != nil {
+		return rt.conv2DBiasGrad, nil
+	}
+	kernel, err := rt.compileAuxKernel(convBackwardKernelSource, "manta_conv2d_bias_grad")
+	if err != nil {
+		return nil, err
+	}
+	rt.conv2DBiasGrad = kernel
+	return kernel, nil
+}
+
 func (rt *deviceRuntime) ensureConv2DTransposeKernel() (*auxKernel, error) {
 	if rt == nil {
 		return nil, fmt.Errorf("cuda runtime is not initialized")
@@ -2158,6 +2373,101 @@ func (rt *deviceRuntime) runConv2DStep(inputs []*backend.Tensor, outputType mant
 		return backend.StepDispatchResult{}, err
 	}
 	return cudaConvStepResult(outputType, "__builtin_cuda_conv2d", "conv2d", outShape, outHost, cfgMetadata(cfg)), nil
+}
+
+func (rt *deviceRuntime) runConv2DBackward(input, weight, bias, gradOut *backend.Tensor, cfg cudaConv2DConfig) (*backend.Tensor, *backend.Tensor, *backend.Tensor, error) {
+	if rt == nil || rt.ptr == nil {
+		return nil, nil, nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if input == nil || weight == nil || gradOut == nil {
+		return nil, nil, nil, fmt.Errorf("cuda conv2d backward expects input, weight, and grad output")
+	}
+	if len(input.Shape) != 4 || len(weight.Shape) != 4 || len(gradOut.Shape) != 4 {
+		return nil, nil, nil, fmt.Errorf("cuda conv2d backward expects NCHW/OIHW tensors")
+	}
+	if gradOut.Shape[0] != cfg.batches || gradOut.Shape[1] != cfg.outChannels || gradOut.Shape[2] != cfg.outHeight || gradOut.Shape[3] != cfg.outWidth {
+		return nil, nil, nil, fmt.Errorf("cuda conv2d backward grad output shape %v does not match config", gradOut.Shape)
+	}
+	inputKernel, err := rt.ensureConv2DInputGradKernel()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	weightKernel, err := rt.ensureConv2DWeightGradKernel()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	inputBuf, err := rt.uploadFloat32(input.F32)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer rt.freeBuffer(inputBuf)
+	weightBuf, err := rt.uploadFloat32(weight.F32)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer rt.freeBuffer(weightBuf)
+	gradOutBuf, err := rt.uploadFloat32(gradOut.F32)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer rt.freeBuffer(gradOutBuf)
+	gradInBuf, err := rt.allocFloat32(input.Elements())
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer rt.freeBuffer(gradInBuf)
+	gradWBuf, err := rt.allocFloat32(weight.Elements())
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer rt.freeBuffer(gradWBuf)
+	block := uint(128)
+	if input.Elements() > 0 {
+		grid := uint((input.Elements() + int(block) - 1) / int(block))
+		if err := rt.launchConv2DInputGrad(inputKernel, grid, block, gradOutBuf, weightBuf, gradInBuf, input.Elements(), cfg); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	if weight.Elements() > 0 {
+		grid := uint((weight.Elements() + int(block) - 1) / int(block))
+		if err := rt.launchConv2DWeightGrad(weightKernel, grid, block, inputBuf, gradOutBuf, gradWBuf, weight.Elements(), cfg); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	gradInHost := make([]float32, input.Elements())
+	if err := rt.downloadFloat32(gradInHost, gradInBuf); err != nil {
+		return nil, nil, nil, err
+	}
+	gradWHost := make([]float32, weight.Elements())
+	if err := rt.downloadFloat32(gradWHost, gradWBuf); err != nil {
+		return nil, nil, nil, err
+	}
+	var gradB *backend.Tensor
+	if bias != nil {
+		biasKernel, err := rt.ensureConv2DBiasGradKernel()
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		gradBBuf, err := rt.allocFloat32(bias.Elements())
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		defer rt.freeBuffer(gradBBuf)
+		if cfg.outChannels > 0 {
+			grid := uint((cfg.outChannels + int(block) - 1) / int(block))
+			if err := rt.launchConv2DBiasGrad(biasKernel, grid, block, gradOutBuf, gradBBuf, cfg); err != nil {
+				return nil, nil, nil, err
+			}
+		}
+		gradBHost := make([]float32, bias.Elements())
+		if err := rt.downloadFloat32(gradBHost, gradBBuf); err != nil {
+			return nil, nil, nil, err
+		}
+		gradB = &backend.Tensor{DType: bias.DType, Shape: append([]int(nil), bias.Shape...), F32: gradBHost}
+	}
+	gradIn := &backend.Tensor{DType: input.DType, Shape: append([]int(nil), input.Shape...), F32: gradInHost}
+	gradW := &backend.Tensor{DType: weight.DType, Shape: append([]int(nil), weight.Shape...), F32: gradWHost}
+	return gradIn, gradW, gradB, nil
 }
 
 func (rt *deviceRuntime) runConv2DTransposeStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaConv2DTransposeConfig) (backend.StepDispatchResult, error) {
@@ -2713,6 +3023,104 @@ func (rt *deviceRuntime) launchConv2D(kernel *auxKernel, grid, block uint, input
 		C.int(cfg.dilationH),
 		C.int(cfg.dilationW),
 		C.int(hasBias),
+		&errStr,
+	) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchConv2DInputGrad(kernel *auxKernel, grid, block uint, gradOut, weight, gradInput C.CUdeviceptr, elements int, cfg cudaConv2DConfig) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda conv2d input grad kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchConv2DInputGrad(
+		rt.ptr,
+		kernel.ptr,
+		C.uint(grid),
+		C.uint(block),
+		gradOut,
+		weight,
+		gradInput,
+		C.int(elements),
+		C.int(cfg.inChannels),
+		C.int(cfg.inHeight),
+		C.int(cfg.inWidth),
+		C.int(cfg.outChannels),
+		C.int(cfg.outHeight),
+		C.int(cfg.outWidth),
+		C.int(cfg.inPerGroup),
+		C.int(cfg.outPerGroup),
+		C.int(cfg.kernelH),
+		C.int(cfg.kernelW),
+		C.int(cfg.strideH),
+		C.int(cfg.strideW),
+		C.int(cfg.padH),
+		C.int(cfg.padW),
+		C.int(cfg.dilationH),
+		C.int(cfg.dilationW),
+		&errStr,
+	) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchConv2DWeightGrad(kernel *auxKernel, grid, block uint, input, gradOut, gradWeight C.CUdeviceptr, elements int, cfg cudaConv2DConfig) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda conv2d weight grad kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchConv2DWeightGrad(
+		rt.ptr,
+		kernel.ptr,
+		C.uint(grid),
+		C.uint(block),
+		input,
+		gradOut,
+		gradWeight,
+		C.int(elements),
+		C.int(cfg.batches),
+		C.int(cfg.inChannels),
+		C.int(cfg.inHeight),
+		C.int(cfg.inWidth),
+		C.int(cfg.outChannels),
+		C.int(cfg.outHeight),
+		C.int(cfg.outWidth),
+		C.int(cfg.inPerGroup),
+		C.int(cfg.outPerGroup),
+		C.int(cfg.kernelH),
+		C.int(cfg.kernelW),
+		C.int(cfg.strideH),
+		C.int(cfg.strideW),
+		C.int(cfg.padH),
+		C.int(cfg.padW),
+		C.int(cfg.dilationH),
+		C.int(cfg.dilationW),
+		&errStr,
+	) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchConv2DBiasGrad(kernel *auxKernel, grid, block uint, gradOut, gradBias C.CUdeviceptr, cfg cudaConv2DConfig) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda conv2d bias grad kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchConv2DBiasGrad(
+		rt.ptr,
+		kernel.ptr,
+		C.uint(grid),
+		C.uint(block),
+		gradOut,
+		gradBias,
+		C.int(cfg.outChannels),
+		C.int(cfg.batches),
+		C.int(cfg.outHeight),
+		C.int(cfg.outWidth),
 		&errStr,
 	) != 0 {
 		return cStringError(errStr)
