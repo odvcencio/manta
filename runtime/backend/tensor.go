@@ -16,16 +16,22 @@ const (
 	DeviceCUDA
 )
 
+// TensorMaterializer downloads backend-owned device storage into host storage.
+type TensorMaterializer interface {
+	Materialize(tensor *Tensor) error
+}
+
 // Tensor is the bootstrap dense runtime tensor representation.
 // f16 values are stored in F32 with DType=f16 until a real device path exists.
 type Tensor struct {
-	DType     string
-	Shape     []int
-	F32       []float32
-	I32       []int32
-	I64       []int64
-	Device    Device  `json:"-"`
-	DevicePtr uintptr `json:"-"`
+	DType        string
+	Shape        []int
+	F32          []float32
+	I32          []int32
+	I64          []int64
+	Device       Device             `json:"-"`
+	DevicePtr    uintptr            `json:"-"`
+	Materializer TensorMaterializer `json:"-"`
 }
 
 // KVCache is the mutable runtime cache object used by kv_read/kv_write.
@@ -131,13 +137,14 @@ func (t *Tensor) Clone() *Tensor {
 		return nil
 	}
 	return &Tensor{
-		DType:     t.DType,
-		Shape:     append([]int(nil), t.Shape...),
-		F32:       append([]float32(nil), t.F32...),
-		I32:       append([]int32(nil), t.I32...),
-		I64:       append([]int64(nil), t.I64...),
-		Device:    t.Device,
-		DevicePtr: t.DevicePtr,
+		DType:        t.DType,
+		Shape:        append([]int(nil), t.Shape...),
+		F32:          append([]float32(nil), t.F32...),
+		I32:          append([]int32(nil), t.I32...),
+		I64:          append([]int64(nil), t.I64...),
+		Device:       t.Device,
+		DevicePtr:    t.DevicePtr,
+		Materializer: t.Materializer,
 	}
 }
 

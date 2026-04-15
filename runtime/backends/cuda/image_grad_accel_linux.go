@@ -74,7 +74,7 @@ func (a *imageGradAccelerator) RunConv2D(input, weight, bias *backend.Tensor, at
 	outShape := []int{cfg.batches, cfg.outChannels, cfg.outHeight, cfg.outWidth}
 	outputElements := cfg.batches * cfg.outChannels * cfg.outHeight * cfg.outWidth
 	if outputElements == 0 {
-		return newDeviceTensor(tensorDType(input), outShape, 0), true, nil
+		return a.newDeviceTensor(tensorDType(input), outShape, 0), true, nil
 	}
 	outBuf, err := a.allocStepFloat32(outputElements)
 	if err != nil {
@@ -85,7 +85,7 @@ func (a *imageGradAccelerator) RunConv2D(input, weight, bias *backend.Tensor, at
 	if err := a.device.launchConv2D(kernel, grid, block, inputBuf, weightBuf, biasBuf, outBuf, outputElements, cfg); err != nil {
 		return nil, true, err
 	}
-	return newDeviceTensor(tensorDType(input), outShape, outBuf), true, nil
+	return a.newDeviceTensor(tensorDType(input), outShape, outBuf), true, nil
 }
 
 func (a *imageGradAccelerator) RunConv2DBackward(input, weight, bias, gradOut *backend.Tensor, attrs map[string]string) (*backend.Tensor, *backend.Tensor, *backend.Tensor, bool, error) {
@@ -169,7 +169,7 @@ func (a *imageGradAccelerator) RunConv2DBackward(input, weight, bias, gradOut *b
 		}
 		gradB = &backend.Tensor{DType: bias.DType, Shape: append([]int(nil), bias.Shape...), F32: gradBHost}
 	}
-	gradIn := newDeviceTensor(input.DType, input.Shape, gradInBuf)
+	gradIn := a.newDeviceTensor(input.DType, input.Shape, gradInBuf)
 	gradW := &backend.Tensor{DType: weight.DType, Shape: append([]int(nil), weight.Shape...), F32: gradWHost}
 	return gradIn, gradW, gradB, true, nil
 }
@@ -208,7 +208,7 @@ func (a *imageGradAccelerator) RunConv2DTranspose(input, weight, bias *backend.T
 	outShape := []int{cfg.batches, cfg.outChannels, cfg.outHeight, cfg.outWidth}
 	outputElements := cfg.batches * cfg.outChannels * cfg.outHeight * cfg.outWidth
 	if outputElements == 0 {
-		return newDeviceTensor(tensorDType(input), outShape, 0), true, nil
+		return a.newDeviceTensor(tensorDType(input), outShape, 0), true, nil
 	}
 	outBuf, err := a.allocStepFloat32(outputElements)
 	if err != nil {
@@ -219,7 +219,7 @@ func (a *imageGradAccelerator) RunConv2DTranspose(input, weight, bias *backend.T
 	if err := a.device.launchConv2DTranspose(kernel, grid, block, inputBuf, weightBuf, biasBuf, outBuf, outputElements, cfg); err != nil {
 		return nil, true, err
 	}
-	return newDeviceTensor(tensorDType(input), outShape, outBuf), true, nil
+	return a.newDeviceTensor(tensorDType(input), outShape, outBuf), true, nil
 }
 
 func (a *imageGradAccelerator) RunConv2DTransposeBackward(input, weight, bias, gradOut *backend.Tensor, attrs map[string]string) (*backend.Tensor, *backend.Tensor, *backend.Tensor, bool, error) {
@@ -309,7 +309,7 @@ func (a *imageGradAccelerator) RunConv2DTransposeBackward(input, weight, bias, g
 		}
 		gradB = &backend.Tensor{DType: bias.DType, Shape: append([]int(nil), bias.Shape...), F32: gradBHost}
 	}
-	gradIn := newDeviceTensor(input.DType, input.Shape, gradInBuf)
+	gradIn := a.newDeviceTensor(input.DType, input.Shape, gradInBuf)
 	gradW := &backend.Tensor{DType: weight.DType, Shape: append([]int(nil), weight.Shape...), F32: gradWHost}
 	return gradIn, gradW, gradB, true, nil
 }
@@ -328,7 +328,7 @@ func (a *imageGradAccelerator) RunGDN(input, beta, gamma *backend.Tensor, invers
 	}
 	elements := input.Elements()
 	if elements == 0 {
-		return newDeviceTensor(tensorDType(input), input.Shape, 0), true, nil
+		return a.newDeviceTensor(tensorDType(input), input.Shape, 0), true, nil
 	}
 	channels, height, width := input.Shape[1], input.Shape[2], input.Shape[3]
 	inputBuf, err := a.bufferForTensor(input)
@@ -356,7 +356,7 @@ func (a *imageGradAccelerator) RunGDN(input, beta, gamma *backend.Tensor, invers
 	if err := a.device.launchGDN(kernel, grid, block, inputBuf, betaBuf, gammaBuf, outBuf, elements, channels, height, width, inverseFlag); err != nil {
 		return nil, true, err
 	}
-	return newDeviceTensor(tensorDType(input), input.Shape, outBuf), true, nil
+	return a.newDeviceTensor(tensorDType(input), input.Shape, outBuf), true, nil
 }
 
 func (a *imageGradAccelerator) RunGDNBackward(input, beta, gamma, gradOut *backend.Tensor, inverse bool) (*backend.Tensor, *backend.Tensor, *backend.Tensor, bool, error) {
@@ -446,7 +446,7 @@ func (a *imageGradAccelerator) RunGDNBackward(input, beta, gamma, gradOut *backe
 	copy(gradBetaHost, activeBeta)
 	gradGammaHost := make([]float32, gamma.Elements())
 	copy(gradGammaHost, activeGamma)
-	gradIn := newDeviceTensor(input.DType, input.Shape, gradInBuf)
+	gradIn := a.newDeviceTensor(input.DType, input.Shape, gradInBuf)
 	gradBeta := &backend.Tensor{DType: beta.DType, Shape: append([]int(nil), beta.Shape...), F32: gradBetaHost}
 	gradGamma := &backend.Tensor{DType: gamma.DType, Shape: append([]int(nil), gamma.Shape...), F32: gradGammaHost}
 	return gradIn, gradBeta, gradGamma, true, nil
@@ -468,6 +468,7 @@ func (a *imageGradAccelerator) Materialize(tensor *backend.Tensor) error {
 	}
 	tensor.Device = backend.DeviceCPU
 	tensor.DevicePtr = 0
+	tensor.Materializer = nil
 	return nil
 }
 
@@ -525,15 +526,16 @@ func (a *imageGradAccelerator) allocStepFloat32(elements int) (C.CUdeviceptr, er
 	return ptr, nil
 }
 
-func newDeviceTensor(dtype string, shape []int, ptr C.CUdeviceptr) *backend.Tensor {
+func (a *imageGradAccelerator) newDeviceTensor(dtype string, shape []int, ptr C.CUdeviceptr) *backend.Tensor {
 	if dtype == "" {
 		dtype = "f32"
 	}
 	return &backend.Tensor{
-		DType:     dtype,
-		Shape:     append([]int(nil), shape...),
-		Device:    backend.DeviceCUDA,
-		DevicePtr: uintptr(ptr),
+		DType:        dtype,
+		Shape:        append([]int(nil), shape...),
+		Device:       backend.DeviceCUDA,
+		DevicePtr:    uintptr(ptr),
+		Materializer: a,
 	}
 }
 

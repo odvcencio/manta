@@ -1422,7 +1422,7 @@ func accumulateGrad(node *GradTensor, grad *Tensor) error {
 	if !sameTensorShape(node.Value, grad) || !tensorHasHostOrDeviceData(grad) {
 		return fmt.Errorf("gradient shape %v does not match value shape %v", shapeOf(grad), node.Value.Shape)
 	}
-	if grad.Device == DeviceCUDA && grad.DevicePtr != 0 && len(grad.F32) != grad.Elements() {
+	if tensorNeedsMaterialization(grad) {
 		if node.Grad == nil {
 			node.Grad = grad.Clone()
 			return nil
@@ -1430,16 +1430,43 @@ func accumulateGrad(node *GradTensor, grad *Tensor) error {
 		if node.Grad.Device == DeviceCUDA && node.Grad.DevicePtr == grad.DevicePtr {
 			return nil
 		}
-		return fmt.Errorf("cannot accumulate multiple device-resident gradients without materialization")
+		if err := materializeDeviceResidentTensor(node.Grad); err != nil {
+			return err
+		}
+		if err := materializeDeviceResidentTensor(grad); err != nil {
+			return err
+		}
 	}
 	if node.Grad == nil {
 		node.Grad = zeroGradLike(node.Value)
 	}
-	if node.Grad.Device == DeviceCUDA && node.Grad.DevicePtr != 0 && len(node.Grad.F32) != node.Grad.Elements() {
-		return fmt.Errorf("cannot accumulate host gradient into device-resident gradient without materialization")
+	if tensorNeedsMaterialization(node.Grad) {
+		if err := materializeDeviceResidentTensor(node.Grad); err != nil {
+			return err
+		}
 	}
 	for i, v := range grad.F32 {
 		node.Grad.F32[i] += v
+	}
+	return nil
+}
+
+func tensorNeedsMaterialization(t *Tensor) bool {
+	return t != nil && t.Device == DeviceCUDA && t.DevicePtr != 0 && len(t.F32) != t.Elements()
+}
+
+func materializeDeviceResidentTensor(t *Tensor) error {
+	if !tensorNeedsMaterialization(t) {
+		return nil
+	}
+	if t.Materializer == nil {
+		return fmt.Errorf("cannot materialize CUDA tensor shape %v without materializer", shapeOf(t))
+	}
+	if err := t.Materializer.Materialize(t); err != nil {
+		return err
+	}
+	if len(t.F32) != t.Elements() {
+		return fmt.Errorf("materialized CUDA tensor shape %v is missing host storage", shapeOf(t))
 	}
 	return nil
 }
@@ -1470,8 +1497,11 @@ func materializeTensorValue(imageGrad ImageGradAccelerator, tensor *Tensor) erro
 	if tensor == nil || len(tensor.F32) == tensor.Elements() {
 		return nil
 	}
-	if tensor.Device == DeviceCUDA && tensor.DevicePtr != 0 && imageGrad != nil {
-		return imageGrad.Materialize(tensor)
+	if tensor.Device == DeviceCUDA && tensor.DevicePtr != 0 {
+		if imageGrad != nil {
+			return imageGrad.Materialize(tensor)
+		}
+		return materializeDeviceResidentTensor(tensor)
 	}
 	if tensor.Elements() == 0 {
 		return nil

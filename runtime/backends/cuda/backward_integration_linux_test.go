@@ -225,6 +225,49 @@ func TestCUDAImageGradAcceleratorAutogradMatchesReference(t *testing.T) {
 	}
 }
 
+func TestCUDAImageGradAcceleratorAutogradFanInMatchesReference(t *testing.T) {
+	accel, kind, err := backend.NewPreferredImageGradAccelerator(mantaartifact.BackendCUDA)
+	if err != nil {
+		t.Fatalf("image grad accelerator: %v", err)
+	}
+	if accel == nil {
+		t.Skip("no cuda image grad accelerator available")
+	}
+	defer accel.Close()
+	if kind != mantaartifact.BackendCUDA {
+		t.Fatalf("accelerator backend = %q, want cuda", kind)
+	}
+
+	mod := imageGradAutogradFanInModule()
+	inputs := imageGradAutogradFanInInputs()
+	weights := imageGradAutogradFanInWeights()
+	want, err := backend.ExecuteAutograd(mod, backend.GradRequest{
+		Entry:   "train",
+		Inputs:  cloneTensorMap(inputs),
+		Weights: cloneTensorMap(weights),
+	})
+	if err != nil {
+		t.Fatalf("reference autograd: %v", err)
+	}
+	got, err := backend.ExecuteAutograd(mod, backend.GradRequest{
+		Entry:                "train",
+		Inputs:               cloneTensorMap(inputs),
+		Weights:              cloneTensorMap(weights),
+		ImageGradAccelerator: accel,
+	})
+	if err != nil {
+		t.Fatalf("cuda-accelerated autograd: %v", err)
+	}
+	assertTensorClose(t, got.Outputs["loss"], []int{1}, want.Outputs["loss"].F32)
+	for name, wantGrad := range want.Gradients {
+		gotGrad := got.Gradients[name]
+		if gotGrad == nil {
+			t.Fatalf("missing gradient %q", name)
+		}
+		assertTensorClose(t, gotGrad, wantGrad.Shape, wantGrad.F32)
+	}
+}
+
 func TestCUDAImageGradAcceleratorKeepsForwardResident(t *testing.T) {
 	accel, kind, err := backend.NewPreferredImageGradAccelerator(mantaartifact.BackendCUDA)
 	if err != nil {
@@ -366,10 +409,64 @@ func imageGradAutogradModule() *mantaartifact.Module {
 	return mod
 }
 
+func imageGradAutogradFanInModule() *mantaartifact.Module {
+	tensorType := func(dtype string, shape []string) mantaartifact.ValueType {
+		return mantaartifact.ValueType{
+			Kind:   mantaartifact.ValueTensor,
+			Tensor: &mantaartifact.TensorType{DType: dtype, Shape: append([]string(nil), shape...)},
+		}
+	}
+	mod := mantaartifact.NewModule("cuda_image_grad_autograd_fan_in")
+	mod.Params = []mantaartifact.Param{
+		{Name: "w0", Type: tensorType("f16", []string{"3", "2", "2", "2"}), Binding: "weights/w0", Trainable: true},
+		{Name: "b0", Type: tensorType("f16", []string{"3"}), Binding: "weights/b0", Trainable: true},
+		{Name: "w1", Type: tensorType("f16", []string{"2", "3", "1", "1"}), Binding: "weights/w1", Trainable: true},
+		{Name: "b1", Type: tensorType("f16", []string{"2"}), Binding: "weights/b1", Trainable: true},
+		{Name: "w2", Type: tensorType("f16", []string{"2", "3", "1", "1"}), Binding: "weights/w2", Trainable: true},
+		{Name: "b2", Type: tensorType("f16", []string{"2"}), Binding: "weights/b2", Trainable: true},
+	}
+	mod.EntryPoints = []mantaartifact.EntryPoint{{
+		Name: "train",
+		Kind: mantaartifact.EntryPointPipeline,
+		Inputs: []mantaartifact.ValueBinding{
+			{Name: "x", Type: tensorType("f16", []string{"1", "2", "5", "6"})},
+			{Name: "target1", Type: tensorType("f16", []string{"1", "2", "4", "5"})},
+			{Name: "target2", Type: tensorType("f16", []string{"1", "2", "4", "5"})},
+		},
+		Outputs: []mantaartifact.ValueBinding{{Name: "loss", Type: tensorType("f32", []string{"1"})}},
+	}}
+	mod.Buffers = []mantaartifact.Buffer{
+		{Name: "y", DType: "f16", Shape: []string{"1", "3", "4", "5"}},
+		{Name: "y1", DType: "f16", Shape: []string{"1", "2", "4", "5"}},
+		{Name: "y2", DType: "f16", Shape: []string{"1", "2", "4", "5"}},
+		{Name: "loss1", DType: "f32", Shape: []string{"1"}},
+		{Name: "loss2", DType: "f32", Shape: []string{"1"}},
+		{Name: "loss", DType: "f32", Shape: []string{"1"}},
+	}
+	mod.Steps = []mantaartifact.Step{
+		{Entry: "train", Kind: mantaartifact.StepConv2D, Name: "stem", Inputs: []string{"x", "w0", "b0"}, Outputs: []string{"y"}},
+		{Entry: "train", Kind: mantaartifact.StepConv2D, Name: "branch1", Inputs: []string{"y", "w1", "b1"}, Outputs: []string{"y1"}},
+		{Entry: "train", Kind: mantaartifact.StepConv2D, Name: "branch2", Inputs: []string{"y", "w2", "b2"}, Outputs: []string{"y2"}},
+		{Entry: "train", Kind: mantaartifact.StepMSELoss, Name: "mse1", Inputs: []string{"y1", "target1"}, Outputs: []string{"loss1"}},
+		{Entry: "train", Kind: mantaartifact.StepMSELoss, Name: "mse2", Inputs: []string{"y2", "target2"}, Outputs: []string{"loss2"}},
+		{Entry: "train", Kind: mantaartifact.StepScalarAdd, Name: "loss_sum", Inputs: []string{"loss1", "loss2"}, Outputs: []string{"loss"}},
+		{Entry: "train", Kind: mantaartifact.StepReturn, Name: "return", Outputs: []string{"loss"}},
+	}
+	return mod
+}
+
 func imageGradAutogradInputs() map[string]*backend.Tensor {
 	return map[string]*backend.Tensor{
 		"x":      backend.NewTensorF16([]int{1, 2, 5, 6}, patternedFloats(1*2*5*6, 0.031)),
 		"target": backend.NewTensorF16([]int{1, 2, 5, 6}, patternedFloats(1*2*5*6, -0.017)),
+	}
+}
+
+func imageGradAutogradFanInInputs() map[string]*backend.Tensor {
+	return map[string]*backend.Tensor{
+		"x":       backend.NewTensorF16([]int{1, 2, 5, 6}, patternedFloats(1*2*5*6, 0.029)),
+		"target1": backend.NewTensorF16([]int{1, 2, 4, 5}, patternedFloats(1*2*4*5, -0.015)),
+		"target2": backend.NewTensorF16([]int{1, 2, 4, 5}, patternedFloats(1*2*4*5, 0.021)),
 	}
 }
 
@@ -381,6 +478,17 @@ func imageGradAutogradWeights() map[string]*backend.Tensor {
 		"gamma": backend.NewTensorF16([]int{3, 3}, []float32{0.08, 0.01, 0.02, 0.015, 0.07, 0.025, 0.012, 0.018, 0.09}),
 		"wt":    backend.NewTensorF16([]int{3, 2, 2, 2}, patternedFloats(3*2*2*2, -0.019)),
 		"bt":    backend.NewTensorF16([]int{2}, []float32{0.015, -0.005}),
+	}
+}
+
+func imageGradAutogradFanInWeights() map[string]*backend.Tensor {
+	return map[string]*backend.Tensor{
+		"w0": backend.NewTensorF16([]int{3, 2, 2, 2}, patternedFloats(3*2*2*2, 0.019)),
+		"b0": backend.NewTensorF16([]int{3}, []float32{0.012, -0.018, 0.026}),
+		"w1": backend.NewTensorF16([]int{2, 3, 1, 1}, patternedFloats(2*3, -0.024)),
+		"b1": backend.NewTensorF16([]int{2}, []float32{0.007, -0.011}),
+		"w2": backend.NewTensorF16([]int{2, 3, 1, 1}, patternedFloats(2*3, 0.027)),
+		"b2": backend.NewTensorF16([]int{2}, []float32{-0.005, 0.013}),
 	}
 }
 
