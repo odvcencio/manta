@@ -1414,6 +1414,9 @@ func (t *EmbeddingTrainer) runBatch(batch []EmbeddingPairExample, update bool) (
 	}
 	forward := t.prepareForwardWeights()
 	t.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	if metrics, ok, err := t.tryRunPairBatchBatched(batch, forward, update); ok || err != nil {
+		return metrics, err
+	}
 	gradToken := make([]float32, len(t.tokenEmbed.F32))
 	gradAttnQ := make([]float32, tensorDataLen(t.attentionQuery))
 	gradAttnK := make([]float32, tensorDataLen(t.attentionKey))
@@ -1461,6 +1464,101 @@ func (t *EmbeddingTrainer) runBatch(batch []EmbeddingPairExample, update bool) (
 		AverageScore: totalScore * batchScale,
 		BatchSize:    len(batch),
 	}, nil
+}
+
+func (t *EmbeddingTrainer) tryRunPairBatchBatched(batch []EmbeddingPairExample, forward *embeddingForwardWeights, update bool) (EmbeddingTrainMetrics, bool, error) {
+	if t == nil || forward == nil || len(batch) == 0 {
+		return EmbeddingTrainMetrics{}, false, nil
+	}
+	if update {
+		if !batchedPairwiseTrainEnabled() {
+			return EmbeddingTrainMetrics{}, false, nil
+		}
+	} else if !batchedPairwiseEvalEnabled() {
+		return EmbeddingTrainMetrics{}, false, nil
+	}
+	lefts, rights, ok, err := t.tryEncodePairBatchBatchedForward(batch, forward, update)
+	if err != nil || !ok {
+		return EmbeddingTrainMetrics{}, ok, err
+	}
+	defer t.releaseEncodedSequences(lefts)
+	defer t.releaseEncodedSequences(rights)
+
+	gradToken := make([]float32, len(t.tokenEmbed.F32))
+	gradAttnQ := make([]float32, tensorDataLen(t.attentionQuery))
+	gradAttnK := make([]float32, tensorDataLen(t.attentionKey))
+	gradAttnV := make([]float32, tensorDataLen(t.attentionValue))
+	gradAttnO := make([]float32, tensorDataLen(t.attentionOutput))
+	gradHidden := make([]float32, len(t.hiddenProjectionData()))
+	gradProj := make([]float32, len(t.projection.F32))
+	leftGrads := make([][]float32, len(lefts))
+	rightGrads := make([][]float32, len(rights))
+
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	for i, example := range batch {
+		if i >= len(lefts) || i >= len(rights) || lefts[i] == nil || rights[i] == nil {
+			return EmbeddingTrainMetrics{}, true, fmt.Errorf("batch %d: encoder produced nil pair", i)
+		}
+		score, gradLeft, gradRight := cosineGrad(lefts[i].pooled, rights[i].pooled)
+		scale := score - example.Target
+		totalLoss += 0.5 * scale * scale
+		totalScore += score
+		for j := range gradLeft {
+			gradLeft[j] *= scale
+			gradRight[j] *= scale
+		}
+		leftGrads[i] = gradLeft
+		rightGrads[i] = gradRight
+	}
+
+	if update {
+		if !t.tryBackpropContrastiveBatch(
+			lefts,
+			rights,
+			leftGrads,
+			rightGrads,
+			forward.attnQ,
+			forward.attnK,
+			forward.attnV,
+			forward.attnO,
+			forward.hidden,
+			forward.proj,
+			gradToken,
+			gradAttnQ,
+			gradAttnK,
+			gradAttnV,
+			gradAttnO,
+			gradHidden,
+			gradProj,
+		) {
+			for i, left := range lefts {
+				inputGrad := t.backpropEncodedSequence(left, leftGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
+				accumulateTokenGrad(left.tokens, inputGrad, gradToken, t.tokenEmbed.Shape[1], t.tokenEmbed.Shape[0])
+			}
+			for i, right := range rights {
+				inputGrad := t.backpropEncodedSequence(right, rightGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
+				accumulateTokenGrad(right.tokens, inputGrad, gradToken, t.tokenEmbed.Shape[1], t.tokenEmbed.Shape[0])
+			}
+		}
+
+		batchScale := float32(1) / float32(len(batch))
+		t.step++
+		t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
+		t.applyOptimizerUpdate(t.attnQParam.Name, t.attentionQuery, t.attnQMom1, t.attnQMom2, gradAttnQ, batchScale)
+		t.applyOptimizerUpdate(t.attnKParam.Name, t.attentionKey, t.attnKMom1, t.attnKMom2, gradAttnK, batchScale)
+		t.applyOptimizerUpdate(t.attnVParam.Name, t.attentionValue, t.attnVMom1, t.attnVMom2, gradAttnV, batchScale)
+		t.applyOptimizerUpdate(t.attnOParam.Name, t.attentionOutput, t.attnOMom1, t.attnOMom2, gradAttnO, batchScale)
+		t.applyOptimizerUpdate(t.hiddenParam.Name, t.hiddenProjection, t.hiddenMom1, t.hiddenMom2, gradHidden, batchScale)
+		t.applyOptimizerUpdate(t.projParam.Name, t.projection, t.projMom1, t.projMom2, gradProj, batchScale)
+	}
+
+	batchScale := float32(1) / float32(len(batch))
+	return EmbeddingTrainMetrics{
+		Loss:         totalLoss * batchScale,
+		AverageScore: totalScore * batchScale,
+		BatchSize:    len(batch),
+	}, true, nil
 }
 
 func (t *EmbeddingTrainer) scoreExamplePair(example EmbeddingPairExample, forward *embeddingForwardWeights) (float32, float32, error) {
@@ -1678,7 +1776,7 @@ func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []Embed
 }
 
 func (t *EmbeddingTrainer) tryEncodePairBatchBatchedForward(batch []EmbeddingPairExample, forward *embeddingForwardWeights, captureBindings bool) ([]*embeddingEncodedSequence, []*embeddingEncodedSequence, bool, error) {
-	if t == nil || t.forwardMatMul == nil || forward == nil || len(batch) == 0 || !batchedPairwiseEvalEnabled() {
+	if t == nil || t.forwardMatMul == nil || forward == nil || len(batch) == 0 || !batchedContrastiveForwardEnabled() {
 		return nil, nil, false, nil
 	}
 	sequences := make([]*embeddingBatchSequence, 0, len(batch)*2)
@@ -1783,6 +1881,18 @@ func batchedPairwiseEvalEnabled() bool {
 		return false
 	}
 	switch trainEnv("MANTA_TRAIN_BATCHED_PAIR_EVAL") {
+	case "0", "false", "FALSE", "no", "NO":
+		return false
+	default:
+		return true
+	}
+}
+
+func batchedPairwiseTrainEnabled() bool {
+	if !batchedContrastiveForwardEnabled() || trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_BATCHED_PAIR_TRAIN") {
+		return false
+	}
+	switch trainEnv("MANTA_TRAIN_BATCHED_PAIR_TRAIN") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:

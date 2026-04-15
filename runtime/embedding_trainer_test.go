@@ -2275,6 +2275,64 @@ func TestEmbeddingTrainerTrainContrastiveStepEncodesEachSequenceOncePerBatch(t *
 	}
 }
 
+func TestEmbeddingTrainerTrainStepUsesBatchedPairwiseForward(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{0, 2}, RightTokens: []int32{0, 0}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 1},
+		{LeftTokens: []int32{1, 2}, RightTokens: []int32{1, 1}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 1},
+		{LeftTokens: []int32{2, 0}, RightTokens: []int32{2, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 0},
+	}
+
+	if _, err := trainer.TrainStep(batch); err != nil {
+		t.Fatalf("train pairwise step: %v", err)
+	}
+	if trainer.step != 1 {
+		t.Fatalf("step = %d, want 1", trainer.step)
+	}
+	if fake.boundRightRuns == 0 {
+		t.Fatalf("pairwise train path did not attempt bound-right matmul")
+	}
+	if fake.multiBoundRuns == 0 {
+		t.Fatalf("pairwise train path did not coalesce q/k/v bound-right matmuls")
+	}
+	if fake.maxBoundRightRows < 6 {
+		t.Fatalf("max bound-right lhs rows = %d, want batched pair rows", fake.maxBoundRightRows)
+	}
+}
+
+func TestEmbeddingTrainerEvalBatchUsesPairwiseEvalGate(t *testing.T) {
+	t.Setenv("MANTA_TRAIN_DISABLE_BATCHED_PAIR_TRAIN", "1")
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
+	if trainer.forwardMatMul != nil {
+		trainer.forwardMatMul.Close()
+	}
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{0, 2}, RightTokens: []int32{0, 0}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 1},
+		{LeftTokens: []int32{1, 2}, RightTokens: []int32{1, 1}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 1},
+		{LeftTokens: []int32{2, 0}, RightTokens: []int32{2, 2}, LeftMask: []int32{1, 1}, RightMask: []int32{1, 1}, Target: 0},
+	}
+
+	if _, err := trainer.EvalBatch(batch); err != nil {
+		t.Fatalf("eval pairwise batch: %v", err)
+	}
+	if trainer.step != 0 {
+		t.Fatalf("step = %d, want eval-only batch to leave step unchanged", trainer.step)
+	}
+	if fake.multiBoundRuns == 0 {
+		t.Fatalf("pairwise eval path did not coalesce q/k/v bound-right matmuls")
+	}
+	if fake.maxBoundRightRows < 6 {
+		t.Fatalf("max bound-right lhs rows = %d, want batched eval pair rows", fake.maxBoundRightRows)
+	}
+}
+
 func TestEmbeddingTrainerBatchedForwardReusesDuplicateSequences(t *testing.T) {
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul != nil {
