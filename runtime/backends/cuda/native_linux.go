@@ -446,6 +446,21 @@ static int mantaCudaLaunchGDN(MantaCudaRuntime* rt, MantaCudaKernel* kernel, uns
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
+static int mantaCudaLaunchGDNInputGrad(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr beta, CUdeviceptr gamma, CUdeviceptr gradOut, CUdeviceptr gradInput, int elements, int channels, int height, int width, int inverse, char** err) {
+	void* args[] = {&input, &beta, &gamma, &gradOut, &gradInput, &elements, &channels, &height, &width, &inverse};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
+static int mantaCudaLaunchGDNBetaGrad(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr beta, CUdeviceptr gamma, CUdeviceptr gradOut, CUdeviceptr gradBeta, int channels, int height, int width, int batches, int inverse, char** err) {
+	void* args[] = {&input, &beta, &gamma, &gradOut, &gradBeta, &channels, &height, &width, &batches, &inverse};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
+static int mantaCudaLaunchGDNGammaGrad(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr beta, CUdeviceptr gamma, CUdeviceptr gradOut, CUdeviceptr gradGamma, int elements, int channels, int height, int width, int batches, int inverse, char** err) {
+	void* args[] = {&input, &beta, &gamma, &gradOut, &gradGamma, &elements, &channels, &height, &width, &batches, &inverse};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
 static int mantaCudaLaunchConv2D(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr weight, CUdeviceptr bias, CUdeviceptr out0, int elements, int inChannels, int inHeight, int inWidth, int outChannels, int outHeight, int outWidth, int inPerGroup, int outPerGroup, int kernelH, int kernelW, int strideH, int strideW, int padH, int padW, int dilationH, int dilationW, int hasBias, char** err) {
 	void* args[] = {&input, &weight, &bias, &out0, &elements, &inChannels, &inHeight, &inWidth, &outChannels, &outHeight, &outWidth, &inPerGroup, &outPerGroup, &kernelH, &kernelW, &strideH, &strideW, &padH, &padW, &dilationH, &dilationW, &hasBias};
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
@@ -720,6 +735,145 @@ extern "C" __global__ void manta_gdn_forward(
     } else {
         out[idx] = input[idx] / scale;
     }
+}
+`
+
+const gdnBackwardKernelSource = `
+static __device__ float manta_gdn_sum_for_channel(
+    const float* input,
+    const float* beta,
+    const float* gamma,
+    int n,
+    int c,
+    int hw,
+    int channels,
+    int spatial
+) {
+    float sum = beta[c];
+    for (int j = 0; j < channels; ++j) {
+        int inputIdx = ((n * channels + j) * spatial) + hw;
+        float v = input[inputIdx];
+        sum += gamma[c * channels + j] * v * v;
+    }
+    if (sum < 1.0e-12f) {
+        sum = 1.0e-12f;
+    }
+    return sum;
+}
+
+static __device__ float manta_gdn_beta_partial(float xC, float invSqrt, int inverse) {
+    if (inverse != 0) {
+        return 0.5f * xC * invSqrt;
+    }
+    return -0.5f * xC * invSqrt * invSqrt * invSqrt;
+}
+
+extern "C" __global__ void manta_gdn_input_grad(
+    const float* input,
+    const float* beta,
+    const float* gamma,
+    const float* gradOut,
+    float* gradInput,
+    int elements,
+    int channels,
+    int height,
+    int width,
+    int inverse
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= elements) {
+        return;
+    }
+    int spatial = height * width;
+    int k = (idx / spatial) % channels;
+    int n = idx / (channels * spatial);
+    int hw = idx % spatial;
+    float xK = input[idx];
+    float sumGrad = 0.0f;
+    for (int c = 0; c < channels; ++c) {
+        float s = manta_gdn_sum_for_channel(input, beta, gamma, n, c, hw, channels, spatial);
+        float sqrtS = sqrtf(s);
+        float invSqrt = 1.0f / sqrtS;
+        int cIdx = ((n * channels + c) * spatial) + hw;
+        float xC = input[cIdx];
+        float partial = 0.0f;
+        if (c == k) {
+            partial += inverse != 0 ? sqrtS : invSqrt;
+        }
+        float gck = gamma[c * channels + k];
+        if (inverse != 0) {
+            partial += xC * gck * xK * invSqrt;
+        } else {
+            partial -= xC * gck * xK * invSqrt / s;
+        }
+        sumGrad += gradOut[cIdx] * partial;
+    }
+    gradInput[idx] = sumGrad;
+}
+
+extern "C" __global__ void manta_gdn_beta_grad(
+    const float* input,
+    const float* beta,
+    const float* gamma,
+    const float* gradOut,
+    float* gradBeta,
+    int channels,
+    int height,
+    int width,
+    int batches,
+    int inverse
+) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) {
+        return;
+    }
+    int spatial = height * width;
+    float sumGrad = 0.0f;
+    for (int n = 0; n < batches; ++n) {
+        for (int hw = 0; hw < spatial; ++hw) {
+            float s = manta_gdn_sum_for_channel(input, beta, gamma, n, c, hw, channels, spatial);
+            float invSqrt = rsqrtf(s);
+            int idx = ((n * channels + c) * spatial) + hw;
+            float xC = input[idx];
+            sumGrad += gradOut[idx] * manta_gdn_beta_partial(xC, invSqrt, inverse);
+        }
+    }
+    gradBeta[c] = sumGrad;
+}
+
+extern "C" __global__ void manta_gdn_gamma_grad(
+    const float* input,
+    const float* beta,
+    const float* gamma,
+    const float* gradOut,
+    float* gradGamma,
+    int elements,
+    int channels,
+    int height,
+    int width,
+    int batches,
+    int inverse
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= elements) {
+        return;
+    }
+    int j = idx % channels;
+    int c = idx / channels;
+    int spatial = height * width;
+    float sumGrad = 0.0f;
+    for (int n = 0; n < batches; ++n) {
+        for (int hw = 0; hw < spatial; ++hw) {
+            float s = manta_gdn_sum_for_channel(input, beta, gamma, n, c, hw, channels, spatial);
+            float invSqrt = rsqrtf(s);
+            int cIdx = ((n * channels + c) * spatial) + hw;
+            int jIdx = ((n * channels + j) * spatial) + hw;
+            float xC = input[cIdx];
+            float xJ = input[jIdx];
+            sumGrad += gradOut[cIdx] * manta_gdn_beta_partial(xC, invSqrt, inverse) * xJ * xJ;
+        }
+    }
+    gradGamma[idx] = sumGrad;
 }
 `
 
@@ -1666,6 +1820,9 @@ type deviceRuntime struct {
 	matMulScratch      map[string]deviceScratchBuffer
 	quantizeKernel     *auxKernel
 	gdnKernel          *auxKernel
+	gdnInputGrad       *auxKernel
+	gdnBetaGrad        *auxKernel
+	gdnGammaGrad       *auxKernel
 	conv2DKernel       *auxKernel
 	conv2DInputGrad    *auxKernel
 	conv2DWeightGrad   *auxKernel
@@ -1739,6 +1896,12 @@ func (rt *deviceRuntime) close() {
 	rt.quantizeKernel = nil
 	rt.destroyAuxKernel(rt.gdnKernel)
 	rt.gdnKernel = nil
+	rt.destroyAuxKernel(rt.gdnInputGrad)
+	rt.gdnInputGrad = nil
+	rt.destroyAuxKernel(rt.gdnBetaGrad)
+	rt.gdnBetaGrad = nil
+	rt.destroyAuxKernel(rt.gdnGammaGrad)
+	rt.gdnGammaGrad = nil
 	rt.destroyAuxKernel(rt.conv2DKernel)
 	rt.conv2DKernel = nil
 	rt.destroyAuxKernel(rt.conv2DInputGrad)
@@ -2201,6 +2364,51 @@ func (rt *deviceRuntime) ensureGDNKernel() (*auxKernel, error) {
 	return kernel, nil
 }
 
+func (rt *deviceRuntime) ensureGDNInputGradKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.gdnInputGrad != nil {
+		return rt.gdnInputGrad, nil
+	}
+	kernel, err := rt.compileAuxKernel(gdnBackwardKernelSource, "manta_gdn_input_grad")
+	if err != nil {
+		return nil, err
+	}
+	rt.gdnInputGrad = kernel
+	return kernel, nil
+}
+
+func (rt *deviceRuntime) ensureGDNBetaGradKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.gdnBetaGrad != nil {
+		return rt.gdnBetaGrad, nil
+	}
+	kernel, err := rt.compileAuxKernel(gdnBackwardKernelSource, "manta_gdn_beta_grad")
+	if err != nil {
+		return nil, err
+	}
+	rt.gdnBetaGrad = kernel
+	return kernel, nil
+}
+
+func (rt *deviceRuntime) ensureGDNGammaGradKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.gdnGammaGrad != nil {
+		return rt.gdnGammaGrad, nil
+	}
+	kernel, err := rt.compileAuxKernel(gdnBackwardKernelSource, "manta_gdn_gamma_grad")
+	if err != nil {
+		return nil, err
+	}
+	rt.gdnGammaGrad = kernel
+	return kernel, nil
+}
+
 func (rt *deviceRuntime) ensureConv2DKernel() (*auxKernel, error) {
 	if rt == nil {
 		return nil, fmt.Errorf("cuda runtime is not initialized")
@@ -2482,6 +2690,114 @@ func (rt *deviceRuntime) runGDNStep(inputs []*backend.Tensor, outputType mantaar
 			"op":               op,
 		},
 	}, nil
+}
+
+func (rt *deviceRuntime) runGDNBackward(input, beta, gamma, gradOut *backend.Tensor, inverse bool) (*backend.Tensor, *backend.Tensor, *backend.Tensor, error) {
+	if rt == nil || rt.ptr == nil {
+		return nil, nil, nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if input == nil || beta == nil || gamma == nil || gradOut == nil {
+		return nil, nil, nil, fmt.Errorf("cuda gdn backward expects input, beta, gamma, and grad output")
+	}
+	if len(input.Shape) != 4 || len(gradOut.Shape) != 4 || !input.EqualShape(gradOut) {
+		return nil, nil, nil, fmt.Errorf("cuda gdn backward expects matching NCHW tensors")
+	}
+	elements := input.Elements()
+	batches, channels, height, width := input.Shape[0], input.Shape[1], input.Shape[2], input.Shape[3]
+	if len(beta.F32) < channels || len(gamma.F32) < channels*channels {
+		return nil, nil, nil, fmt.Errorf("cuda gdn backward beta/gamma shape mismatch")
+	}
+	inputKernel, err := rt.ensureGDNInputGradKernel()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	betaKernel, err := rt.ensureGDNBetaGradKernel()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	gammaKernel, err := rt.ensureGDNGammaGradKernel()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	inputBuf, err := rt.uploadFloat32(input.F32)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer rt.freeBuffer(inputBuf)
+	betaBuf, err := rt.uploadFloat32(beta.F32[:channels])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer rt.freeBuffer(betaBuf)
+	gammaBuf, err := rt.uploadFloat32(gamma.F32[:channels*channels])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer rt.freeBuffer(gammaBuf)
+	gradOutBuf, err := rt.uploadFloat32(gradOut.F32)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer rt.freeBuffer(gradOutBuf)
+	gradInBuf, err := rt.allocFloat32(elements)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer rt.freeBuffer(gradInBuf)
+	gradBetaBuf, err := rt.allocFloat32(channels)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer rt.freeBuffer(gradBetaBuf)
+	gammaElements := channels * channels
+	gradGammaBuf, err := rt.allocFloat32(gammaElements)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer rt.freeBuffer(gradGammaBuf)
+	block := uint(128)
+	inverseFlag := 0
+	if inverse {
+		inverseFlag = 1
+	}
+	if elements > 0 {
+		grid := uint((elements + int(block) - 1) / int(block))
+		if err := rt.launchGDNInputGrad(inputKernel, grid, block, inputBuf, betaBuf, gammaBuf, gradOutBuf, gradInBuf, elements, channels, height, width, inverseFlag); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	if channels > 0 {
+		grid := uint((channels + int(block) - 1) / int(block))
+		if err := rt.launchGDNBetaGrad(betaKernel, grid, block, inputBuf, betaBuf, gammaBuf, gradOutBuf, gradBetaBuf, channels, height, width, batches, inverseFlag); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	if gammaElements > 0 {
+		grid := uint((gammaElements + int(block) - 1) / int(block))
+		if err := rt.launchGDNGammaGrad(gammaKernel, grid, block, inputBuf, betaBuf, gammaBuf, gradOutBuf, gradGammaBuf, gammaElements, channels, height, width, batches, inverseFlag); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	gradInHost := make([]float32, elements)
+	if err := rt.downloadFloat32(gradInHost, gradInBuf); err != nil {
+		return nil, nil, nil, err
+	}
+	activeBeta := make([]float32, channels)
+	if err := rt.downloadFloat32(activeBeta, gradBetaBuf); err != nil {
+		return nil, nil, nil, err
+	}
+	activeGamma := make([]float32, gammaElements)
+	if err := rt.downloadFloat32(activeGamma, gradGammaBuf); err != nil {
+		return nil, nil, nil, err
+	}
+	gradBetaHost := make([]float32, beta.Elements())
+	copy(gradBetaHost, activeBeta)
+	gradGammaHost := make([]float32, gamma.Elements())
+	copy(gradGammaHost, activeGamma)
+	gradIn := &backend.Tensor{DType: input.DType, Shape: append([]int(nil), input.Shape...), F32: gradInHost}
+	gradBeta := &backend.Tensor{DType: beta.DType, Shape: append([]int(nil), beta.Shape...), F32: gradBetaHost}
+	gradGamma := &backend.Tensor{DType: gamma.DType, Shape: append([]int(nil), gamma.Shape...), F32: gradGammaHost}
+	return gradIn, gradBeta, gradGamma, nil
 }
 
 func (rt *deviceRuntime) runConv2DStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaConv2DConfig) (backend.StepDispatchResult, error) {
@@ -3243,6 +3559,88 @@ func (rt *deviceRuntime) launchGDN(kernel *auxKernel, grid, block uint, input, b
 	}
 	var errStr *C.char
 	if C.mantaCudaLaunchGDN(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), input, beta, gamma, out0, C.int(elements), C.int(channels), C.int(height), C.int(width), C.int(inverse), &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchGDNInputGrad(kernel *auxKernel, grid, block uint, input, beta, gamma, gradOut, gradInput C.CUdeviceptr, elements, channels, height, width, inverse int) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda gdn input grad kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchGDNInputGrad(
+		rt.ptr,
+		kernel.ptr,
+		C.uint(grid),
+		C.uint(block),
+		input,
+		beta,
+		gamma,
+		gradOut,
+		gradInput,
+		C.int(elements),
+		C.int(channels),
+		C.int(height),
+		C.int(width),
+		C.int(inverse),
+		&errStr,
+	) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchGDNBetaGrad(kernel *auxKernel, grid, block uint, input, beta, gamma, gradOut, gradBeta C.CUdeviceptr, channels, height, width, batches, inverse int) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda gdn beta grad kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchGDNBetaGrad(
+		rt.ptr,
+		kernel.ptr,
+		C.uint(grid),
+		C.uint(block),
+		input,
+		beta,
+		gamma,
+		gradOut,
+		gradBeta,
+		C.int(channels),
+		C.int(height),
+		C.int(width),
+		C.int(batches),
+		C.int(inverse),
+		&errStr,
+	) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchGDNGammaGrad(kernel *auxKernel, grid, block uint, input, beta, gamma, gradOut, gradGamma C.CUdeviceptr, elements, channels, height, width, batches, inverse int) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda gdn gamma grad kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchGDNGammaGrad(
+		rt.ptr,
+		kernel.ptr,
+		C.uint(grid),
+		C.uint(block),
+		input,
+		beta,
+		gamma,
+		gradOut,
+		gradGamma,
+		C.int(elements),
+		C.int(channels),
+		C.int(height),
+		C.int(width),
+		C.int(batches),
+		C.int(inverse),
+		&errStr,
+	) != 0 {
 		return cStringError(errStr)
 	}
 	return nil

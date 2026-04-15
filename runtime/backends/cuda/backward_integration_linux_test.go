@@ -166,6 +166,73 @@ func TestCUDAConv2DTransposeBackwardMatchesFiniteDifference(t *testing.T) {
 	})
 }
 
+func TestCUDAGDNBackwardMatchesHost(t *testing.T) {
+	runCUDAGDNBackwardMatchesHost(t, false)
+}
+
+func TestCUDAIGDNBackwardMatchesHost(t *testing.T) {
+	runCUDAGDNBackwardMatchesHost(t, true)
+}
+
+func TestCUDAGDNBackwardMatchesFiniteDifference(t *testing.T) {
+	runCUDAGDNBackwardMatchesFiniteDifference(t, false)
+}
+
+func TestCUDAIGDNBackwardMatchesFiniteDifference(t *testing.T) {
+	runCUDAGDNBackwardMatchesFiniteDifference(t, true)
+}
+
+func runCUDAGDNBackwardMatchesHost(t *testing.T, inverse bool) {
+	t.Helper()
+	rt, err := newDeviceRuntime()
+	if err != nil {
+		t.Skipf("no cuda runtime available: %v", err)
+	}
+	if rt == nil {
+		t.Skip("no cuda runtime available")
+	}
+	defer rt.close()
+
+	input, beta, gamma, gradOut := gdnBackwardFixture()
+	wantIn, wantBeta, wantGamma := hostGDNBackward(input, beta, gamma, gradOut, inverse)
+	gotIn, gotBeta, gotGamma, err := rt.runGDNBackward(input, beta, gamma, gradOut, inverse)
+	if err != nil {
+		t.Fatalf("run gdn backward: %v", err)
+	}
+	assertTensorClose(t, gotIn, input.Shape, wantIn)
+	assertTensorClose(t, gotBeta, beta.Shape, wantBeta)
+	assertTensorClose(t, gotGamma, gamma.Shape, wantGamma)
+}
+
+func runCUDAGDNBackwardMatchesFiniteDifference(t *testing.T, inverse bool) {
+	t.Helper()
+	rt, err := newDeviceRuntime()
+	if err != nil {
+		t.Skipf("no cuda runtime available: %v", err)
+	}
+	if rt == nil {
+		t.Skip("no cuda runtime available")
+	}
+	defer rt.close()
+
+	input, beta, gamma, gradOut := gdnBackwardFixture()
+	gotIn, gotBeta, gotGamma, err := rt.runGDNBackward(input, beta, gamma, gradOut, inverse)
+	if err != nil {
+		t.Fatalf("run gdn backward: %v", err)
+	}
+
+	const eps = 1e-3
+	assertFiniteDiffTensor(t, "gdn input", gotIn, input, eps, func() float64 {
+		return gdnFiniteDiffLoss(input, beta, gamma, gradOut, inverse)
+	})
+	assertFiniteDiffTensor(t, "gdn beta", gotBeta, beta, eps, func() float64 {
+		return gdnFiniteDiffLoss(input, beta, gamma, gradOut, inverse)
+	})
+	assertFiniteDiffTensor(t, "gdn gamma", gotGamma, gamma, eps, func() float64 {
+		return gdnFiniteDiffLoss(input, beta, gamma, gradOut, inverse)
+	})
+}
+
 func patternedFloats(count int, scale float32) []float32 {
 	values := make([]float32, count)
 	for i := range values {
@@ -285,6 +352,91 @@ func conv2DTransposeFiniteDiffLoss(input, weight, bias, gradOut *backend.Tensor,
 		loss += float64(v * gradOut.F32[i])
 	}
 	return loss
+}
+
+func gdnBackwardFixture() (*backend.Tensor, *backend.Tensor, *backend.Tensor, *backend.Tensor) {
+	input := backend.NewTensorF32([]int{2, 3, 4, 5}, patternedFloats(2*3*4*5, 0.037))
+	beta := backend.NewTensorF32([]int{3}, []float32{0.8, 1.1, 1.4})
+	gamma := backend.NewTensorF32([]int{3, 3}, []float32{
+		0.090, 0.011, 0.017,
+		0.013, 0.075, 0.019,
+		0.007, 0.023, 0.082,
+	})
+	gradOut := backend.NewTensorF32([]int{2, 3, 4, 5}, patternedFloats(2*3*4*5, -0.029))
+	return input, beta, gamma, gradOut
+}
+
+func hostGDNBackward(input, beta, gamma, gradOut *backend.Tensor, inverse bool) ([]float32, []float32, []float32) {
+	_, channels, height, width := input.Shape[0], input.Shape[1], input.Shape[2], input.Shape[3]
+	batches := input.Shape[0]
+	gradIn := make([]float32, input.Elements())
+	gradBeta := make([]float32, beta.Elements())
+	gradGamma := make([]float32, gamma.Elements())
+	for n := 0; n < batches; n++ {
+		for y := 0; y < height; y++ {
+			for x := 0; x < width; x++ {
+				sums := make([]float64, channels)
+				for c := 0; c < channels; c++ {
+					sum := float64(beta.F32[c])
+					for j := 0; j < channels; j++ {
+						v := float64(input.F32[offset4(input.Shape, n, j, y, x)])
+						sum += float64(gamma.F32[c*channels+j]) * v * v
+					}
+					if sum < 1e-12 {
+						sum = 1e-12
+					}
+					sums[c] = sum
+				}
+				for c := 0; c < channels; c++ {
+					xC := float64(input.F32[offset4(input.Shape, n, c, y, x)])
+					goC := float64(gradOut.F32[offset4(gradOut.Shape, n, c, y, x)])
+					sqrtS := math.Sqrt(sums[c])
+					invSqrt := 1 / sqrtS
+					for k := 0; k < channels; k++ {
+						xK := float64(input.F32[offset4(input.Shape, n, k, y, x)])
+						gck := float64(gamma.F32[c*channels+k])
+						partial := 0.0
+						if c == k {
+							if inverse {
+								partial += sqrtS
+							} else {
+								partial += invSqrt
+							}
+						}
+						if inverse {
+							partial += xC * gck * xK * invSqrt
+						} else {
+							partial -= xC * gck * xK * invSqrt / sums[c]
+						}
+						gradIn[offset4(input.Shape, n, k, y, x)] += float32(goC * partial)
+					}
+					betaPartial := hostGDNBetaPartial(xC, invSqrt, inverse)
+					gradBeta[c] += float32(goC * betaPartial)
+					for j := 0; j < channels; j++ {
+						xJ := float64(input.F32[offset4(input.Shape, n, j, y, x)])
+						gradGamma[c*channels+j] += float32(goC * betaPartial * xJ * xJ)
+					}
+				}
+			}
+		}
+	}
+	return gradIn, gradBeta, gradGamma
+}
+
+func gdnFiniteDiffLoss(input, beta, gamma, gradOut *backend.Tensor, inverse bool) float64 {
+	out := hostGDN(input, beta, gamma, inverse)
+	loss := 0.0
+	for i, v := range out {
+		loss += float64(v * gradOut.F32[i])
+	}
+	return loss
+}
+
+func hostGDNBetaPartial(xC, invSqrt float64, inverse bool) float64 {
+	if inverse {
+		return 0.5 * xC * invSqrt
+	}
+	return -0.5 * xC * invSqrt * invSqrt * invSqrt
 }
 
 func assertFiniteDiffTensor(t *testing.T, name string, analytic, variable *backend.Tensor, eps float32, loss func() float64) {
