@@ -21,12 +21,17 @@ type profileConfig struct {
 	EvalJSONL      string
 	TokenizerPath  string
 	NoTokenizer    bool
+	HardNegativeTrain bool
+	HardNegativesPerQuery string
+	MaxTrainExamples string
+	MaxEvalExamples string
 	Epochs         string
 	BatchSize      string
 	LR             string
 	Temperature    string
 	EvalEvery      string
 	EvalEverySteps string
+	ProgressEvery  string
 	Variants       []variantConfig
 }
 
@@ -49,10 +54,15 @@ Common:
   MANTA_GPU_PROFILE_RUN_ID=gpu-efficiency-20260412
   MANTA_GPU_PROFILE_MODEL=manta-embed-v1
   MANTA_GPU_PROFILE_NO_TOKENIZER=1
+  MANTA_GPU_PROFILE_HARD_NEGATIVE_TRAIN=1
+  MANTA_GPU_PROFILE_HARD_NEGATIVES_PER_QUERY=1
+  MANTA_GPU_PROFILE_MAX_TRAIN_EXAMPLES=1536
+  MANTA_GPU_PROFILE_MAX_EVAL_EXAMPLES=256
   MANTA_GPU_PROFILE_BATCH=256
   MANTA_GPU_PROFILE_EPOCHS=1
   MANTA_GPU_PROFILE_EVAL_EVERY=4
   MANTA_GPU_PROFILE_EVAL_EVERY_STEPS=4
+  MANTA_GPU_PROFILE_PROGRESS_EVERY=0
 
 Variants:
   MANTA_GPU_PROFILE_VARIANTS=default,disable-batched-forward
@@ -152,6 +162,41 @@ func copyMatching(pattern string, dst string) error {
 	return nil
 }
 
+func positiveInt(value string) int {
+	n := 0
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return 0
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n
+}
+
+func copyFirstLines(src string, dst string, maxLines string) error {
+	limit := positiveInt(maxLines)
+	if limit <= 0 {
+		return copyFile(src, dst)
+	}
+	data, err := os.ReadFile(src)
+	guard err == nil else return err
+	lines := strings.SplitAfter(string(data), "\n")
+	var b strings.Builder
+	written := 0
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		b.WriteString(line)
+		written++
+		if written >= limit {
+			break
+		}
+	}
+	guard written > 0 else return fmt.Errorf("no examples copied from %s", src)
+	return os.WriteFile(dst, []byte(b.String()), 0o644)
+}
+
 func sanitizeEnvSuffix(value string) string {
 	out := []rune{}
 	for _, r := range value {
@@ -229,12 +274,17 @@ func prepareConfig(root string) (profileConfig, error) {
 		EvalJSONL:      eval,
 		TokenizerPath:  tokenizer,
 		NoTokenizer:    envEnabled("MANTA_GPU_PROFILE_NO_TOKENIZER"),
+		HardNegativeTrain: envEnabled("MANTA_GPU_PROFILE_HARD_NEGATIVE_TRAIN"),
+		HardNegativesPerQuery: getenv("MANTA_GPU_PROFILE_HARD_NEGATIVES_PER_QUERY", "1"),
+		MaxTrainExamples: getenv("MANTA_GPU_PROFILE_MAX_TRAIN_EXAMPLES", "0"),
+		MaxEvalExamples: getenv("MANTA_GPU_PROFILE_MAX_EVAL_EXAMPLES", "0"),
 		Epochs:         getenv("MANTA_GPU_PROFILE_EPOCHS", "1"),
 		BatchSize:      getenv("MANTA_GPU_PROFILE_BATCH", "256"),
 		LR:             getenv("MANTA_GPU_PROFILE_LR", "0.005"),
 		Temperature:    getenv("MANTA_GPU_PROFILE_TEMPERATURE", "0.05"),
 		EvalEvery:      getenv("MANTA_GPU_PROFILE_EVAL_EVERY", "4"),
 		EvalEverySteps: getenv("MANTA_GPU_PROFILE_EVAL_EVERY_STEPS", "4"),
+		ProgressEvery:  getenv("MANTA_GPU_PROFILE_PROGRESS_EVERY", "0"),
 		Variants:       parseVariants(),
 	}, nil
 }
@@ -313,6 +363,14 @@ func lineValue(path string, prefix string) string {
 
 func trainArgs(cfg profileConfig, variantDir string) []string {
 	artifact := filepath.Join(variantDir, cfg.ModelName+".mll")
+	trainPath := cfg.TrainJSONL
+	evalPath := cfg.EvalJSONL
+	if positiveInt(cfg.MaxTrainExamples) > 0 {
+		trainPath = filepath.Join(variantDir, "profile-train.jsonl")
+	}
+	if positiveInt(cfg.MaxEvalExamples) > 0 {
+		evalPath = filepath.Join(variantDir, "profile-eval.jsonl")
+	}
 	tokenizer := cfg.TokenizerPath
 	if cfg.NoTokenizer {
 		tokenizer = ""
@@ -331,13 +389,17 @@ func trainArgs(cfg profileConfig, variantDir string) []string {
 		"--temperature", cfg.Temperature,
 		"--eval-every", cfg.EvalEvery,
 		"--eval-every-steps", cfg.EvalEverySteps,
+		"--progress-every", cfg.ProgressEvery,
+	}
+	if cfg.HardNegativeTrain {
+		args = append(args, "--hard-negative-train", "--hard-negatives-per-query", cfg.HardNegativesPerQuery)
 	}
 	if tokenizer != "" {
 		args = append(args, "--tokenizer", tokenizer)
 	} else if cfg.NoTokenizer {
 		args = append(args, "--no-tokenizer")
 	}
-	return append(args, artifact, cfg.TrainJSONL, cfg.EvalJSONL)
+	return append(args, artifact, trainPath, evalPath)
 }
 
 func profileVariant(cfg profileConfig, variant variantConfig) (string, error) {
@@ -346,6 +408,14 @@ func profileVariant(cfg profileConfig, variant variantConfig) (string, error) {
 	guard err == nil else return "", err
 	err = copyMatching(filepath.Join(cfg.AssetsDir, cfg.ModelName+".*"), variantDir)
 	guard err == nil else return "", err
+	if positiveInt(cfg.MaxTrainExamples) > 0 {
+		err = copyFirstLines(cfg.TrainJSONL, filepath.Join(variantDir, "profile-train.jsonl"), cfg.MaxTrainExamples)
+		guard err == nil else return "", err
+	}
+	if positiveInt(cfg.MaxEvalExamples) > 0 {
+		err = copyFirstLines(cfg.EvalJSONL, filepath.Join(variantDir, "profile-eval.jsonl"), cfg.MaxEvalExamples)
+		guard err == nil else return "", err
+	}
 	env := append([]string{}, variant.Env...)
 	env = append(env, "MANTA_CPU_PROFILE="+filepath.Join(variantDir, "cpu.pprof"))
 	logPath := filepath.Join(variantDir, "run.log")
