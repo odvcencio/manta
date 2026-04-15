@@ -50,6 +50,7 @@ type candidateConfig struct {
 	EvalEvery           string
 	EvalEverySteps      string
 	Patience            string
+	RestoreBest         string
 	MinDelta            string
 	SelectMetric        string
 	MinFreq             string
@@ -96,6 +97,7 @@ Common knobs:
   MANTA_TEMPERATURE=0.05
   MANTA_SELECT_METRIC=mrr
   MANTA_EVAL_EVERY_STEPS=0
+  MANTA_RESTORE_BEST=false
   MANTA_PRETOKENIZE_JSONL=0
   MANTA_NO_TOKENIZER=1
   MANTA_PAIRWISE_TRAIN=1
@@ -126,6 +128,11 @@ func getenv(name string, fallback string) string {
 
 func envEnabled(name string) bool {
 	let value = strings.ToLower(os.Getenv(name))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func configBool(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
 	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
@@ -453,7 +460,8 @@ func writeManifest(cfg candidateConfig, status string) error {
     "temperature": %s,
     "select_metric": %s,
     "eval_every": %s,
-    "eval_every_steps": %s
+    "eval_every_steps": %s,
+    "restore_best": %s
   },
   "inputs": {
     "corpus": %s,
@@ -503,6 +511,7 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonString(cfg.SelectMetric),
 		cfg.EvalEvery,
 		cfg.EvalEverySteps,
+		jsonBool(configBool(cfg.RestoreBest)),
 		jsonString(cfg.Corpus),
 		jsonString(cfg.TrainJSONL),
 		jsonString(cfg.EvalJSONL),
@@ -599,6 +608,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		EvalEvery:           getenv("MANTA_EVAL_EVERY", "1"),
 		EvalEverySteps:      getenv("MANTA_EVAL_EVERY_STEPS", "0"),
 		Patience:            getenv("MANTA_PATIENCE", "3"),
+		RestoreBest:         getenv("MANTA_RESTORE_BEST", "true"),
 		MinDelta:            getenv("MANTA_MIN_DELTA", "0"),
 		SelectMetric:        getenv("MANTA_SELECT_METRIC", "score_margin"),
 		PairwiseTrain:       getenv("MANTA_PAIRWISE_TRAIN", "0"),
@@ -713,6 +723,7 @@ func trainCommonArgs(cfg candidateConfig) []string {
 		"--eval-every", cfg.EvalEvery,
 		"--eval-every-steps", cfg.EvalEverySteps,
 		"--patience", cfg.Patience,
+		"--restore-best="+cfg.RestoreBest,
 		"--min-delta", cfg.MinDelta,
 		"--select-metric", cfg.SelectMetric,
 		"--progress-every", cfg.ProgressEvery,

@@ -31,6 +31,7 @@ type profileConfig struct {
 	Temperature    string
 	EvalEvery      string
 	EvalEverySteps string
+	RestoreBest    string
 	ProgressEvery  string
 	Variants       []variantConfig
 }
@@ -62,6 +63,7 @@ Common:
   MANTA_GPU_PROFILE_EPOCHS=1
   MANTA_GPU_PROFILE_EVAL_EVERY=4
   MANTA_GPU_PROFILE_EVAL_EVERY_STEPS=4
+  MANTA_GPU_PROFILE_RESTORE_BEST=false
   MANTA_GPU_PROFILE_PROGRESS_EVERY=0
 
 Variants:
@@ -284,6 +286,7 @@ func prepareConfig(root string) (profileConfig, error) {
 		Temperature:    getenv("MANTA_GPU_PROFILE_TEMPERATURE", "0.05"),
 		EvalEvery:      getenv("MANTA_GPU_PROFILE_EVAL_EVERY", "4"),
 		EvalEverySteps: getenv("MANTA_GPU_PROFILE_EVAL_EVERY_STEPS", "4"),
+		RestoreBest:    getenv("MANTA_GPU_PROFILE_RESTORE_BEST", "true"),
 		ProgressEvery:  getenv("MANTA_GPU_PROFILE_PROGRESS_EVERY", "0"),
 		Variants:       parseVariants(),
 	}, nil
@@ -389,6 +392,7 @@ func trainArgs(cfg profileConfig, variantDir string) []string {
 		"--temperature", cfg.Temperature,
 		"--eval-every", cfg.EvalEvery,
 		"--eval-every-steps", cfg.EvalEverySteps,
+		"--restore-best="+cfg.RestoreBest,
 		"--progress-every", cfg.ProgressEvery,
 	}
 	if cfg.HardNegativeTrain {
