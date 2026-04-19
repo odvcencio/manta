@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -25,7 +26,31 @@ type EmbeddingTrainRunConfig struct {
 	PairwiseTrain         bool
 	HardNegativeTrain     bool
 	HardNegativesPerQuery int
-	LengthBucketBatches   bool
+	// MultiPositiveTrain, when true, merges hard-negative rows sharing
+	// GroupID into multi-positive SupCon-style examples (K positives + union
+	// of negatives per query). Requires HardNegativeTrain. Falls back to
+	// K=1 per group (bit-identical to single-positive training) for rows
+	// that have no siblings.
+	MultiPositiveTrain bool
+	// MaxPositivesPerQuery caps positives per merged group when
+	// MultiPositiveTrain is set. 0 disables capping. Extra positives are
+	// dropped by uniform random sample (seeded from Seed).
+	MaxPositivesPerQuery int
+	LengthBucketBatches  bool
+	// GroupBatchesBySource, when true, makes the hard-negative runner
+	// reshape batches so each one draws only from a single Source tag.
+	// Requires EmbeddingHardNegativeExample.Source to be populated; any
+	// example without a Source is grouped into an "unsourced" bucket
+	// with the others that lack it. Designed for multi-dataset training
+	// mixes (e.g. scifact + nfcorpus + fiqa) where cross-domain in-batch
+	// negatives are trivially easy and don't teach within-topic ranking.
+	GroupBatchesBySource bool
+	// SourceGroupPrefixSeparator, when set, collapses Source tags on
+	// that separator before grouping: e.g. with "scifact" and
+	// "scifact:model" in the mix, setting this to ":" makes both
+	// contribute to one "scifact" group. Only takes effect when
+	// GroupBatchesBySource is also true.
+	SourceGroupPrefixSeparator string
 	LearningRate          float32
 	ContrastiveLoss       string
 	Temperature           float32
@@ -646,6 +671,9 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 		if cfg.LengthBucketBatches {
 			bucketHardNegativeOrderByLength(trainSet, indices, cfg.BatchSize)
 		}
+		if cfg.GroupBatchesBySource {
+			indices = groupHardNegativeOrderBySource(trainSet, indices, cfg.BatchSize, rng, cfg.SourceGroupPrefixSeparator)
+		}
 		trainStart := time.Now()
 		var afterBatch contrastiveEpochBatchHook
 		if len(evalSet) > 0 && cfg.EvalEverySteps > 0 {
@@ -1102,7 +1130,22 @@ func (t *EmbeddingTrainer) runHardNegativeEpoch(trainSet []EmbeddingHardNegative
 		if hardNegativeBatchPairCount(batch) < 2 {
 			break
 		}
-		metrics, err := t.TrainHardNegativeContrastiveStep(batch)
+		var metrics EmbeddingTrainMetrics
+		var err error
+		if cfg.MultiPositiveTrain {
+			rng := rand.New(rand.NewSource(cfg.Seed ^ int64(epoch)*1_000_003 ^ int64(start)))
+			merged := MergeHardNegativesByGroup(batch, cfg.MaxPositivesPerQuery, rng)
+			totalCandidates := 0
+			for _, m := range merged {
+				totalCandidates += len(m.PositiveTokens) + len(m.NegativeTokens)
+			}
+			if len(merged) == 0 || totalCandidates < 2 {
+				break
+			}
+			metrics, err = t.TrainMultiPositiveStep(merged)
+		} else {
+			metrics, err = t.TrainHardNegativeContrastiveStep(batch)
+		}
 		if err != nil {
 			return EmbeddingTrainMetrics{}, err
 		}
@@ -1180,6 +1223,86 @@ func bucketContrastiveOrderByLength(trainSet []EmbeddingContrastiveExample, orde
 			return left < right
 		})
 	}
+}
+
+// groupHardNegativeOrderBySource regroups `order` into contiguous
+// batch-size windows that each draw from a single Source tag. Examples
+// are collected into source buckets, each bucket is truncated to a
+// multiple of batchSize (remainder dropped), and the resulting batches
+// are concatenated in a randomized per-epoch group order so the model
+// doesn't always see the same source first.
+//
+// The dropped-remainder design is deliberate: it keeps the existing
+// epoch loop unchanged (it still walks batchSize chunks) and keeps the
+// batch shape uniform. At batch=768 over a multi-dataset mix of
+// thousands per source, the remainder loss is a few percent per epoch.
+//
+// Examples whose Source is "" all bucket together as "unsourced". If
+// every example is unsourced the input order is returned unchanged.
+//
+// prefixSeparator, when non-empty, collapses sources on that separator:
+// e.g. "scifact" and "scifact:model" become one "scifact" group when
+// prefixSeparator is ":". This is the common case when training on a
+// mix of original + model-mined hard negatives from the same corpus.
+func groupHardNegativeOrderBySource(trainSet []EmbeddingHardNegativeExample, order []int, batchSize int, rng *rand.Rand, prefixSeparator string) []int {
+	if len(order) == 0 || batchSize <= 0 {
+		return order
+	}
+	keyOf := func(source string) string {
+		if prefixSeparator == "" {
+			return source
+		}
+		if i := strings.Index(source, prefixSeparator); i >= 0 {
+			return source[:i]
+		}
+		return source
+	}
+	distinct := map[string]struct{}{}
+	for _, idx := range order {
+		if idx < 0 || idx >= len(trainSet) {
+			continue
+		}
+		distinct[keyOf(trainSet[idx].Source)] = struct{}{}
+	}
+	if len(distinct) <= 1 {
+		return order
+	}
+	groupIndex := map[string]int{}
+	groups := make([][]int, 0, len(distinct))
+	for _, idx := range order {
+		if idx < 0 || idx >= len(trainSet) {
+			continue
+		}
+		source := keyOf(trainSet[idx].Source)
+		pos, ok := groupIndex[source]
+		if !ok {
+			pos = len(groups)
+			groupIndex[source] = pos
+			groups = append(groups, nil)
+		}
+		groups[pos] = append(groups[pos], idx)
+	}
+	out := make([]int, 0, len(order))
+	aligned := make([][]int, 0, len(groups))
+	for _, group := range groups {
+		full := (len(group) / batchSize) * batchSize
+		if full == 0 {
+			continue
+		}
+		aligned = append(aligned, group[:full])
+	}
+	if len(aligned) == 0 {
+		return order
+	}
+	if rng != nil && len(aligned) > 1 {
+		rng.Shuffle(len(aligned), func(i, j int) {
+			aligned[i], aligned[j] = aligned[j], aligned[i]
+		})
+	}
+	for _, group := range aligned {
+		out = append(out, group...)
+	}
+	return out
 }
 
 func bucketHardNegativeOrderByLength(trainSet []EmbeddingHardNegativeExample, order []int, batchSize int) {

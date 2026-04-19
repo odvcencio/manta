@@ -2,6 +2,7 @@ package mantaruntime
 
 import (
 	"context"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -3507,5 +3508,190 @@ func trainerMasterTensorByName(trainer *EmbeddingTrainer, name string) *backend.
 		return trainer.projection
 	default:
 		return nil
+	}
+}
+
+func TestInfoNCEMultiPositiveK1MatchesSinglePositive(t *testing.T) {
+	scores := []float32{0.9, 0.3, -0.1, 0.5, 0.0}
+	temperature := float32(0.05)
+
+	singleProbs := make([]float32, len(scores))
+	singleLoss := infoNCERowProbsAndLossInto(scores, 0, temperature, singleProbs)
+
+	multiProbs := make([]float32, len(scores))
+	multiLoss, mass := infoNCEMultiPositiveRowProbsAndLossInto(scores, []int{0}, temperature, multiProbs)
+
+	if diff := abs32(singleLoss - multiLoss); diff > 1e-5 {
+		t.Fatalf("K=1 loss mismatch: single=%v multi=%v diff=%v", singleLoss, multiLoss, diff)
+	}
+	for i := range singleProbs {
+		if diff := abs32(singleProbs[i] - multiProbs[i]); diff > 1e-6 {
+			t.Fatalf("K=1 prob[%d] mismatch: single=%v multi=%v", i, singleProbs[i], multiProbs[i])
+		}
+	}
+	// mass should equal probs[0] for K=1.
+	if diff := abs32(mass - multiProbs[0]); diff > 1e-6 {
+		t.Fatalf("K=1 positiveMass=%v want probs[0]=%v", mass, multiProbs[0])
+	}
+}
+
+func TestInfoNCEMultiPositiveMatchesClosedForm(t *testing.T) {
+	scores := []float32{0.8, 0.6, 0.4, 0.1, -0.2}
+	temperature := float32(0.1)
+	targets := []int{0, 1, 2}
+
+	probs := make([]float32, len(scores))
+	loss, mass := infoNCEMultiPositiveRowProbsAndLossInto(scores, targets, temperature, probs)
+
+	// Closed-form reference (float64 for precision):
+	var zmax float64
+	for _, s := range scores {
+		l := float64(s) / float64(temperature)
+		if l > zmax || zmax == 0 {
+			zmax = l
+		}
+	}
+	var z float64
+	exps := make([]float64, len(scores))
+	for i, s := range scores {
+		exps[i] = math.Exp(float64(s)/float64(temperature) - zmax)
+		z += exps[i]
+	}
+	var q []float64
+	for _, e := range exps {
+		q = append(q, e/z)
+	}
+	want := float64(0)
+	for _, t := range targets {
+		want += q[t]
+	}
+	wantLoss := -math.Log(want)
+
+	if diff := math.Abs(float64(loss) - wantLoss); diff > 1e-5 {
+		t.Fatalf("loss=%v want %v (diff=%v)", loss, wantLoss, diff)
+	}
+	if diff := math.Abs(float64(mass) - want); diff > 1e-6 {
+		t.Fatalf("mass=%v want %v", mass, want)
+	}
+	for i, p := range probs {
+		if diff := math.Abs(float64(p) - q[i]); diff > 1e-6 {
+			t.Fatalf("prob[%d]=%v want %v", i, p, q[i])
+		}
+	}
+}
+
+func TestInfoNCEMultiPositiveDedupesDuplicateTargets(t *testing.T) {
+	scores := []float32{0.5, 0.2, -0.1}
+	temperature := float32(0.05)
+
+	probs1 := make([]float32, len(scores))
+	loss1, mass1 := infoNCEMultiPositiveRowProbsAndLossInto(scores, []int{0, 1}, temperature, probs1)
+
+	probs2 := make([]float32, len(scores))
+	loss2, mass2 := infoNCEMultiPositiveRowProbsAndLossInto(scores, []int{0, 1, 0, 1, 1}, temperature, probs2)
+
+	if diff := abs32(loss1 - loss2); diff > 1e-6 {
+		t.Fatalf("dup loss differs: %v vs %v", loss1, loss2)
+	}
+	if diff := abs32(mass1 - mass2); diff > 1e-6 {
+		t.Fatalf("dup mass differs: %v vs %v", mass1, mass2)
+	}
+}
+
+func TestInfoNCEMultiPositiveEmptyTargetsSetsZero(t *testing.T) {
+	scores := []float32{1, 2, 3}
+	probs := []float32{9, 9, 9}
+	loss, mass := infoNCEMultiPositiveRowProbsAndLossInto(scores, nil, 0.05, probs)
+	if loss != 0 || mass != 0 {
+		t.Fatalf("empty targets: loss=%v mass=%v", loss, mass)
+	}
+	for i, p := range probs {
+		if p != 0 {
+			t.Fatalf("empty targets: probs[%d]=%v want 0", i, p)
+		}
+	}
+}
+
+type fakeIntnRng struct{ seed int }
+
+func (f *fakeIntnRng) Intn(n int) int {
+	f.seed = (f.seed*1103515245 + 12345) & 0x7fffffff
+	if n <= 0 {
+		return 0
+	}
+	return f.seed % n
+}
+
+func TestMergeHardNegativesByGroupCollapsesByGroupID(t *testing.T) {
+	rows := []EmbeddingHardNegativeExample{
+		{
+			QueryTokens:    []int32{1, 2, 3},
+			PositiveTokens: []int32{10, 11},
+			NegativeTokens: [][]int32{{20, 21}, {30, 31}},
+			GroupID:        "q1",
+			Source:         "nfcorpus",
+		},
+		{
+			QueryTokens:    []int32{1, 2, 3},
+			PositiveTokens: []int32{12, 13},
+			NegativeTokens: [][]int32{{20, 21}, {40, 41}},
+			GroupID:        "q1",
+			Source:         "nfcorpus",
+		},
+		{
+			QueryTokens:    []int32{7, 8, 9},
+			PositiveTokens: []int32{50, 51},
+			NegativeTokens: [][]int32{{60, 61}},
+			GroupID:        "q2",
+			Source:         "fiqa",
+		},
+	}
+	out := MergeHardNegativesByGroup(rows, 0, nil)
+	if len(out) != 2 {
+		t.Fatalf("got %d groups, want 2", len(out))
+	}
+	if len(out[0].PositiveTokens) != 2 {
+		t.Fatalf("group 0 positives=%d want 2", len(out[0].PositiveTokens))
+	}
+	if len(out[0].NegativeTokens) != 3 { // {20,21} is deduped
+		t.Fatalf("group 0 negatives=%d want 3 (after dedup)", len(out[0].NegativeTokens))
+	}
+	if out[0].Source != "nfcorpus" || out[0].GroupID != "q1" {
+		t.Fatalf("group 0 metadata: source=%s group=%s", out[0].Source, out[0].GroupID)
+	}
+	if len(out[1].PositiveTokens) != 1 || out[1].GroupID != "q2" {
+		t.Fatalf("group 1: positives=%d group=%s", len(out[1].PositiveTokens), out[1].GroupID)
+	}
+}
+
+func TestMergeHardNegativesByGroupCapsPositives(t *testing.T) {
+	rows := make([]EmbeddingHardNegativeExample, 0, 5)
+	for i := 0; i < 5; i++ {
+		rows = append(rows, EmbeddingHardNegativeExample{
+			QueryTokens:    []int32{1},
+			PositiveTokens: []int32{int32(100 + i)},
+			NegativeTokens: [][]int32{{200}},
+			GroupID:        "q",
+		})
+	}
+	rng := &fakeIntnRng{seed: 1}
+	out := MergeHardNegativesByGroup(rows, 3, rng)
+	if len(out) != 1 {
+		t.Fatalf("want 1 group, got %d", len(out))
+	}
+	if len(out[0].PositiveTokens) != 3 {
+		t.Fatalf("positives capped=%d want 3", len(out[0].PositiveTokens))
+	}
+}
+
+func TestMergeHardNegativesByGroupFallsBackToQueryHash(t *testing.T) {
+	rows := []EmbeddingHardNegativeExample{
+		{QueryTokens: []int32{1, 2, 3}, PositiveTokens: []int32{10}, NegativeTokens: [][]int32{{20}}},
+		{QueryTokens: []int32{1, 2, 3}, PositiveTokens: []int32{11}, NegativeTokens: [][]int32{{21}}},
+		{QueryTokens: []int32{4, 5, 6}, PositiveTokens: []int32{12}, NegativeTokens: [][]int32{{22}}},
+	}
+	out := MergeHardNegativesByGroup(rows, 0, nil)
+	if len(out) != 2 {
+		t.Fatalf("want 2 groups via query hash fallback, got %d", len(out))
 	}
 }

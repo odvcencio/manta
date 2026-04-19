@@ -1187,6 +1187,136 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 	}, nil
 }
 
+// TrainMultiPositiveStep runs one SupCon-style multi-positive InfoNCE update.
+// Each batch entry provides K≥1 positives and a set of hard negatives for a
+// single query. Reduces to TrainHardNegativeContrastiveStep when K=1 everywhere.
+func (t *EmbeddingTrainer) TrainMultiPositiveStep(batch []EmbeddingMultiPositiveExample) (EmbeddingTrainMetrics, error) {
+	if t == nil {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("embedding trainer is not initialized")
+	}
+	if len(batch) == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("multi-positive training batch is empty")
+	}
+	queryInputs := make([]embeddingSequenceInput, len(batch))
+	candidateInputs := make([]embeddingSequenceInput, 0, len(batch)*2)
+	targetIndexSets := make([][]int, len(batch))
+	for i, example := range batch {
+		if len(example.PositiveTokens) == 0 {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("multi-positive batch[%d] has no positives", i)
+		}
+		queryInputs[i] = embeddingSequenceInput{
+			tokens: example.QueryTokens,
+			mask:   example.QueryMask,
+			label:  fmt.Sprintf("batch %d query", i),
+		}
+		targets := make([]int, 0, len(example.PositiveTokens))
+		for p, tokens := range example.PositiveTokens {
+			var mask []int32
+			if p < len(example.PositiveMasks) {
+				mask = example.PositiveMasks[p]
+			}
+			targets = append(targets, len(candidateInputs))
+			candidateInputs = append(candidateInputs, embeddingSequenceInput{
+				tokens: tokens,
+				mask:   mask,
+				label:  fmt.Sprintf("batch %d positive %d", i, p),
+			})
+		}
+		targetIndexSets[i] = targets
+		for j, tokens := range example.NegativeTokens {
+			var mask []int32
+			if j < len(example.NegativeMasks) {
+				mask = example.NegativeMasks[j]
+			}
+			candidateInputs = append(candidateInputs, embeddingSequenceInput{
+				tokens: tokens,
+				mask:   mask,
+				label:  fmt.Sprintf("batch %d negative %d", i, j),
+			})
+		}
+	}
+	if len(candidateInputs) < 2 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("multi-positive batch needs at least two candidate documents")
+	}
+
+	forward := t.prepareForwardWeights()
+	t.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	allInputs := make([]embeddingSequenceInput, 0, len(queryInputs)+len(candidateInputs))
+	allInputs = append(allInputs, queryInputs...)
+	allInputs = append(allInputs, candidateInputs...)
+	encoded, err := t.encodeSequenceInputs(allInputs, forward, true)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	defer t.releaseEncodedSequences(encoded)
+	queries := encoded[:len(queryInputs)]
+	candidates := encoded[len(queryInputs):]
+
+	gradToken := make([]float32, len(t.tokenEmbed.F32))
+	gradAttnQ := make([]float32, tensorDataLen(t.attentionQuery))
+	gradAttnK := make([]float32, tensorDataLen(t.attentionKey))
+	gradAttnV := make([]float32, tensorDataLen(t.attentionValue))
+	gradAttnO := make([]float32, tensorDataLen(t.attentionOutput))
+	gradHidden := make([]float32, len(t.hiddenProjectionData()))
+	gradProj := make([]float32, len(t.projection.F32))
+	queryGrads := make([][]float32, len(queries))
+	candidateGrads := make([][]float32, len(candidates))
+	for i := range queries {
+		queryGrads[i] = make([]float32, len(queries[i].pooled))
+	}
+	for i := range candidates {
+		candidateGrads[i] = make([]float32, len(candidates[i].pooled))
+	}
+
+	// No CUDA multi-positive path yet; fall back to CPU accumulator.
+	totalLoss, totalScore := accumulateInfoNCEMultiPositiveGrads(queries, candidates, targetIndexSets, t.config.Temperature, queryGrads, candidateGrads)
+
+	if !t.tryBackpropContrastiveBatch(
+		queries,
+		candidates,
+		queryGrads,
+		candidateGrads,
+		forward.attnQ,
+		forward.attnK,
+		forward.attnV,
+		forward.attnO,
+		forward.hidden,
+		forward.proj,
+		gradToken,
+		gradAttnQ,
+		gradAttnK,
+		gradAttnV,
+		gradAttnO,
+		gradHidden,
+		gradProj,
+	) {
+		for i, query := range queries {
+			inputGrad := t.backpropEncodedSequence(query, queryGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
+			accumulateTokenGrad(query.tokens, inputGrad, gradToken, t.tokenEmbed.Shape[1], t.tokenEmbed.Shape[0])
+		}
+		for i, candidate := range candidates {
+			inputGrad := t.backpropEncodedSequence(candidate, candidateGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
+			accumulateTokenGrad(candidate.tokens, inputGrad, gradToken, t.tokenEmbed.Shape[1], t.tokenEmbed.Shape[0])
+		}
+	}
+
+	pairCount := len(queries) * len(candidates)
+	batchScale := float32(1) / float32(len(queries))
+	t.step++
+	t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
+	t.applyOptimizerUpdate(t.attnQParam.Name, t.attentionQuery, t.attnQMom1, t.attnQMom2, gradAttnQ, batchScale)
+	t.applyOptimizerUpdate(t.attnKParam.Name, t.attentionKey, t.attnKMom1, t.attnKMom2, gradAttnK, batchScale)
+	t.applyOptimizerUpdate(t.attnVParam.Name, t.attentionValue, t.attnVMom1, t.attnVMom2, gradAttnV, batchScale)
+	t.applyOptimizerUpdate(t.attnOParam.Name, t.attentionOutput, t.attnOMom1, t.attnOMom2, gradAttnO, batchScale)
+	t.applyOptimizerUpdate(t.hiddenParam.Name, t.hiddenProjection, t.hiddenMom1, t.hiddenMom2, gradHidden, batchScale)
+	t.applyOptimizerUpdate(t.projParam.Name, t.projection, t.projMom1, t.projMom2, gradProj, batchScale)
+	return EmbeddingTrainMetrics{
+		Loss:         totalLoss * batchScale,
+		AverageScore: totalScore / float32(pairCount),
+		BatchSize:    pairCount,
+	}, nil
+}
+
 // ExportInferenceWeights returns runtime-loadable weights in the module's declared dtypes.
 func (t *EmbeddingTrainer) ExportInferenceWeights() (map[string]*backend.Tensor, error) {
 	if t == nil {
@@ -2833,6 +2963,123 @@ func infoNCERowProbsAndLossInto(scores []float32, targetIndex int, temperature f
 		prob = 1e-12
 	}
 	return -float32(math.Log(float64(prob)))
+}
+
+// infoNCEMultiPositiveRowProbsAndLossInto fills probs with softmax over scores
+// and returns the multi-positive SupCon loss L = -log(Σ_{k∈T} q_k), plus the
+// summed positive probability Q_T so callers can compute per-index gradient
+// scales as (q_j - (q_j/Q_T if j∈T else 0)) / τ.
+//
+// targetIndexes is a set of positive indices for this row. Duplicate indices
+// and out-of-range entries are ignored. When exactly one valid target remains,
+// output matches infoNCERowProbsAndLossInto bit-for-bit.
+func infoNCEMultiPositiveRowProbsAndLossInto(scores []float32, targetIndexes []int, temperature float32, probs []float32) (loss float32, positiveMass float32) {
+	if len(scores) == 0 || len(targetIndexes) == 0 {
+		for i := range probs {
+			probs[i] = 0
+		}
+		return 0, 0
+	}
+	if temperature <= 0 {
+		temperature = 0.05
+	}
+	if len(probs) < len(scores) {
+		return 0, 0
+	}
+	probs = probs[:len(scores)]
+	maxLogit := scores[0] / temperature
+	for _, score := range scores[1:] {
+		logit := score / temperature
+		if logit > maxLogit {
+			maxLogit = logit
+		}
+	}
+	sum := float32(0)
+	for i, score := range scores {
+		value := float32(math.Exp(float64(score/temperature - maxLogit)))
+		probs[i] = value
+		sum += value
+	}
+	if sum == 0 {
+		return 0, 0
+	}
+	invSum := 1 / sum
+	for i := range probs {
+		probs[i] *= invSum
+	}
+	positiveMass = 0
+	seen := make(map[int]struct{}, len(targetIndexes))
+	for _, idx := range targetIndexes {
+		if idx < 0 || idx >= len(scores) {
+			continue
+		}
+		if _, dup := seen[idx]; dup {
+			continue
+		}
+		seen[idx] = struct{}{}
+		positiveMass += probs[idx]
+	}
+	if positiveMass < 1e-12 {
+		positiveMass = 1e-12
+	}
+	return -float32(math.Log(float64(positiveMass))), positiveMass
+}
+
+// accumulateInfoNCEMultiPositiveGrads is the multi-positive SupCon variant of
+// accumulateInfoNCEHardNegativeGrads. targetIndexSets[i] is the set of positive
+// candidate indices (into the shared candidates slice) for query i. A single
+// target reduces to the original single-positive InfoNCE.
+func accumulateInfoNCEMultiPositiveGrads(queries, candidates []*embeddingEncodedSequence, targetIndexSets [][]int, temperature float32, queryGrads, candidateGrads [][]float32) (float32, float32) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	if temperature <= 0 {
+		temperature = 0.05
+	}
+	queryMatrix := newContrastivePooledMatrix(queries)
+	candidateMatrix := newContrastivePooledMatrix(candidates)
+	rowScores := make([]float32, len(candidates))
+	rowProbs := make([]float32, len(candidates))
+	for i := range queries {
+		query := queryMatrix.row(i)
+		queryNorm := queryMatrix.norms[i]
+		for j := range candidates {
+			score := cosineScoreWithNorms(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j])
+			rowScores[j] = score
+			totalScore += score
+		}
+		var targets []int
+		if i < len(targetIndexSets) {
+			targets = targetIndexSets[i]
+		}
+		if len(targets) == 0 {
+			for j := range rowProbs {
+				rowProbs[j] = 0
+			}
+			continue
+		}
+		rowLoss, positiveMass := infoNCEMultiPositiveRowProbsAndLossInto(rowScores, targets, temperature, rowProbs)
+		totalLoss += rowLoss
+		// Build membership mask for O(1) lookup per candidate.
+		isTarget := make([]bool, len(candidates))
+		for _, idx := range targets {
+			if idx >= 0 && idx < len(candidates) {
+				isTarget[idx] = true
+			}
+		}
+		invPositiveMass := float32(0)
+		if positiveMass > 0 {
+			invPositiveMass = 1 / positiveMass
+		}
+		for j, prob := range rowProbs {
+			scale := prob
+			if isTarget[j] {
+				scale = prob - prob*invPositiveMass
+			}
+			scale /= temperature
+			accumulateCosineGradFromScore(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j], rowScores[j], scale, queryGrads[i], candidateGrads[j])
+		}
+	}
+	return totalLoss, totalScore
 }
 
 func (t *EmbeddingTrainer) prepareForwardWeights() *embeddingForwardWeights {

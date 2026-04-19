@@ -999,6 +999,10 @@ func runTrainEmbed(args []string) error {
 	var pairwiseTrain bool
 	var hardNegativeTrain bool
 	var hardNegativesPerQuery int
+	var multiPositiveTrain bool
+	var maxPositivesPerQuery int
+	var groupBatchesBySource bool
+	var sourceGroupPrefixSeparator string
 	var metricsJSONPath string
 	var learningRate float64
 	var contrastiveLoss string
@@ -1022,6 +1026,10 @@ func runTrainEmbed(args []string) error {
 	fs.BoolVar(&pairwiseTrain, "pairwise-train", false, "treat the training JSONL as labeled pair examples instead of contrastive positives")
 	fs.BoolVar(&hardNegativeTrain, "hard-negative-train", false, "group labeled pair JSONL into query-positive-hard-negative contrastive batches")
 	fs.IntVar(&hardNegativesPerQuery, "hard-negatives-per-query", 1, "maximum explicit negatives to attach to each query-positive example")
+	fs.BoolVar(&multiPositiveTrain, "multi-positive", false, "merge rows sharing GroupID into multi-positive SupCon-style InfoNCE examples (K positives, union of negatives) and train with multi-positive loss")
+	fs.IntVar(&maxPositivesPerQuery, "max-positives-per-query", 16, "cap on positives per merged group (0 disables capping); only applies when --multi-positive is set")
+	fs.BoolVar(&groupBatchesBySource, "group-batches-by-source", false, "regroup hard-negative batches so each batch draws only from a single Source tag (topic-homogeneous batching for multi-dataset mixes)")
+	fs.StringVar(&sourceGroupPrefixSeparator, "source-group-prefix-separator", "", "when --group-batches-by-source is set, collapse Source tags on this separator before grouping (e.g. \":\" makes \"scifact\" and \"scifact:model\" share one bucket)")
 	fs.StringVar(&metricsJSONPath, "metrics-json", "", "write machine-readable run metrics JSON to this path")
 	fs.Float64Var(&learningRate, "lr", 0, "override package learning rate for this run")
 	fs.StringVar(&contrastiveLoss, "contrastive-loss", "", "override package contrastive loss: pair_mse or infonce")
@@ -1049,6 +1057,12 @@ func runTrainEmbed(args []string) error {
 	}
 	if pairwiseTrain && hardNegativeTrain {
 		return fmt.Errorf("set either --pairwise-train or --hard-negative-train, not both")
+	}
+	if multiPositiveTrain && !hardNegativeTrain {
+		return fmt.Errorf("--multi-positive requires --hard-negative-train")
+	}
+	if maxPositivesPerQuery < 0 {
+		return fmt.Errorf("max-positives-per-query must be non-negative")
 	}
 	path := fs.Arg(0)
 	trainPath := fs.Arg(1)
@@ -1087,8 +1101,12 @@ func runTrainEmbed(args []string) error {
 		ProgressEverySteps:    progressEvery,
 		EvalOnly:              evalOnly,
 		PairwiseTrain:         pairwiseTrain,
-		HardNegativeTrain:     hardNegativeTrain,
-		HardNegativesPerQuery: hardNegativesPerQuery,
+		HardNegativeTrain:          hardNegativeTrain,
+		HardNegativesPerQuery:      hardNegativesPerQuery,
+		MultiPositiveTrain:         multiPositiveTrain,
+		MaxPositivesPerQuery:       maxPositivesPerQuery,
+		GroupBatchesBySource:       groupBatchesBySource,
+		SourceGroupPrefixSeparator: sourceGroupPrefixSeparator,
 	}
 	if progressEvery > 0 {
 		runConfig.Progress = printTrainProgress

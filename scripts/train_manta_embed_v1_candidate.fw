@@ -38,6 +38,10 @@ type candidateConfig struct {
 	PairwiseTrain       string
 	HardNegativeTrain   string
 	HardNegativesPerQuery string
+	MultiPositiveTrain    string
+	MaxPositivesPerQuery  string
+	GroupBatchesBySource string
+	SourceGroupPrefixSeparator string
 	VocabSize           string
 	MaxSeq              string
 	EmbeddingDim        string
@@ -643,6 +647,10 @@ func prepareConfig(root string) (candidateConfig, error) {
 		PairwiseTrain:       getenv("MANTA_PAIRWISE_TRAIN", "0"),
 		HardNegativeTrain:   getenv("MANTA_HARD_NEGATIVE_TRAIN", "0"),
 		HardNegativesPerQuery: getenv("MANTA_HARD_NEGATIVES_PER_QUERY", "1"),
+		MultiPositiveTrain:    getenv("MANTA_MULTI_POSITIVE_TRAIN", "0"),
+		MaxPositivesPerQuery:  getenv("MANTA_MAX_POSITIVES_PER_QUERY", "16"),
+		GroupBatchesBySource: getenv("MANTA_GROUP_BATCHES_BY_SOURCE", "0"),
+		SourceGroupPrefixSeparator: getenv("MANTA_SOURCE_GROUP_PREFIX_SEPARATOR", ""),
 		MinFreq:             getenv("MANTA_MIN_FREQ", "1"),
 		MinChars:            getenv("MANTA_MIN_CHARS", "20"),
 		MaxPairs:            getenv("MANTA_MAX_PAIRS", "0"),
@@ -784,6 +792,14 @@ func pairwiseTrainEnabled(cfg candidateConfig) bool {
 
 func hardNegativeTrainEnabled(cfg candidateConfig) bool {
 	return envEnabled("MANTA_HARD_NEGATIVE_TRAIN") || cfg.HardNegativeTrain == "1" || strings.ToLower(cfg.HardNegativeTrain) == "true"
+}
+
+func multiPositiveTrainEnabled(cfg candidateConfig) bool {
+	return envEnabled("MANTA_MULTI_POSITIVE_TRAIN") || cfg.MultiPositiveTrain == "1" || strings.ToLower(cfg.MultiPositiveTrain) == "true"
+}
+
+func groupBatchesBySourceEnabled(cfg candidateConfig) bool {
+	return envEnabled("MANTA_GROUP_BATCHES_BY_SOURCE") || cfg.GroupBatchesBySource == "1" || strings.ToLower(cfg.GroupBatchesBySource) == "true"
 }
 
 func pairwiseQualityTarget(cfg candidateConfig) bool {
@@ -947,6 +963,15 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 			args = append(args, "--pairwise-train")
 		} else if hardNegativeTrainEnabled(cfg) {
 			args = append(args, "--hard-negative-train", "--hard-negatives-per-query", cfg.HardNegativesPerQuery)
+			if multiPositiveTrainEnabled(cfg) {
+				args = append(args, "--multi-positive", "--max-positives-per-query", cfg.MaxPositivesPerQuery)
+			}
+			if groupBatchesBySourceEnabled(cfg) {
+				args = append(args, "--group-batches-by-source")
+				if cfg.SourceGroupPrefixSeparator != "" {
+					args = append(args, "--source-group-prefix-separator", cfg.SourceGroupPrefixSeparator)
+				}
+			}
 		}
 		if trainTokenizer != "" {
 			args = append(args, "--tokenizer", trainTokenizer)
@@ -959,6 +984,15 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 			planArgs = append(planArgs, "--pairwise-train")
 		} else if hardNegativeTrainEnabled(cfg) {
 			planArgs = append(planArgs, "--hard-negative-train", "--hard-negatives-per-query", cfg.HardNegativesPerQuery)
+			if multiPositiveTrainEnabled(cfg) {
+				planArgs = append(planArgs, "--multi-positive", "--max-positives-per-query", cfg.MaxPositivesPerQuery)
+			}
+			if groupBatchesBySourceEnabled(cfg) {
+				planArgs = append(planArgs, "--group-batches-by-source")
+				if cfg.SourceGroupPrefixSeparator != "" {
+					planArgs = append(planArgs, "--source-group-prefix-separator", cfg.SourceGroupPrefixSeparator)
+				}
+			}
 		}
 		if trainTokenizer != "" {
 			planArgs = append(planArgs, "--tokenizer", trainTokenizer)

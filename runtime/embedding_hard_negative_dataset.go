@@ -9,6 +9,11 @@ import (
 )
 
 // EmbeddingHardNegativeExample is one query-positive example with explicit hard negatives.
+//
+// Source is an optional dataset/domain tag (e.g. "scifact", "fiqa").
+// The training runner uses it to build topic-homogeneous batches when
+// GroupBatchesBySource is enabled, so that every in-batch negative is
+// a same-domain distractor rather than a trivial cross-domain mismatch.
 type EmbeddingHardNegativeExample struct {
 	QueryTokens    []int32
 	PositiveTokens []int32
@@ -16,12 +21,21 @@ type EmbeddingHardNegativeExample struct {
 	QueryMask      []int32
 	PositiveMask   []int32
 	NegativeMasks  [][]int32
+	Source         string
+	// GroupID links rows that share the same query in multi-positive training.
+	// Rows with matching GroupID are merged into a single multi-positive example
+	// at batch construction. Empty falls back to a hash of QueryTokens+QueryMask.
+	GroupID string
 }
 
 type EmbeddingTextHardNegativeExample struct {
 	Query     string
 	Positive  string
 	Negatives []string
+	Source    string
+	// GroupID links rows that share the same query in multi-positive training.
+	// Empty falls back to the query text.
+	GroupID string
 }
 
 type embeddingHardNegativeRecord struct {
@@ -31,6 +45,8 @@ type embeddingHardNegativeRecord struct {
 	QueryMask      []int32   `json:"query_mask,omitempty"`
 	PositiveMask   []int32   `json:"positive_mask,omitempty"`
 	NegativeMasks  [][]int32 `json:"negative_masks,omitempty"`
+	Source         string    `json:"source,omitempty"`
+	GroupID        string    `json:"group_id,omitempty"`
 }
 
 type embeddingTextHardNegativeRecord struct {
@@ -38,6 +54,8 @@ type embeddingTextHardNegativeRecord struct {
 	Positive  string   `json:"positive"`
 	Document  string   `json:"document,omitempty"`
 	Negatives []string `json:"negatives,omitempty"`
+	Source    string   `json:"source,omitempty"`
+	GroupID   string   `json:"group_id,omitempty"`
 }
 
 // ReadEmbeddingHardNegativeExamplesFile reads tokenized hard-negative JSONL.
@@ -320,6 +338,10 @@ func tokenizeEmbeddingTextHardNegativeExamples(examples []EmbeddingTextHardNegat
 			query = cloneTokenizedText(query)
 			positive = cloneTokenizedText(positive)
 		}
+		groupID := example.GroupID
+		if groupID == "" {
+			groupID = example.Query
+		}
 		out = append(out, EmbeddingHardNegativeExample{
 			QueryTokens:    query.tokens,
 			PositiveTokens: positive.tokens,
@@ -327,9 +349,120 @@ func tokenizeEmbeddingTextHardNegativeExamples(examples []EmbeddingTextHardNegat
 			QueryMask:      query.mask,
 			PositiveMask:   positive.mask,
 			NegativeMasks:  negativeMasks,
+			Source:         example.Source,
+			GroupID:        groupID,
 		})
 	}
 	return out, nil
+}
+
+// EmbeddingMultiPositiveExample represents a query with K≥1 positives and a set
+// of hard negatives. It is produced by MergeHardNegativesByGroup from
+// EmbeddingHardNegativeExample rows that share the same GroupID. K=1 mirrors
+// single-positive training exactly.
+type EmbeddingMultiPositiveExample struct {
+	QueryTokens    []int32
+	PositiveTokens [][]int32
+	PositiveMasks  [][]int32
+	NegativeTokens [][]int32
+	NegativeMasks  [][]int32
+	QueryMask      []int32
+	Source         string
+	GroupID        string
+}
+
+// MergeHardNegativesByGroup collapses rows sharing GroupID into multi-positive
+// examples. Query tokens are taken from the first row of each group. Positives
+// are concatenated. Negatives are deduped by token-sequence hash. When
+// maxPositives>0, positive lists are randomly sampled down to that cap using
+// the provided rng. The output order matches the first occurrence of each
+// group in the input.
+func MergeHardNegativesByGroup(rows []EmbeddingHardNegativeExample, maxPositives int, rng interface {
+	Intn(int) int
+}) []EmbeddingMultiPositiveExample {
+	if len(rows) == 0 {
+		return nil
+	}
+	groupIndex := map[string]int{}
+	order := []string{}
+	grouped := []*EmbeddingMultiPositiveExample{}
+	negSeen := []map[string]struct{}{}
+	for _, row := range rows {
+		key := row.GroupID
+		if key == "" {
+			key = embeddingBatchSequenceKey(row.QueryTokens, row.QueryMask)
+		}
+		idx, ok := groupIndex[key]
+		if !ok {
+			idx = len(grouped)
+			groupIndex[key] = idx
+			order = append(order, key)
+			grouped = append(grouped, &EmbeddingMultiPositiveExample{
+				QueryTokens: append([]int32(nil), row.QueryTokens...),
+				QueryMask:   append([]int32(nil), row.QueryMask...),
+				Source:      row.Source,
+				GroupID:     key,
+			})
+			negSeen = append(negSeen, map[string]struct{}{})
+		}
+		example := grouped[idx]
+		if len(row.PositiveTokens) > 0 {
+			example.PositiveTokens = append(example.PositiveTokens, append([]int32(nil), row.PositiveTokens...))
+			var mask []int32
+			if len(row.PositiveMask) > 0 {
+				mask = append([]int32(nil), row.PositiveMask...)
+			}
+			example.PositiveMasks = append(example.PositiveMasks, mask)
+		}
+		seen := negSeen[idx]
+		for j, negTokens := range row.NegativeTokens {
+			var negMask []int32
+			if j < len(row.NegativeMasks) {
+				negMask = row.NegativeMasks[j]
+			}
+			k := embeddingBatchSequenceKey(negTokens, negMask)
+			if _, dup := seen[k]; dup {
+				continue
+			}
+			seen[k] = struct{}{}
+			example.NegativeTokens = append(example.NegativeTokens, append([]int32(nil), negTokens...))
+			if len(negMask) > 0 {
+				example.NegativeMasks = append(example.NegativeMasks, append([]int32(nil), negMask...))
+			} else {
+				example.NegativeMasks = append(example.NegativeMasks, nil)
+			}
+		}
+	}
+	out := make([]EmbeddingMultiPositiveExample, 0, len(order))
+	for _, key := range order {
+		example := grouped[groupIndex[key]]
+		if maxPositives > 0 && len(example.PositiveTokens) > maxPositives && rng != nil {
+			// Fisher-Yates sample of maxPositives indices.
+			indices := make([]int, len(example.PositiveTokens))
+			for i := range indices {
+				indices[i] = i
+			}
+			for i := 0; i < maxPositives; i++ {
+				j := i + rng.Intn(len(indices)-i)
+				indices[i], indices[j] = indices[j], indices[i]
+			}
+			keepIdx := indices[:maxPositives]
+			tokens := make([][]int32, 0, maxPositives)
+			masks := make([][]int32, 0, maxPositives)
+			for _, idx := range keepIdx {
+				tokens = append(tokens, example.PositiveTokens[idx])
+				if idx < len(example.PositiveMasks) {
+					masks = append(masks, example.PositiveMasks[idx])
+				} else {
+					masks = append(masks, nil)
+				}
+			}
+			example.PositiveTokens = tokens
+			example.PositiveMasks = masks
+		}
+		out = append(out, *example)
+	}
+	return out
 }
 
 func limitHardNegativeExamples(examples []EmbeddingHardNegativeExample, maxNegatives int) []EmbeddingHardNegativeExample {
@@ -383,6 +516,8 @@ func newEmbeddingHardNegativeRecord(example EmbeddingHardNegativeExample) (embed
 		QueryMask:      append([]int32(nil), example.QueryMask...),
 		PositiveMask:   append([]int32(nil), example.PositiveMask...),
 		NegativeMasks:  cloneInt32Matrix(example.NegativeMasks),
+		Source:         example.Source,
+		GroupID:        example.GroupID,
 	}, nil
 }
 
@@ -394,9 +529,15 @@ func (r embeddingHardNegativeRecord) example() (EmbeddingHardNegativeExample, er
 		QueryMask:      r.QueryMask,
 		PositiveMask:   r.PositiveMask,
 		NegativeMasks:  r.NegativeMasks,
+		Source:         r.Source,
+		GroupID:        r.GroupID,
 	})
 	if err != nil {
 		return EmbeddingHardNegativeExample{}, err
+	}
+	groupID := record.GroupID
+	if groupID == "" {
+		groupID = embeddingBatchSequenceKey(record.QueryTokens, record.QueryMask)
 	}
 	return EmbeddingHardNegativeExample{
 		QueryTokens:    record.QueryTokens,
@@ -405,6 +546,8 @@ func (r embeddingHardNegativeRecord) example() (EmbeddingHardNegativeExample, er
 		QueryMask:      record.QueryMask,
 		PositiveMask:   record.PositiveMask,
 		NegativeMasks:  record.NegativeMasks,
+		Source:         record.Source,
+		GroupID:        groupID,
 	}, nil
 }
 
@@ -427,6 +570,8 @@ func newEmbeddingTextHardNegativeRecord(example EmbeddingTextHardNegativeExample
 		Query:     example.Query,
 		Positive:  example.Positive,
 		Negatives: append([]string(nil), example.Negatives...),
+		Source:    example.Source,
+		GroupID:   example.GroupID,
 	}, nil
 }
 
@@ -436,14 +581,22 @@ func (r embeddingTextHardNegativeRecord) example() (EmbeddingTextHardNegativeExa
 		Query:     r.Query,
 		Positive:  positive,
 		Negatives: r.Negatives,
+		Source:    r.Source,
+		GroupID:   r.GroupID,
 	})
 	if err != nil {
 		return EmbeddingTextHardNegativeExample{}, err
+	}
+	groupID := record.GroupID
+	if groupID == "" {
+		groupID = record.Query
 	}
 	return EmbeddingTextHardNegativeExample{
 		Query:     record.Query,
 		Positive:  record.Positive,
 		Negatives: record.Negatives,
+		Source:    record.Source,
+		GroupID:   groupID,
 	}, nil
 }
 
