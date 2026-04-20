@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strings"
-	"unicode"
 )
 
 type TokenizerTrainConfig struct {
@@ -155,28 +153,13 @@ func loadCorpusWords(path string) ([]string, error) {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		for _, word := range strings.Fields(line) {
-			cleaned := normalizeWord(word)
-			if cleaned != "" {
-				words = append(words, cleaned)
-			}
-		}
+		// normalizedWords is shared with the encoder so the trainer
+		// and the encoder always segment text the same way: a word is
+		// a maximal run of letters/digits, lowercased, with everything
+		// else acting as a separator and being dropped.
+		words = append(words, normalizedWords(scanner.Text())...)
 	}
 	return words, scanner.Err()
-}
-
-func normalizeWord(word string) string {
-	var b strings.Builder
-	for _, r := range word {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(unicode.ToLower(r))
-		}
-	}
-	return b.String()
 }
 
 func pairLess(a, b struct{ left, right string }) bool {

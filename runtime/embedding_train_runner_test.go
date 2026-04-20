@@ -1,6 +1,7 @@
 package mantaruntime
 
 import (
+	"math/rand"
 	"testing"
 	"time"
 
@@ -8,6 +9,137 @@ import (
 	"github.com/odvcencio/manta/compiler"
 	"github.com/odvcencio/manta/runtime/backend"
 )
+
+func TestGroupHardNegativeOrderBySource(t *testing.T) {
+	// Build a trainSet where Source tags are interleaved in the input
+	// order and each source has enough examples for full batches.
+	//
+	//   sources: A=5, B=3, C=7 examples; batch=2
+	//   expected counts after regrouping: A=4 (1 dropped), B=2 (1
+	//   dropped), C=6 (1 dropped).
+	sources := []string{
+		"A", "B", "C", "A", "C", "B", "A", "C", "A", "B",
+		"C", "A", "C", "C", "C",
+	}
+	trainSet := make([]EmbeddingHardNegativeExample, len(sources))
+	order := make([]int, len(sources))
+	for i, src := range sources {
+		trainSet[i] = EmbeddingHardNegativeExample{Source: src}
+		order[i] = i
+	}
+	rng := rand.New(rand.NewSource(17))
+	got := groupHardNegativeOrderBySource(trainSet, order, 2, rng, "")
+
+	// Invariant 1: length is a multiple of batch size.
+	if len(got)%2 != 0 {
+		t.Fatalf("regrouped order length %d is not a multiple of batch size 2", len(got))
+	}
+	// Invariant 2: each batch-size window is source-homogeneous.
+	for start := 0; start < len(got); start += 2 {
+		window := got[start : start+2]
+		first := trainSet[window[0]].Source
+		for _, idx := range window[1:] {
+			if trainSet[idx].Source != first {
+				t.Fatalf("batch starting at %d mixes sources: %v (indices %v)",
+					start,
+					[]string{trainSet[window[0]].Source, trainSet[window[1]].Source},
+					window)
+			}
+		}
+	}
+	// Invariant 3: every emitted index is in range and unique.
+	seen := map[int]bool{}
+	for _, idx := range got {
+		if idx < 0 || idx >= len(trainSet) {
+			t.Fatalf("regrouped index %d out of range 0..%d", idx, len(trainSet)-1)
+		}
+		if seen[idx] {
+			t.Fatalf("regrouped index %d appears twice", idx)
+		}
+		seen[idx] = true
+	}
+	// Invariant 4: counts-per-source match the batch-aligned totals.
+	counts := map[string]int{}
+	for _, idx := range got {
+		counts[trainSet[idx].Source]++
+	}
+	want := map[string]int{"A": 4, "B": 2, "C": 6}
+	for src, n := range want {
+		if counts[src] != n {
+			t.Fatalf("source %q contributed %d examples, want %d", src, counts[src], n)
+		}
+	}
+}
+
+func TestGroupHardNegativeOrderBySourceFallsThroughWhenSingleOrUnsourced(t *testing.T) {
+	// Single source: no regrouping needed, return original order.
+	trainSet := []EmbeddingHardNegativeExample{
+		{Source: "solo"}, {Source: "solo"}, {Source: "solo"},
+	}
+	order := []int{0, 1, 2}
+	got := groupHardNegativeOrderBySource(trainSet, order, 2, rand.New(rand.NewSource(1)), "")
+	if len(got) != len(order) {
+		t.Fatalf("single-source regroup changed length: got %d want %d", len(got), len(order))
+	}
+
+	// No sources at all: fall through unchanged.
+	unsourced := []EmbeddingHardNegativeExample{{}, {}, {}}
+	got = groupHardNegativeOrderBySource(unsourced, order, 2, rand.New(rand.NewSource(1)), "")
+	if len(got) != len(order) {
+		t.Fatalf("unsourced regroup changed length: got %d want %d", len(got), len(order))
+	}
+}
+
+func TestGroupHardNegativeOrderBySourceCollapsesPrefix(t *testing.T) {
+	// With prefixSeparator=":", "scifact" and "scifact:model" must be
+	// grouped together as one "scifact" bucket; ditto for "fiqa" and
+	// "fiqa:model". Without the separator they are separate.
+	sources := []string{
+		"scifact", "scifact:model", "scifact", "scifact:model",
+		"fiqa", "fiqa:model", "fiqa", "fiqa:model",
+	}
+	trainSet := make([]EmbeddingHardNegativeExample, len(sources))
+	order := make([]int, len(sources))
+	for i, src := range sources {
+		trainSet[i] = EmbeddingHardNegativeExample{Source: src}
+		order[i] = i
+	}
+	rng := rand.New(rand.NewSource(1))
+	got := groupHardNegativeOrderBySource(trainSet, order, 4, rng, ":")
+	// With batchSize=4 and two collapsed groups of 4 each we should
+	// keep everyone and emit exactly 8 indices.
+	if len(got) != 8 {
+		t.Fatalf("collapsed regroup dropped too many: got %d want 8", len(got))
+	}
+	// Each 4-element window must share a collapsed prefix.
+	for start := 0; start < len(got); start += 4 {
+		window := got[start : start+4]
+		prefix := trainSet[window[0]].Source
+		if i := len(prefix); i > 0 {
+			if idx := indexOfColon(prefix); idx >= 0 {
+				prefix = prefix[:idx]
+			}
+		}
+		for _, idx := range window[1:] {
+			src := trainSet[idx].Source
+			if colon := indexOfColon(src); colon >= 0 {
+				src = src[:colon]
+			}
+			if src != prefix {
+				t.Fatalf("collapsed batch at %d mixes prefixes %q vs %q", start, prefix, src)
+			}
+		}
+	}
+}
+
+func indexOfColon(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == ':' {
+			return i
+		}
+	}
+	return -1
+}
 
 func TestEstimateContrastiveTrainWorkload(t *testing.T) {
 	workload := EstimateContrastiveTrainWorkload(512, 128, EmbeddingTrainRunConfig{

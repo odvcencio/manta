@@ -1,0 +1,200 @@
+package main
+
+// ablate_tokenizer_coverage rebuilds manta-embed-v1's tokenizer over
+// the full BEIR corpora (scifact + nfcorpus + fiqa, queries AND
+// documents) with a larger vocab and bumped max-seq, then trains a
+// candidate on the same hard-negative pairs as the current baseline.
+// Architecture and training hyperparameters are pinned to the values
+// from the recent bm25-open sweep (seed-5 best run) so the only
+// intentional variables are vocab size, max sequence length, and the
+// tokenizer training corpus.
+//
+// Usage:
+//   ferrous-wheel run scripts/ablate_tokenizer_coverage.fw
+//
+// Optional env overrides:
+//   MANTA_VOCAB_SIZE   default 16384
+//   MANTA_MAX_SEQ      default 256
+//   MANTA_INIT_SEED    default 5     (matches baseline best seed)
+//   MANTA_RUN_ID       default auto-stamped
+//   MANTA_REPO_ROOT    default detected from git or PWD
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"time"
+)
+
+func getenv(name string, fallback string) string {
+	let value = os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func step(label string) {
+	fmt.Println(f"\n== {label} ==")
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "go.mod"))
+	return err == nil
+}
+
+func findRoot() (string, error) {
+	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	if hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	let pwd = os.Getenv("PWD")
+	if hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+}
+
+func runCmd(dir string, name string, args []string) error {
+	let cmd = exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	return cmd.Run()
+}
+
+func ensureTokenizerCorpus(root string, target string) error {
+	if info, err := os.Stat(target); err == nil && info.Size() > 0 {
+		return nil
+	}
+	step("Build BEIR-coverage tokenizer corpus")
+	let raw = filepath.Join(root, "datasets", "manta-embed-v1", "raw")
+	return runCmd(root, "go", []string{
+		"run", "./cmd/buildtokcorpus",
+		"--out", target,
+		filepath.Join(raw, "scifact"),
+		filepath.Join(raw, "nfcorpus"),
+		filepath.Join(raw, "fiqa"),
+	})
+}
+
+// applyEnv sets a default for an env var only if the caller hasn't
+// already provided one. Lets a user override anything via the shell
+// while the script supplies sensible defaults.
+func applyEnv(name string, value string) {
+	if os.Getenv(name) == "" {
+		_ = os.Setenv(name, value)
+	}
+}
+
+func main() {
+	root, err := findRoot()
+	guard err == nil else {
+		fmt.Println(f"failed to resolve repo root: {err}")
+		os.Exit(1)
+	}
+	_ = os.Setenv("MANTA_REPO_ROOT", root)
+
+	let processed = filepath.Join(root, "datasets", "manta-embed-v1", "processed")
+	let tokenizerCorpus = filepath.Join(processed, "tokenizer-corpus-full-beir.txt")
+	err = ensureTokenizerCorpus(root, tokenizerCorpus)
+	guard err == nil else {
+		fmt.Println(f"failed to build tokenizer corpus: {err}")
+		os.Exit(1)
+	}
+
+	// The ONLY intentional changes vs the bm25-open sweep baseline:
+	//   MANTA_VOCAB_SIZE       2454 -> 16384 (BPE will saturate earlier)
+	//   MANTA_MAX_SEQ          160  -> 256
+	//   MANTA_TOKENIZER_CORPUS now spans the full BEIR corpora, not
+	//                          just the training pairs subset
+	applyEnv("MANTA_VOCAB_SIZE", "16384")
+	applyEnv("MANTA_MAX_SEQ", "256")
+	_ = os.Setenv("MANTA_TOKENIZER_CORPUS", tokenizerCorpus)
+
+	// Hold these constant against the baseline sweep so the ablation
+	// isolates the tokenizer/coverage variables.
+	applyEnv("MANTA_EMBEDDING_DIM", "256")
+	applyEnv("MANTA_HIDDEN_DIM", "512")
+	applyEnv("MANTA_BATCH_SIZE", "768")
+	applyEnv("MANTA_EPOCHS", "2")
+	applyEnv("MANTA_LR", "0.002")
+	applyEnv("MANTA_TEMPERATURE", "0.05")
+	applyEnv("MANTA_HARD_NEGATIVE_TRAIN", "1")
+	applyEnv("MANTA_HARD_NEGATIVES_PER_QUERY", "1")
+	// Topic-homogeneous batching: make each in-batch negative a
+	// same-domain distractor rather than a cross-domain mismatch. See
+	// groupHardNegativeOrderBySource in runtime/embedding_train_runner.go.
+	// The ":" separator collapses "scifact" and "scifact:model" (and
+	// the same for nfcorpus/fiqa) into single domain buckets.
+	applyEnv("MANTA_GROUP_BATCHES_BY_SOURCE", "1")
+	applyEnv("MANTA_SOURCE_GROUP_PREFIX_SEPARATOR", ":")
+	applyEnv("MANTA_PAIRWISE_TRAIN", "0")
+	applyEnv("MANTA_QUALITY_TARGET", "retrieval")
+	applyEnv("MANTA_SELECT_METRIC", "mrr")
+	applyEnv("MANTA_EVAL_EVERY", "999")
+	applyEnv("MANTA_EVAL_EVERY_STEPS", "0")
+	applyEnv("MANTA_RESTORE_BEST", "false")
+	applyEnv("MANTA_INIT_SEED", "5")
+
+	applyEnv("MANTA_TRAIN_JSONL", filepath.Join(processed, "train-hard-negatives-plus-model.jsonl"))
+	applyEnv("MANTA_EVAL_JSONL", filepath.Join(processed, "eval.jsonl"))
+	applyEnv("MANTA_HARD_EVAL_JSONL", filepath.Join(processed, "hard-eval.jsonl"))
+
+	applyEnv("MANTA_EVAL_DATASETS", "scifact,nfcorpus,fiqa")
+	applyEnv("MANTA_EVAL_BM25_BASELINE", "1")
+	// Don't gate against BM25; we know the baseline misses the gate
+	// and we want to see the unconstrained number.
+	applyEnv("MANTA_GATE_BM25_BASELINE", "0")
+	applyEnv("MANTA_MIN_RETRIEVAL_NDCG10_SCIFACT", "0")
+	applyEnv("MANTA_MIN_RETRIEVAL_NDCG10_NFCORPUS", "0")
+	applyEnv("MANTA_MIN_RETRIEVAL_NDCG10_FIQA", "0")
+
+	// Match the baseline's relaxed sandbox flags. Diagnostic tooling
+	// (cmd/tokenstats, cmd/buildtokcorpus, this script) is intended
+	// to be uncommitted while iterating.
+	applyEnv("MANTA_ALLOW_DIRTY", "1")
+	applyEnv("MANTA_SKIP_TESTS", "1")
+	applyEnv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
+	applyEnv("MANTA_TRAIN_ENABLE_FAST_GELU", "1")
+
+	let stamp = time.Now().UTC().Format("20060102T150405Z")
+	let defaultRunID = fmt.Sprintf("manta-embed-v1-tokablation-vocab%s-seq%s-seed%s-%s",
+		os.Getenv("MANTA_VOCAB_SIZE"),
+		os.Getenv("MANTA_MAX_SEQ"),
+		os.Getenv("MANTA_INIT_SEED"),
+		stamp,
+	)
+	applyEnv("MANTA_RUN_ID", defaultRunID)
+	applyEnv("MANTA_RUN_ROOT", filepath.Join(root, "runs"))
+
+	let runIDValue = os.Getenv("MANTA_RUN_ID")
+	let vocabValue = os.Getenv("MANTA_VOCAB_SIZE")
+	let maxSeqValue = os.Getenv("MANTA_MAX_SEQ")
+	let seedValue = os.Getenv("MANTA_INIT_SEED")
+	let trainValue = os.Getenv("MANTA_TRAIN_JSONL")
+	step("Tokenizer ablation")
+	fmt.Println(f"run_id:           {runIDValue}")
+	fmt.Println(f"vocab_size:       {vocabValue}")
+	fmt.Println(f"max_sequence:     {maxSeqValue}")
+	fmt.Println(f"init_seed:        {seedValue}")
+	fmt.Println(f"tokenizer_corpus: {tokenizerCorpus}")
+	fmt.Println(f"train_jsonl:      {trainValue}")
+
+	let inner = "scripts/train_manta_embed_v1_candidate.fw"
+	err = runCmd(root, "ferrous-wheel", []string{"run", inner})
+	guard err == nil else {
+		fmt.Println(f"candidate run failed: {err}")
+		os.Exit(1)
+	}
+}

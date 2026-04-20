@@ -1,0 +1,357 @@
+package main
+
+// overnight_lever_sweep runs three capacity/regularization levers for
+// manta-embed-v1 back-to-back, each as a 2-seed sweep. It delegates to
+// scripts/sweep_manta_embed_v1_candidates.fw for the per-lever sweep work
+// and only orchestrates the outer schedule + consolidated summary.
+//
+// Order (cheap → expensive) so an overnight wake-up shows partial results fast:
+//   D: batch 768 → 1536   (more in-batch negatives; ~30 min total)
+//   E: temperature 0.02   (sharper contrast; ~30 min total)
+//   C: emb 256→512 + hidden 512→1024 (4× params; ~4 hr total)
+//
+// Usage (matches the environment of train_manta_embed_v1_candidate.fw):
+//   MANTA_REPO_ROOT=$PWD \
+//   MANTA_TRAIN_JSONL=... MANTA_EVAL_JSONL=... MANTA_HARD_EVAL_JSONL=... \
+//   MANTA_TOKENIZER=.../205556Z/manta-embed-v1.tokenizer.mll \
+//   MANTA_THRESHOLDS_ENV=.local/thresholds_noise_sweep.env \
+//     ferrous-wheel run scripts/overnight_lever_sweep.fw
+//
+// Optional:
+//   MANTA_OVERNIGHT_SEEDS=5,3
+//   MANTA_OVERNIGHT_ROOT=/path (default: runs/manta-embed-v1-overnight-<ts>)
+//   MANTA_OVERNIGHT_SKIP=D,E,C (comma list; skip specific levers)
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+type lever struct {
+	Name     string
+	ExtraEnv []string
+}
+
+func usage() {
+	fmt.Println(`Overnight manta-embed-v1 lever sweep.
+
+Required env:
+  MANTA_TRAIN_JSONL       prepared contrastive/hard-negative JSONL
+  MANTA_EVAL_JSONL        pairwise eval JSONL
+  MANTA_HARD_EVAL_JSONL   pairwise hard-eval JSONL
+  MANTA_THRESHOLDS_ENV    path to thresholds file (noise-sweep version recommended)
+
+Recommended:
+  MANTA_TOKENIZER         reuse a known-good tokenizer to skip the ~12 min BPE step
+
+Optional:
+  MANTA_OVERNIGHT_ROOT    base dir for the run (default runs/manta-embed-v1-overnight-<ts>)
+  MANTA_OVERNIGHT_SEEDS   CSV of seeds to sweep (default 5,3)
+  MANTA_OVERNIGHT_SKIP    CSV of lever names to skip (e.g. "C" to drop the expensive one)
+
+Produces:
+  <root>/D-batch1536/            sweep dir + leaderboard.tsv
+  <root>/E-temp0.02/
+  <root>/C-capacity/
+  <root>/overnight-summary.tsv   consolidated per-lever per-dataset ndcg@10
+  <root>/overnight.log           combined stdout/stderr`)
+}
+
+func getenv(name string, fallback string) string {
+	let v = os.Getenv(name)
+	if v != "" {
+		return v
+	}
+	return fallback
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+func findRoot() (string, error) {
+	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	if hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	let pwd = os.Getenv("PWD")
+	if hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+}
+
+func requireFile(name string) error {
+	let value = os.Getenv(name)
+	guard value != "" else return fmt.Errorf("%s is required", name)
+	_, err := os.Stat(value)
+	guard err == nil else return fmt.Errorf("%s does not exist: %s", name, value)
+	return nil
+}
+
+func splitCSV(value string) []string {
+	out := []string{}
+	for _, raw := range strings.Split(value, ",") {
+		item := strings.TrimSpace(raw)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func contains(list []string, target string) bool {
+	for _, item := range list {
+		if item == target {
+			return true
+		}
+	}
+	return false
+}
+
+func runLever(root string, overnightRoot string, seeds string, logFile *os.File, spec lever) error {
+	fmt.Println(f"\n========== Lever {spec.Name} ==========")
+	fmt.Fprintf(logFile, "\n========== Lever %s ==========\n", spec.Name)
+
+	let runRoot = filepath.Join(overnightRoot, spec.Name)
+	err := os.MkdirAll(runRoot, 0o755)
+	guard err == nil else return err
+
+	env := append([]string{}, os.Environ()...)
+	env = append(env,
+		"MANTA_SWEEP_RUN_ROOT="+runRoot,
+		"MANTA_SWEEP_SEEDS="+seeds,
+		"MANTA_QUALITY_TARGET=retrieval",
+		"MANTA_HARD_NEGATIVE_TRAIN=1",
+		"MANTA_PAIRWISE_TRAIN=0",
+		"MANTA_GROUP_BATCHES_BY_SOURCE=0",
+		"MANTA_SKIP_TESTS=1",
+		"MANTA_ALLOW_DIRTY=1",
+		"MANTA_EVAL_EVERY=999",
+		"MANTA_EVAL_EVERY_STEPS=0",
+		"MANTA_MAX_SEQ=256",
+		"MANTA_VOCAB_SIZE=16384",
+		"MANTA_SELECT_METRIC=mrr",
+		"MANTA_RESTORE_BEST=false",
+		"MANTA_EVAL_BM25_BASELINE=1",
+		"MANTA_EVAL_DATASETS=scifact,nfcorpus,fiqa",
+		"MANTA_GATE_BM25_BASELINE=0",
+		"MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL=1",
+		"MANTA_TRAIN_ENABLE_FAST_GELU=1",
+	)
+	for _, e := range spec.ExtraEnv {
+		env = append(env, e)
+	}
+
+	let cmd = exec.Command("ferrous-wheel", "run", "scripts/sweep_manta_embed_v1_candidates.fw")
+	cmd.Dir = root
+	cmd.Env = env
+	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+	return cmd.Run()
+}
+
+func readSweepLeaderboard(runRoot string) [][]string {
+	data, err := os.ReadFile(filepath.Join(runRoot, "leaderboard.tsv"))
+	if err != nil {
+		return nil
+	}
+	rows := [][]string{}
+	for i, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || i == 0 {
+			continue
+		}
+		rows = append(rows, strings.Split(line, "\t"))
+	}
+	return rows
+}
+
+func readPerDatasetNdcg(runDir string) map[string]string {
+	out := map[string]string{}
+	matches, err := filepath.Glob(filepath.Join(runDir, "retrieval", "*", "leaderboard.tsv"))
+	if err != nil || len(matches) == 0 {
+		return out
+	}
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		return out
+	}
+	for i, raw := range strings.Split(string(data), "\n") {
+		if i == 0 || strings.TrimSpace(raw) == "" {
+			continue
+		}
+		cols := strings.Split(raw, "\t")
+		if len(cols) < 7 {
+			continue
+		}
+		if cols[1] != "cuda" {
+			continue
+		}
+		out[cols[0]] = cols[6]
+	}
+	return out
+}
+
+func writeSummary(overnightRoot string, leverNames []string) error {
+	summaryPath := filepath.Join(overnightRoot, "overnight-summary.tsv")
+	f, err := os.Create(summaryPath)
+	guard err == nil else return err
+	defer f.Close()
+	_, err = f.WriteString("lever\tseed\tstatus\tscifact_ndcg10\tnfcorpus_ndcg10\tfiqa_ndcg10\tpair_mrr\n")
+	guard err == nil else return err
+	for _, name := range leverNames {
+		leverRoot := filepath.Join(overnightRoot, name)
+		rows := readSweepLeaderboard(leverRoot)
+		for _, row := range rows {
+			if len(row) < 15 {
+				continue
+			}
+			seed := row[0]
+			status := row[1]
+			runDir := row[2]
+			pairMRR := row[9]
+			datasets := readPerDatasetNdcg(runDir)
+			_, err = f.WriteString(fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				name, seed, status,
+				datasets["scifact"], datasets["nfcorpus"], datasets["fiqa"],
+				pairMRR))
+			guard err == nil else return err
+		}
+	}
+	fmt.Println(f"\noverview: {summaryPath}")
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	guard err == nil else {
+		fmt.Println(f"failed to resolve repo root: {err}")
+		os.Exit(1)
+	}
+	for _, name := range []string{"MANTA_TRAIN_JSONL", "MANTA_EVAL_JSONL", "MANTA_HARD_EVAL_JSONL", "MANTA_THRESHOLDS_ENV"} {
+		err = requireFile(name)
+		guard err == nil else {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+	}
+	let ts = time.Now().UTC().Format("20060102T150405Z")
+	overnightRoot, err := filepath.Abs(getenv("MANTA_OVERNIGHT_ROOT", filepath.Join(root, "runs", "manta-embed-v1-overnight-"+ts)))
+	guard err == nil else {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	err = os.MkdirAll(overnightRoot, 0o755)
+	guard err == nil else {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	let seeds = getenv("MANTA_OVERNIGHT_SEEDS", "5,3")
+	let skipList = splitCSV(os.Getenv("MANTA_OVERNIGHT_SKIP"))
+
+	logPath := filepath.Join(overnightRoot, "overnight.log")
+	logFile, err := os.Create(logPath)
+	guard err == nil else {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	defer logFile.Close()
+
+	let skipJoined = strings.Join(skipList, ",")
+	fmt.Println(f"overnight_root={overnightRoot}")
+	fmt.Println(f"seeds={seeds}")
+	fmt.Println(f"skip={skipJoined}")
+
+	levers := []lever{
+		{
+			Name: "D-batch1536",
+			ExtraEnv: []string{
+				"MANTA_BATCH_SIZE=1536",
+				"MANTA_EPOCHS=2",
+				"MANTA_EMBEDDING_DIM=256",
+				"MANTA_HIDDEN_DIM=512",
+				"MANTA_LR=0.002",
+				"MANTA_TEMPERATURE=0.05",
+			},
+		},
+		{
+			Name: "E-temp0.02",
+			ExtraEnv: []string{
+				"MANTA_BATCH_SIZE=768",
+				"MANTA_EPOCHS=2",
+				"MANTA_EMBEDDING_DIM=256",
+				"MANTA_HIDDEN_DIM=512",
+				"MANTA_LR=0.002",
+				"MANTA_TEMPERATURE=0.02",
+			},
+		},
+		{
+			Name: "C-capacity",
+			ExtraEnv: []string{
+				"MANTA_BATCH_SIZE=768",
+				"MANTA_EPOCHS=2",
+				"MANTA_EMBEDDING_DIM=512",
+				"MANTA_HIDDEN_DIM=1024",
+				"MANTA_LR=0.002",
+				"MANTA_TEMPERATURE=0.05",
+			},
+		},
+	}
+
+	results := []string{}
+	executed := []string{}
+	for _, spec := range levers {
+		if contains(skipList, spec.Name) {
+			fmt.Println(f"skipping lever {spec.Name}")
+			results = append(results, fmt.Sprintf("%s: SKIPPED", spec.Name))
+			continue
+		}
+		err := runLever(root, overnightRoot, seeds, logFile, spec)
+		if err != nil {
+			results = append(results, fmt.Sprintf("%s: FAILED (%v)", spec.Name, err))
+			fmt.Println(f"lever {spec.Name} failed: {err}")
+			executed = append(executed, spec.Name)
+			err = writeSummary(overnightRoot, executed)
+			if err != nil {
+				fmt.Println(f"summary write failed: {err}")
+			}
+			continue
+		}
+		results = append(results, fmt.Sprintf("%s: OK", spec.Name))
+		executed = append(executed, spec.Name)
+		err = writeSummary(overnightRoot, executed)
+		if err != nil {
+			fmt.Println(f"summary write failed: {err}")
+		}
+	}
+
+	fmt.Println("\n========== Overnight lever sweep complete ==========")
+	for _, r := range results {
+		fmt.Println(r)
+	}
+	fmt.Println(f"overnight_root={overnightRoot}")
+	fmt.Println(f"log={logPath}")
+}

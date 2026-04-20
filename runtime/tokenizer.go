@@ -351,20 +351,23 @@ func (t *BPETokenizer) Encode(text string) ([]int32, []int32, error) {
 	if t == nil {
 		return nil, nil, fmt.Errorf("nil tokenizer")
 	}
-	toks := bpeMergeRanked(splitChars(normalizeText(text)), t.mergeRanks)
-	ids := make([]int32, 0, len(toks)+2)
+	words := normalizedWords(text)
+	ids := make([]int32, 0, len(words)*2+2)
 	if t.hasBOS {
 		ids = append(ids, t.bosID)
 	}
-	for _, tok := range toks {
-		if id, ok := t.tokenToID[tok]; ok {
-			ids = append(ids, id)
-			continue
+	for _, word := range words {
+		merged := bpeMergeRanked(wordChars(word), t.mergeRanks)
+		for _, tok := range merged {
+			if id, ok := t.tokenToID[tok]; ok {
+				ids = append(ids, id)
+				continue
+			}
+			if t.unknownID < 0 {
+				return nil, nil, fmt.Errorf("token %q is not in tokenizer vocabulary and no unknown token is configured", tok)
+			}
+			ids = append(ids, t.unknownID)
 		}
-		if t.unknownID < 0 {
-			return nil, nil, fmt.Errorf("token %q is not in tokenizer vocabulary and no unknown token is configured", tok)
-		}
-		ids = append(ids, t.unknownID)
 	}
 	if t.hasEOS {
 		ids = append(ids, t.eosID)
@@ -385,53 +388,38 @@ func (t *BPETokenizer) Encode(text string) ([]int32, []int32, error) {
 	return ids, mask, nil
 }
 
-func normalizeText(text string) string {
-	var b strings.Builder
+// normalizedWords splits raw text into a list of normalized words. A
+// "word" is a maximal run of letters or digits, lowercased; every other
+// character (whitespace, punctuation, symbols) is a word separator and
+// is dropped. Both the BPE trainer and the BPE encoder use this helper
+// so they always agree on segmentation, and BPE merges only ever fire
+// inside a single word — never across what was originally a word
+// boundary.
+func normalizedWords(text string) []string {
+	out := make([]string, 0, 8)
+	var cur strings.Builder
 	for _, r := range text {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(unicode.ToLower(r))
-		} else {
-			b.WriteRune(' ')
-		}
-	}
-	return strings.TrimSpace(b.String())
-}
-
-func splitChars(text string) []string {
-	parts := strings.Fields(text)
-	chars := make([]string, 0, len(text))
-	for i, word := range parts {
-		if i > 0 {
-			chars = append(chars, " ")
-		}
-		for _, r := range word {
-			chars = append(chars, string(r))
-		}
-	}
-	return chars
-}
-
-func bpeMerge(tokens []string, merges []TokenizerMerge) []string {
-	return bpeMergeRanked(tokens, mergeRankLookup(merges))
-}
-
-func mergeRankLookup(merges []TokenizerMerge) map[string]map[string]rankedBPEMerge {
-	out := make(map[string]map[string]rankedBPEMerge, len(merges))
-	for rank, merge := range merges {
-		rights := out[merge.Left]
-		if rights == nil {
-			rights = map[string]rankedBPEMerge{}
-			out[merge.Left] = rights
-		}
-		if _, exists := rights[merge.Right]; exists {
+			cur.WriteRune(unicode.ToLower(r))
 			continue
 		}
-		rights[merge.Right] = rankedBPEMerge{
-			rank:  rank,
-			token: merge.Left + merge.Right,
+		if cur.Len() > 0 {
+			out = append(out, cur.String())
+			cur.Reset()
 		}
 	}
+	if cur.Len() > 0 {
+		out = append(out, cur.String())
+	}
 	return out
+}
+
+func wordChars(word string) []string {
+	chars := make([]string, 0, len(word))
+	for _, r := range word {
+		chars = append(chars, string(r))
+	}
+	return chars
 }
 
 func bpeMergeRanked(tokens []string, merges map[string]map[string]rankedBPEMerge) []string {
