@@ -10,6 +10,7 @@ Manta is an inference-first GPU language and runtime stack. It compiles `.manta`
 - **TurboQuant-native direction**: Manta is designed to consume and emit quantized tensors and quantized vectors without repacking through a separate framework
 - **Schedule hints**: `tile`, `vector_width`, `subgroup`, memory classes -- backend-neutral, lowered late
 - **Hybrid runtime**: backend-native execution where promoted kernels exist, host reference execution where they do not yet
+- **Go-authored tree-sitter grammar**: Manta source parsing is backed by gotreesitter, while the compiler keeps its source-oriented AST
 - **Pure Go toolchain**: no Python, no C++ build dependencies
 
 ## Product direction
@@ -151,7 +152,7 @@ kv_write(cache, value)         // expression statement (side effect)
 
 ```
 .manta source
-  |  Parse (recursive descent)
+  |  Parse (gotreesitter grammar)
   v
 Syntax AST
   |  Semantic analysis (type check, scope, constraints)

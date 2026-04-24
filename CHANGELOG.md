@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Manta source parsing now uses a Go-authored gotreesitter grammar and lowers the CST into the existing compiler AST.
+
 ## v0.1.0-alpha — 2026-04-09
 
 ### Added

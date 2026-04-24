@@ -3,6 +3,7 @@ module github.com/odvcencio/manta
 go 1.25.1
 
 require (
+	github.com/odvcencio/gotreesitter v0.15.2
 	github.com/odvcencio/mll v0.0.1
 	github.com/odvcencio/turboquant v0.1.2
 )

@@ -1,6 +1,9 @@
 package syntax
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseTinyEmbedModule(t *testing.T) {
 	src := []byte(`
@@ -35,6 +38,30 @@ pipeline embed(tokens: i32[T]) -> f16[T, E] {
 	}
 	if got := len(pipe.Body); got != 3 {
 		t.Fatalf("pipeline body length = %d, want 3", got)
+	}
+}
+
+func TestParseTreeExposesMantaCST(t *testing.T) {
+	src := []byte(`
+pipeline embed(tokens: i32[T]) -> f16[T, E] {
+    let hidden = gather(token_embedding, tokens)
+    return normalize(hidden)
+}
+`)
+
+	tree, lang, err := ParseTree(src)
+	if err != nil {
+		t.Fatalf("ParseTree: %v", err)
+	}
+	root := tree.RootNode()
+	if root.HasError() {
+		t.Fatalf("unexpected parse error:\n%s", root.SExpr(lang))
+	}
+	sexpr := root.SExpr(lang)
+	for _, want := range []string{"pipeline_declaration", "parameter_list", "let_statement", "call_expression"} {
+		if !strings.Contains(sexpr, want) {
+			t.Fatalf("parse tree missing %q:\n%s", want, sexpr)
+		}
 	}
 }
 
