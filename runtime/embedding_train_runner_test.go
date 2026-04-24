@@ -746,6 +746,42 @@ func TestEmbeddingTrainerTrainHardNegativeContrastiveStepUsesRectangularAccelera
 	}
 }
 
+func TestSpreadHardNegativeOrderByQuerySeparatesRepeatedQueries(t *testing.T) {
+	trainSet := []EmbeddingHardNegativeExample{
+		{QueryTokens: []int32{0}, PositiveTokens: []int32{10}, NegativeTokens: [][]int32{{90}}, QueryMask: []int32{1}},
+		{QueryTokens: []int32{0}, PositiveTokens: []int32{11}, NegativeTokens: [][]int32{{91}}, QueryMask: []int32{1}},
+		{QueryTokens: []int32{1}, PositiveTokens: []int32{12}, NegativeTokens: [][]int32{{92}}, QueryMask: []int32{1}},
+		{QueryTokens: []int32{2}, PositiveTokens: []int32{13}, NegativeTokens: [][]int32{{93}}, QueryMask: []int32{1}},
+		{QueryTokens: []int32{3}, PositiveTokens: []int32{14}, NegativeTokens: [][]int32{{94}}, QueryMask: []int32{1}},
+		{QueryTokens: []int32{4}, PositiveTokens: []int32{15}, NegativeTokens: [][]int32{{95}}, QueryMask: []int32{1}},
+	}
+	got := spreadHardNegativeOrderByQuery(trainSet, []int{0, 1, 2, 3, 4, 5})
+	if len(got) != len(trainSet) {
+		t.Fatalf("spread order length = %d, want %d", len(got), len(trainSet))
+	}
+	seenIndexes := map[int]bool{}
+	for _, idx := range got {
+		if seenIndexes[idx] {
+			t.Fatalf("spread order repeats index %d: %v", idx, got)
+		}
+		seenIndexes[idx] = true
+	}
+	for start := 0; start < len(got); start += 3 {
+		end := start + 3
+		if end > len(got) {
+			end = len(got)
+		}
+		seenQueries := map[string]bool{}
+		for _, idx := range got[start:end] {
+			key := embeddingBatchSequenceKey(trainSet[idx].QueryTokens, trainSet[idx].QueryMask)
+			if seenQueries[key] {
+				t.Fatalf("chunk %v has repeated query in order %v", got[start:end], got)
+			}
+			seenQueries[key] = true
+		}
+	}
+}
+
 type countingContrastiveAccelerator struct {
 	squareCalls   int
 	rectCalls     int

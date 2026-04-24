@@ -952,6 +952,56 @@ func hardNegativeBatchPairCount(batch []EmbeddingHardNegativeExample) int64 {
 	return int64(len(batch)) * int64(candidates)
 }
 
+func spreadHardNegativeOrderByQuery(trainSet []EmbeddingHardNegativeExample, order []int) []int {
+	if len(trainSet) == 0 || len(order) < 2 {
+		return order
+	}
+	type queryBucket struct {
+		indexes []int
+		next    int
+	}
+	buckets := []queryBucket{}
+	bucketByKey := map[string]int{}
+	for _, idx := range order {
+		if idx < 0 || idx >= len(trainSet) {
+			return order
+		}
+		example := trainSet[idx]
+		key := embeddingBatchSequenceKey(example.QueryTokens, example.QueryMask)
+		bucketIndex, ok := bucketByKey[key]
+		if !ok {
+			bucketIndex = len(buckets)
+			bucketByKey[key] = bucketIndex
+			buckets = append(buckets, queryBucket{})
+		}
+		buckets[bucketIndex].indexes = append(buckets[bucketIndex].indexes, idx)
+	}
+	if len(buckets) == len(order) {
+		return order
+	}
+	active := make([]int, 0, len(buckets))
+	for i := range buckets {
+		active = append(active, i)
+	}
+	out := make([]int, 0, len(order))
+	for len(active) > 0 {
+		nextActive := make([]int, 0, len(active))
+		for _, bucketIndex := range active {
+			bucket := &buckets[bucketIndex]
+			out = append(out, bucket.indexes[bucket.next])
+			bucket.next++
+			if bucket.next < len(bucket.indexes) {
+				nextActive = append(nextActive, bucketIndex)
+			}
+		}
+		active = nextActive
+	}
+	if len(out) != len(order) {
+		return order
+	}
+	return out
+}
+
 func plannedEvalPassCount(evalExamples, epochs, evalEvery int) int {
 	if evalExamples <= 0 || epochs <= 0 {
 		return 0
@@ -1089,6 +1139,7 @@ func (t *EmbeddingTrainer) runHardNegativeEpoch(trainSet []EmbeddingHardNegative
 	totalTrainExamples := 0
 	var totalPairs int64
 	batchIndex := 0
+	order = spreadHardNegativeOrderByQuery(trainSet, order)
 	totalBatches, plannedEpochPairs := hardNegativeBatchWork(len(order), batchSize, cfg.HardNegativesPerQuery)
 	for start := 0; start < len(order); start += batchSize {
 		end := start + batchSize
