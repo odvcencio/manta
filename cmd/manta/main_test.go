@@ -127,6 +127,28 @@ func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
 	}
 }
 
+func TestRunInitModelHonorsEncoderRepeats(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
+	if err := run([]string{
+		"init-model",
+		"--vocab-size", "16",
+		"--max-seq", "8",
+		"--embedding-dim", "4",
+		"--hidden-dim", "8",
+		"--encoder-repeats", "3",
+		path,
+	}); err != nil {
+		t.Fatalf("run init-model: %v", err)
+	}
+	manifest, err := mantaruntime.ReadEmbeddingManifestFile(mantaruntime.DefaultEmbeddingManifestPath(path))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if manifest.EncoderRepeats != 3 {
+		t.Fatalf("encoder repeats = %d, want 3", manifest.EncoderRepeats)
+	}
+}
+
 func TestRunInitMirageCreatesArtifact(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "mirage-v1.mll")
 	output := captureRunOutput(t, []string{

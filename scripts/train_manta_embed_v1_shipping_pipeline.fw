@@ -1,0 +1,675 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type shippingConfig struct {
+	Root                string
+	RunID               string
+	RunRoot             string
+	LogDir              string
+	DatasetRoot         string
+	ProcessedDir        string
+	RelaxedThresholds   string
+	MixedPretrainBEIR   string
+	WeightedHardNeg     string
+	ModelName           string
+	Tokenizer           string
+	TokenizerCorpus     string
+	StageAID            string
+	StageBID            string
+	StageCID            string
+	FinalEvalID         string
+	StageADir           string
+	StageBDir           string
+	StageCDir           string
+	FinalEvalDir        string
+	FinalTrainArtifact  string
+	FinalSealedArtifact string
+	FinalTokenizer      string
+	CorkScrewRoot       string
+	CorkScrewAssetID    string
+	CorkScrewAssetDir   string
+	InstallCorkScrew    bool
+	FiQARescue          bool
+	MinSciFactNDCG10    float64
+	MinNFCorpusNDCG10   float64
+	MinFiQANDCG10       float64
+	MinMeanNDCG10       float64
+}
+
+type hardNegativeProbe struct {
+	Source string `json:"source"`
+}
+
+type retrievalScore struct {
+	Dataset     string
+	Backend     string
+	NDCGAt10    float64
+	MRRAt10     float64
+	RecallAt10  float64
+	RecallAt100 float64
+}
+
+func usage() {
+	fmt.Println(`Train a CorkScrew-shippable manta-embed-v1 candidate from local pipeline data.
+
+Stages:
+  A. Train from mixed synthetic pretraining + BEIR hard-negative rows.
+  B. Mine model-hard negatives from Stage A, build a FiQA-weighted BEIR mix,
+     and fine-tune from the Stage A trainable package.
+  C. Optional one-epoch FiQA rescue fine-tune (disabled by default).
+  D. Evaluate the final sealed artifact on SciFact, NfCorpus, and FiQA.
+  E. Optionally install the gated artifact into CorkScrewDB assets.
+
+Run:
+  MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/train_manta_embed_v1_shipping_pipeline.fw
+
+Useful knobs:
+  MANTA_SHIP_RUN_ROOT=$PWD/runs/manta-embed-v1-shipping-20260424
+  MANTA_SHIP_TOKENIZER=/path/to/manta-embed-v1.tokenizer.mll
+  MANTA_SHIP_FIQA_WEIGHT=5
+  MANTA_SHIP_NFCORPUS_WEIGHT=2
+  MANTA_SHIP_SCIFACT_WEIGHT=1
+  MANTA_SHIP_FIQA_RESCUE=1
+  MANTA_INSTALL_CORKSCREW=1
+  MANTA_CORKSCREW_ROOT=$HOME/work/corkscrewdb
+  MANTA_CORKSCREW_ASSET_ID=manta-embed-v0`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envEnabled(name string) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func parseFloatEnv(name string, fallback float64) (float64, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	guard err == nil else return 0, fmt.Errorf("%s must be numeric: %w", name, err)
+	return value, nil
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	guard err == nil else return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	return value, nil
+}
+
+func step(label string) {
+	fmt.Println(f"\n== {label} ==")
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+func findRoot() (string, error) {
+	explicit := os.Getenv("MANTA_REPO_ROOT")
+	if hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	pwd := os.Getenv("PWD")
+	if hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+}
+
+func requireFile(path string, label string) (string, error) {
+	guard path != "" else return "", fmt.Errorf("%s is required", label)
+	abs, err := filepath.Abs(path)
+	guard err == nil else return "", err
+	info, err := os.Stat(abs)
+	guard err == nil else return "", fmt.Errorf("%s does not exist: %s", label, abs)
+	guard !info.IsDir() else return "", fmt.Errorf("%s is a directory: %s", label, abs)
+	return abs, nil
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(name string, args []string) string {
+	parts := []string{shellQuote(name)}
+	for arg in args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runCmd(cfg shippingConfig, label string, logName string, name string, args []string) error {
+	step(label)
+	rendered := renderCommand(name, args)
+	fmt.Println(f"+ {rendered}")
+	logPath := filepath.Join(cfg.LogDir, logName)
+	err := os.WriteFile(logPath+".cmd", []byte(rendered+"\n"), 0o644)
+	guard err == nil else return err
+	logFile, err := os.Create(logPath)
+	guard err == nil else return err
+	defer logFile.Close()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = cfg.Root
+	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+	err = cmd.Run()
+	guard err == nil else return fmt.Errorf("%s failed; see %s: %w", label, logPath, err)
+	return nil
+}
+
+func prepareConfig(root string) (shippingConfig, error) {
+	runID := getenv("MANTA_SHIP_RUN_ID", "manta-embed-v1-shipping-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot, err := filepath.Abs(getenv("MANTA_SHIP_RUN_ROOT", filepath.Join(root, "runs", runID)))
+	guard err == nil else return shippingConfig{}, err
+	if entries, err := os.ReadDir(runRoot); err == nil && len(entries) > 0 {
+		return shippingConfig{}, fmt.Errorf("run root already exists and is not empty: %s", runRoot)
+	}
+	err = os.MkdirAll(filepath.Join(runRoot, "logs"), 0o755)
+	guard err == nil else return shippingConfig{}, err
+	datasetRoot, err := filepath.Abs(getenv("MANTA_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
+	guard err == nil else return shippingConfig{}, err
+	processedDir := filepath.Join(datasetRoot, "processed")
+	modelName := getenv("MANTA_MODEL_NAME", "manta-embed-v1")
+	stageAID := getenv("MANTA_SHIP_STAGE_A_ID", "stage-a-mixed-pretrain")
+	stageBID := getenv("MANTA_SHIP_STAGE_B_ID", "stage-b-balanced-beir")
+	stageCID := getenv("MANTA_SHIP_STAGE_C_ID", "stage-c-fiqa-rescue")
+	finalEvalID := getenv("MANTA_SHIP_FINAL_EVAL_ID", "final-retrieval-eval")
+	corkscrewRoot, err := filepath.Abs(getenv("MANTA_CORKSCREW_ROOT", filepath.Join(os.Getenv("HOME"), "work", "corkscrewdb")))
+	guard err == nil else return shippingConfig{}, err
+	assetID := getenv("MANTA_CORKSCREW_ASSET_ID", "manta-embed-v0")
+	minSciFact, err := parseFloatEnv("MANTA_SHIP_MIN_SCIFACT_NDCG10", 0.55)
+	guard err == nil else return shippingConfig{}, err
+	minNFCorpus, err := parseFloatEnv("MANTA_SHIP_MIN_NFCORPUS_NDCG10", 0.14)
+	guard err == nil else return shippingConfig{}, err
+	minFiQA, err := parseFloatEnv("MANTA_SHIP_MIN_FIQA_NDCG10", 0.066785)
+	guard err == nil else return shippingConfig{}, err
+	minMean, err := parseFloatEnv("MANTA_SHIP_MIN_MEAN_NDCG10", 0.25)
+	guard err == nil else return shippingConfig{}, err
+	cfg := shippingConfig{
+		Root:              root,
+		RunID:             runID,
+		RunRoot:           runRoot,
+		LogDir:            filepath.Join(runRoot, "logs"),
+		DatasetRoot:       datasetRoot,
+		ProcessedDir:      processedDir,
+		RelaxedThresholds: filepath.Join(runRoot, "relaxed-thresholds.env"),
+		MixedPretrainBEIR: filepath.Join(processedDir, "shipping-mixed-pretrain-plus-beir.jsonl"),
+		WeightedHardNeg:   filepath.Join(processedDir, "shipping-weighted-hard-negatives.jsonl"),
+		ModelName:         modelName,
+		Tokenizer:         os.Getenv("MANTA_SHIP_TOKENIZER"),
+		TokenizerCorpus:   getenv("MANTA_TOKENIZER_CORPUS", filepath.Join(processedDir, "tokenizer-corpus-full-beir.txt")),
+		StageAID:          stageAID,
+		StageBID:          stageBID,
+		StageCID:          stageCID,
+		FinalEvalID:       finalEvalID,
+		StageADir:         filepath.Join(runRoot, stageAID),
+		StageBDir:         filepath.Join(runRoot, stageBID),
+		StageCDir:         filepath.Join(runRoot, stageCID),
+		FinalEvalDir:      filepath.Join(runRoot, finalEvalID),
+		CorkScrewRoot:     corkscrewRoot,
+		CorkScrewAssetID:  assetID,
+		CorkScrewAssetDir: getenv("MANTA_CORKSCREW_ASSET_DIR", filepath.Join(corkscrewRoot, "assets", assetID)),
+		InstallCorkScrew:  envEnabled("MANTA_INSTALL_CORKSCREW"),
+		FiQARescue:        envEnabled("MANTA_SHIP_FIQA_RESCUE"),
+		MinSciFactNDCG10:  minSciFact,
+		MinNFCorpusNDCG10: minNFCorpus,
+		MinFiQANDCG10:     minFiQA,
+		MinMeanNDCG10:     minMean,
+	}
+	if cfg.Tokenizer != "" {
+		cfg.Tokenizer, err = requireFile(cfg.Tokenizer, "MANTA_SHIP_TOKENIZER")
+		guard err == nil else return shippingConfig{}, err
+	}
+	if cfg.Tokenizer == "" {
+		cfg.TokenizerCorpus, err = requireFile(cfg.TokenizerCorpus, "MANTA_TOKENIZER_CORPUS")
+		guard err == nil else return shippingConfig{}, err
+	}
+	return cfg, nil
+}
+
+func writeRelaxedThresholds(path string) error {
+	lines := []string{
+		"MANTA_SELECT_METRIC=mrr",
+		"MANTA_MIN_MRR=0",
+		"MANTA_MIN_TOP1=0",
+		"MANTA_MIN_TOP5=0",
+		"MANTA_MIN_TOP10=0",
+		"MANTA_MAX_MEAN_RANK=999",
+		"MANTA_MIN_AUC=0",
+		"MANTA_MIN_THRESHOLD_ACCURACY=0",
+		"MANTA_MIN_SCORE_MARGIN=0",
+		"MANTA_MAX_LOSS=999",
+		"MANTA_MIN_TRAIN_PAIRS_PER_SEC=0",
+		"MANTA_MIN_OPTIMIZER_STEPS_PER_SEC=0",
+		"MANTA_MAX_MATMUL_RUNS=9999999999",
+		"MANTA_MAX_MATMUL_RUN_UPLOAD_MB=9999999",
+		"MANTA_MAX_MATMUL_RUN_DOWNLOAD_MB=9999999",
+		"MANTA_MIN_RETRIEVAL_NDCG10_SCIFACT=0",
+		"MANTA_MIN_RETRIEVAL_NDCG10_NFCORPUS=0",
+		"MANTA_MIN_RETRIEVAL_NDCG10_FIQA=0",
+		"MANTA_MIN_RETRIEVAL_SCORES_PER_SEC=0",
+	}
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
+func copyJSONL(inPath string, writer *bufio.Writer, maxRows int) (int, error) {
+	f, err := os.Open(inPath)
+	guard err == nil else return 0, err
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1<<20), 1<<26)
+	count := 0
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		_, err = writer.WriteString(line + "\n")
+		guard err == nil else return count, err
+		count++
+		if maxRows > 0 && count >= maxRows {
+			break
+		}
+	}
+	guard scanner.Err() == nil else return count, scanner.Err()
+	return count, nil
+}
+
+func buildMixedPretrainBEIR(cfg shippingConfig) error {
+	pretrain := filepath.Join(cfg.ProcessedDir, "pretrain-pairs.jsonl")
+	if _, err := os.Stat(pretrain); os.IsNotExist(err) {
+		err = runCmd(cfg, "Build synthetic pretrain pairs", "build-pretrain-pairs.log", "env", []string{
+			"MANTA_REPO_ROOT=" + cfg.Root,
+			"MANTA_DATASET_ROOT=" + filepath.Join(cfg.DatasetRoot, "raw"),
+			"MANTA_PRETRAIN_OUT=" + pretrain,
+			"ferrous-wheel", "run", "scripts/build_pretrain_pairs.fw",
+		})
+		guard err == nil else return err
+	}
+	beir := filepath.Join(cfg.ProcessedDir, "train-hard-negatives-plus-model.jsonl")
+	if _, err := os.Stat(beir); os.IsNotExist(err) {
+		beir = filepath.Join(cfg.ProcessedDir, "train-hard-negatives.jsonl")
+	}
+	out, err := os.Create(cfg.MixedPretrainBEIR)
+	guard err == nil else return err
+	defer out.Close()
+	writer := bufio.NewWriter(out)
+	maxPretrainRows, err := parseIntEnv("MANTA_SHIP_MAX_PRETRAIN_ROWS", 0)
+	guard err == nil else return err
+	maxBEIRRows, err := parseIntEnv("MANTA_SHIP_MAX_BEIR_ROWS", 0)
+	guard err == nil else return err
+	pretrainRows, err := copyJSONL(pretrain, writer, maxPretrainRows)
+	guard err == nil else return err
+	beirRows, err := copyJSONL(beir, writer, maxBEIRRows)
+	guard err == nil else return err
+	err = writer.Flush()
+	guard err == nil else return err
+	fmt.Println(f"mixed_pretrain_beir={cfg.MixedPretrainBEIR}")
+	fmt.Println(f"pretrain_rows={pretrainRows}")
+	fmt.Println(f"beir_rows={beirRows}")
+	return nil
+}
+
+func sourceWeight(source string, scifact int, nfcorpus int, fiqa int) int {
+	source = strings.ToLower(source)
+	if strings.HasPrefix(source, "fiqa") {
+		return fiqa
+	}
+	if strings.HasPrefix(source, "nfcorpus") {
+		return nfcorpus
+	}
+	if strings.HasPrefix(source, "scifact") {
+		return scifact
+	}
+	return 1
+}
+
+func buildWeightedHardNegatives(cfg shippingConfig) error {
+	scifactWeight, err := parseIntEnv("MANTA_SHIP_SCIFACT_WEIGHT", 1)
+	guard err == nil else return err
+	nfcorpusWeight, err := parseIntEnv("MANTA_SHIP_NFCORPUS_WEIGHT", 2)
+	guard err == nil else return err
+	fiqaWeight, err := parseIntEnv("MANTA_SHIP_FIQA_WEIGHT", 5)
+	guard err == nil else return err
+	maxWeightedRows, err := parseIntEnv("MANTA_SHIP_MAX_WEIGHTED_ROWS", 0)
+	guard err == nil else return err
+	input := filepath.Join(cfg.ProcessedDir, "train-hard-negatives-plus-model.jsonl")
+	if _, err := os.Stat(input); os.IsNotExist(err) {
+		input = filepath.Join(cfg.ProcessedDir, "train-hard-negatives.jsonl")
+	}
+	in, err := os.Open(input)
+	guard err == nil else return err
+	defer in.Close()
+	out, err := os.Create(cfg.WeightedHardNeg)
+	guard err == nil else return err
+	defer out.Close()
+	writer := bufio.NewWriter(out)
+	scanner := bufio.NewScanner(in)
+	scanner.Buffer(make([]byte, 1<<20), 1<<26)
+	readRows := 0
+	writtenRows := 0
+	done := false
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		readRows++
+		var probe hardNegativeProbe
+		err := json.Unmarshal([]byte(line), &probe)
+		guard err == nil else return err
+		weight := sourceWeight(probe.Source, scifactWeight, nfcorpusWeight, fiqaWeight)
+		for i := 0; i < weight; i++ {
+			_, err = writer.WriteString(line + "\n")
+			guard err == nil else return err
+			writtenRows++
+			if maxWeightedRows > 0 && writtenRows >= maxWeightedRows {
+				done = true
+				break
+			}
+		}
+		if done {
+			break
+		}
+	}
+	guard scanner.Err() == nil else return scanner.Err()
+	err = writer.Flush()
+	guard err == nil else return err
+	fmt.Println(f"weighted_hard_negatives={cfg.WeightedHardNeg}")
+	fmt.Println(f"input_rows={readRows}")
+	fmt.Println(f"output_rows={writtenRows}")
+	fmt.Println(f"weights=scifact:{scifactWeight},nfcorpus:{nfcorpusWeight},fiqa:{fiqaWeight}")
+	return nil
+}
+
+func baseCandidateEnv(cfg shippingConfig, runID string, trainJSONL string, evalJSONL string, hardEvalJSONL string) []string {
+	return []string{
+		"MANTA_REPO_ROOT=" + cfg.Root,
+		"MANTA_RUN_ROOT=" + cfg.RunRoot,
+		"MANTA_RUN_ID=" + runID,
+		"MANTA_MODEL_NAME=" + cfg.ModelName,
+		"MANTA_TRAIN_JSONL=" + trainJSONL,
+		"MANTA_EVAL_JSONL=" + evalJSONL,
+		"MANTA_HARD_EVAL_JSONL=" + hardEvalJSONL,
+		"MANTA_THRESHOLDS_ENV=" + cfg.RelaxedThresholds,
+		"MANTA_QUALITY_TARGET=" + getenv("MANTA_SHIP_STAGE_QUALITY_TARGET", "retrieval"),
+		"MANTA_RETRIEVAL_EVAL=" + getenv("MANTA_SHIP_STAGE_RETRIEVAL_EVAL", "1"),
+		"MANTA_EVAL_DATASETS=scifact,nfcorpus,fiqa",
+		"MANTA_EVAL_BM25_BASELINE=0",
+		"MANTA_GATE_BM25_BASELINE=0",
+		"MANTA_VOCAB_SIZE=" + getenv("MANTA_SHIP_VOCAB_SIZE", "16384"),
+		"MANTA_MAX_SEQ=" + getenv("MANTA_SHIP_MAX_SEQ", "256"),
+		"MANTA_EMBEDDING_DIM=" + getenv("MANTA_SHIP_EMBEDDING_DIM", "256"),
+		"MANTA_HIDDEN_DIM=" + getenv("MANTA_SHIP_HIDDEN_DIM", "512"),
+		"MANTA_ENCODER_REPEATS=" + getenv("MANTA_SHIP_ENCODER_REPEATS", "2"),
+		"MANTA_INIT_SEED=" + getenv("MANTA_SHIP_SEED", "5"),
+		"MANTA_TEMPERATURE=" + getenv("MANTA_SHIP_TEMPERATURE", "0.05"),
+		"MANTA_SELECT_METRIC=mrr",
+		"MANTA_EVAL_EVERY=999",
+		"MANTA_RESTORE_BEST=false",
+		"MANTA_HARD_NEGATIVE_TRAIN=1",
+		"MANTA_PAIRWISE_TRAIN=0",
+		"MANTA_HARD_NEGATIVES_PER_QUERY=1",
+	}
+}
+
+func runCandidateStage(cfg shippingConfig, label string, runID string, trainJSONL string, initialArtifact string, extraEnv []string) error {
+	evalJSONL := filepath.Join(cfg.ProcessedDir, "eval.jsonl")
+	hardEvalJSONL := filepath.Join(cfg.ProcessedDir, "hard-eval.jsonl")
+	env := baseCandidateEnv(cfg, runID, trainJSONL, evalJSONL, hardEvalJSONL)
+	env = append(env, extraEnv...)
+	if initialArtifact != "" {
+		env = append(env, "MANTA_INITIAL_ARTIFACT="+initialArtifact)
+	}
+	if cfg.Tokenizer != "" {
+		env = append(env, "MANTA_TOKENIZER="+cfg.Tokenizer)
+		env = append(env, "MANTA_PACKAGE_TOKENIZER="+cfg.Tokenizer)
+	} else if initialArtifact == "" {
+		env = append(env, "MANTA_TOKENIZER_CORPUS="+cfg.TokenizerCorpus)
+	} else {
+		stageTokenizer := filepath.Join(filepath.Dir(initialArtifact), cfg.ModelName+".tokenizer.mll")
+		env = append(env, "MANTA_TOKENIZER="+stageTokenizer)
+		env = append(env, "MANTA_PACKAGE_TOKENIZER="+stageTokenizer)
+	}
+	args := append(env, "ferrous-wheel", "run", "scripts/train_manta_embed_v1_candidate.fw")
+	return runCmd(cfg, label, runID+".log", "env", args)
+}
+
+func mineModelHardNegatives(cfg shippingConfig) error {
+	artifact := filepath.Join(cfg.StageADir, cfg.ModelName+".sealed.mll")
+	return runCmd(cfg, "Mine model-hard negatives from Stage A", "mine-model-hard-negatives.log", "env", []string{
+		"MANTA_REPO_ROOT=" + cfg.Root,
+		"MANTA_MODEL_HARD_NEGATIVE_ARTIFACT=" + artifact,
+		"MANTA_MODEL_HARD_NEGATIVE_RUN_ROOT=" + cfg.RunRoot,
+		"MANTA_MODEL_HARD_NEGATIVE_RUN_ID=model-hard-negatives",
+		"MANTA_MODEL_HARD_NEGATIVE_DATASETS=scifact,nfcorpus,fiqa",
+		"MANTA_MODEL_HARD_NEGATIVE_MAX_EXAMPLES=" + getenv("MANTA_SHIP_MODEL_HARD_MAX_EXAMPLES", "6000"),
+		"MANTA_MODEL_HARD_NEGATIVE_MAX_DOCS=" + getenv("MANTA_SHIP_MODEL_HARD_MAX_DOCS", "0"),
+		"MANTA_MODEL_HARD_NEGATIVE_MAX_QUERIES=" + getenv("MANTA_SHIP_MODEL_HARD_MAX_QUERIES", "0"),
+		"MANTA_MODEL_HARD_NEGATIVE_BLEND_BM25=1",
+		"ferrous-wheel", "run", "scripts/mine_manta_embed_v1_model_hard_negatives.fw",
+	})
+}
+
+func runFinalEval(cfg shippingConfig) error {
+	artifact := cfg.FinalSealedArtifact
+	return runCmd(cfg, "Final full-corpus retrieval evaluation", "final-retrieval-eval.log", "env", []string{
+		"MANTA_REPO_ROOT=" + cfg.Root,
+		"MANTA_EVAL_ARTIFACT=" + artifact,
+		"MANTA_EVAL_RUN_ROOT=" + cfg.RunRoot,
+		"MANTA_EVAL_RUN_ID=" + cfg.FinalEvalID,
+		"MANTA_EVAL_DATASETS=scifact,nfcorpus,fiqa",
+		"MANTA_EVAL_BM25_BASELINE=1",
+		"MANTA_GATE_BM25_BASELINE=0",
+		"ferrous-wheel", "run", "scripts/eval_manta_embed_v1_retrieval.fw",
+	})
+}
+
+func readFinalScores(cfg shippingConfig) (map[string]retrievalScore, error) {
+	path := filepath.Join(cfg.FinalEvalDir, "leaderboard.tsv")
+	f, err := os.Open(path)
+	guard err == nil else return nil, err
+	defer f.Close()
+	scores := map[string]retrievalScore{}
+	scanner := bufio.NewScanner(f)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		if lineNo == 1 {
+			continue
+		}
+		fields := strings.Split(scanner.Text(), "\t")
+		if len(fields) < 10 {
+			continue
+		}
+		if fields[1] == "bm25" {
+			continue
+		}
+		ndcg, err := strconv.ParseFloat(fields[6], 64)
+		guard err == nil else return nil, err
+		mrr, err := strconv.ParseFloat(fields[7], 64)
+		guard err == nil else return nil, err
+		r10, err := strconv.ParseFloat(fields[8], 64)
+		guard err == nil else return nil, err
+		r100, err := strconv.ParseFloat(fields[9], 64)
+		guard err == nil else return nil, err
+		scores[fields[0]] = retrievalScore{
+			Dataset:     fields[0],
+			Backend:     fields[1],
+			NDCGAt10:    ndcg,
+			MRRAt10:     mrr,
+			RecallAt10:  r10,
+			RecallAt100: r100,
+		}
+	}
+	guard scanner.Err() == nil else return nil, scanner.Err()
+	return scores, nil
+}
+
+func gateFinalScores(cfg shippingConfig, scores map[string]retrievalScore) error {
+	required := []string{"scifact", "nfcorpus", "fiqa"}
+	for _, dataset := range required {
+		_, ok := scores[dataset]
+		guard ok else return fmt.Errorf("missing final retrieval score for %s", dataset)
+	}
+	scifact := scores["scifact"].NDCGAt10
+	nfcorpus := scores["nfcorpus"].NDCGAt10
+	fiqa := scores["fiqa"].NDCGAt10
+	mean := (scifact + nfcorpus + fiqa) / 3
+	fmt.Println(f"final_ndcg@10 scifact={scifact} nfcorpus={nfcorpus} fiqa={fiqa} mean={mean}")
+	guard scifact >= cfg.MinSciFactNDCG10 else return fmt.Errorf("SciFact ndcg@10 %.6f < %.6f", scifact, cfg.MinSciFactNDCG10)
+	guard nfcorpus >= cfg.MinNFCorpusNDCG10 else return fmt.Errorf("NfCorpus ndcg@10 %.6f < %.6f", nfcorpus, cfg.MinNFCorpusNDCG10)
+	guard fiqa >= cfg.MinFiQANDCG10 else return fmt.Errorf("FiQA ndcg@10 %.6f < %.6f", fiqa, cfg.MinFiQANDCG10)
+	guard mean >= cfg.MinMeanNDCG10 else return fmt.Errorf("mean ndcg@10 %.6f < %.6f", mean, cfg.MinMeanNDCG10)
+	return nil
+}
+
+func copyFile(src string, dst string) error {
+	data, err := os.ReadFile(src)
+	guard err == nil else return err
+	info, err := os.Stat(src)
+	guard err == nil else return err
+	err = os.MkdirAll(filepath.Dir(dst), 0o755)
+	guard err == nil else return err
+	return os.WriteFile(dst, data, info.Mode())
+}
+
+func installCorkScrewAssets(cfg shippingConfig) error {
+	artifactDst := filepath.Join(cfg.CorkScrewAssetDir, cfg.CorkScrewAssetID+".mll")
+	tokenizerDst := filepath.Join(cfg.CorkScrewAssetDir, cfg.CorkScrewAssetID+".tokenizer.mll")
+	err := copyFile(cfg.FinalSealedArtifact, artifactDst)
+	guard err == nil else return err
+	err = copyFile(cfg.FinalTokenizer, tokenizerDst)
+	guard err == nil else return err
+	fmt.Println(f"corkscrew_artifact={artifactDst}")
+	fmt.Println(f"corkscrew_tokenizer={tokenizerDst}")
+	return nil
+}
+
+func runPipeline(cfg shippingConfig) (shippingConfig, error) {
+	err := writeRelaxedThresholds(cfg.RelaxedThresholds)
+	guard err == nil else return cfg, err
+	err = buildMixedPretrainBEIR(cfg)
+	guard err == nil else return cfg, err
+
+	err = runCandidateStage(cfg, "Stage A: mixed pretrain + BEIR", cfg.StageAID, cfg.MixedPretrainBEIR, "", []string{
+		"MANTA_EPOCHS=" + getenv("MANTA_SHIP_STAGE_A_EPOCHS", "2"),
+		"MANTA_BATCH_SIZE=" + getenv("MANTA_SHIP_STAGE_A_BATCH_SIZE", "384"),
+		"MANTA_LR=" + getenv("MANTA_SHIP_STAGE_A_LR", "0.002"),
+	})
+	guard err == nil else return cfg, err
+
+	err = mineModelHardNegatives(cfg)
+	guard err == nil else return cfg, err
+	err = buildWeightedHardNegatives(cfg)
+	guard err == nil else return cfg, err
+
+	stageAArtifact := filepath.Join(cfg.StageADir, cfg.ModelName+".mll")
+	err = runCandidateStage(cfg, "Stage B: FiQA-weighted BEIR fine-tune", cfg.StageBID, cfg.WeightedHardNeg, stageAArtifact, []string{
+		"MANTA_EPOCHS=" + getenv("MANTA_SHIP_STAGE_B_EPOCHS", "2"),
+		"MANTA_BATCH_SIZE=" + getenv("MANTA_SHIP_STAGE_B_BATCH_SIZE", "512"),
+		"MANTA_LR=" + getenv("MANTA_SHIP_STAGE_B_LR", "0.0005"),
+	})
+	guard err == nil else return cfg, err
+
+	finalDir := cfg.StageBDir
+	if cfg.FiQARescue {
+		stageBArtifact := filepath.Join(cfg.StageBDir, cfg.ModelName+".mll")
+		err = runCandidateStage(cfg, "Stage C: low-LR FiQA rescue", cfg.StageCID, filepath.Join(cfg.ProcessedDir, "train-pairs-fiqa2.jsonl"), stageBArtifact, []string{
+			"MANTA_EPOCHS=" + getenv("MANTA_SHIP_STAGE_C_EPOCHS", "1"),
+			"MANTA_BATCH_SIZE=" + getenv("MANTA_SHIP_STAGE_C_BATCH_SIZE", "512"),
+			"MANTA_LR=" + getenv("MANTA_SHIP_STAGE_C_LR", "0.0002"),
+			"MANTA_PAIRWISE_TRAIN=1",
+			"MANTA_HARD_NEGATIVE_TRAIN=0",
+		})
+		guard err == nil else return cfg, err
+		finalDir = cfg.StageCDir
+	}
+
+	cfg.FinalTrainArtifact = filepath.Join(finalDir, cfg.ModelName+".mll")
+	cfg.FinalSealedArtifact = filepath.Join(finalDir, cfg.ModelName+".sealed.mll")
+	cfg.FinalTokenizer = filepath.Join(finalDir, cfg.ModelName+".tokenizer.mll")
+	err = runFinalEval(cfg)
+	guard err == nil else return cfg, err
+	scores, err := readFinalScores(cfg)
+	guard err == nil else return cfg, err
+	err = gateFinalScores(cfg, scores)
+	guard err == nil else return cfg, err
+	if cfg.InstallCorkScrew {
+		err = installCorkScrewAssets(cfg)
+		guard err == nil else return cfg, err
+	}
+	return cfg, nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	guard err == nil else {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	cfg, err := prepareConfig(root)
+	guard err == nil else {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	cfg, err = runPipeline(cfg)
+	guard err == nil else {
+		fmt.Println(f"shipping pipeline failed: {err}")
+		os.Exit(1)
+	}
+	step("Shipping candidate ready")
+	fmt.Println(f"run_root={cfg.RunRoot}")
+	fmt.Println(f"sealed_artifact={cfg.FinalSealedArtifact}")
+	fmt.Println(f"tokenizer={cfg.FinalTokenizer}")
+	if cfg.InstallCorkScrew {
+		fmt.Println(f"corkscrew_asset_dir={cfg.CorkScrewAssetDir}")
+	}
+}

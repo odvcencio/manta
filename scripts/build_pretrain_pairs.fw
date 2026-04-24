@@ -1,0 +1,204 @@
+package main
+
+// build_pretrain_pairs emits a hard-negative-JSONL of synthetic (title->body
+// and body-first-half -> body-second-half) pairs drawn from BEIR corpora.
+// The resulting dataset is used for a contrastive pretraining stage before
+// fine-tuning on the hand-annotated BEIR training pairs.
+//
+// Each row is tagged with a unique GroupID so MP-InfoNCE training treats it
+// as K=1 (bit-identical to single-positive InfoNCE).
+//
+// Usage:
+//   MANTA_REPO_ROOT=$PWD \
+//   MANTA_DATASET_ROOT=$PWD/datasets/manta-embed-v1/raw \
+//   MANTA_PRETRAIN_OUT=$PWD/datasets/manta-embed-v1/processed/pretrain-pairs.jsonl \
+//     ferrous-wheel run scripts/build_pretrain_pairs.fw
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"math/rand"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+type beirDoc struct {
+	ID    string `json:"_id"`
+	Title string `json:"title"`
+	Text  string `json:"text"`
+}
+
+type pretrainRow struct {
+	Query     string   `json:"query"`
+	Positive  string   `json:"positive"`
+	Negatives []string `json:"negatives"`
+	Source    string   `json:"source"`
+	GroupID   string   `json:"group_id"`
+}
+
+func getenv(name string, fallback string) string {
+	let v = os.Getenv(name)
+	if v != "" {
+		return v
+	}
+	return fallback
+}
+
+func readBEIRCorpus(path string) ([]beirDoc, error) {
+	f, err := os.Open(path)
+	guard err == nil else return nil, err
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1<<20), 1<<25)
+	out := []beirDoc{}
+	for scanner.Scan() {
+		let line = strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var d beirDoc
+		err := json.Unmarshal([]byte(line), &d)
+		guard err == nil else return nil, err
+		out = append(out, d)
+	}
+	return out, scanner.Err()
+}
+
+// splitBody returns (firstHalf, secondHalf) of a body string, split at a
+// word boundary near the midpoint. Returns empty strings if the body is
+// too short to split meaningfully.
+func splitBody(body string) (string, string) {
+	let words = strings.Fields(body)
+	if len(words) < 40 {
+		return "", ""
+	}
+	mid := len(words) / 2
+	return strings.Join(words[:mid], " "), strings.Join(words[mid:], " ")
+}
+
+// pickRandomOtherBody returns a body from docs that isn't the excluded one.
+// Used to furnish a single "hard" negative per row so the hard-negative
+// training path is satisfied (in-batch negatives do the real work).
+func pickRandomOtherBody(docs []beirDoc, excludeIdx int, rng *rand.Rand) string {
+	for attempts := 0; attempts < 8; attempts++ {
+		j := rng.Intn(len(docs))
+		if j == excludeIdx {
+			continue
+		}
+		body := strings.TrimSpace(docs[j].Text)
+		if body != "" {
+			return body
+		}
+	}
+	// Fall back to the next doc if random retries failed.
+	j := (excludeIdx + 1) % len(docs)
+	return docs[j].Text
+}
+
+func main() {
+	root := getenv("MANTA_REPO_ROOT", "")
+	if root == "" {
+		cwd, err := os.Getwd()
+		guard err == nil else {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		root = cwd
+	}
+	let datasetRoot = getenv("MANTA_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1", "raw"))
+	let outPath = getenv("MANTA_PRETRAIN_OUT", filepath.Join(root, "datasets", "manta-embed-v1", "processed", "pretrain-pairs.jsonl"))
+	let seedStr = getenv("MANTA_PRETRAIN_SEED", "42")
+	seed := int64(42)
+	_, scanErr := fmt.Sscan(seedStr, &seed)
+	if scanErr != nil {
+		seed = 42
+	}
+
+	err := os.MkdirAll(filepath.Dir(outPath), 0o755)
+	guard err == nil else {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	outFile, err := os.Create(outPath)
+	guard err == nil else {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	defer outFile.Close()
+
+	writer := bufio.NewWriter(outFile)
+	defer writer.Flush()
+	enc := json.NewEncoder(writer)
+
+	datasets := []struct {
+		Name    string
+		Path    string
+	}{
+		{"scifact", "scifact/scifact/corpus.jsonl"},
+		{"nfcorpus", "nfcorpus/nfcorpus/corpus.jsonl"},
+		{"fiqa", "fiqa/fiqa/corpus.jsonl"},
+	}
+
+	rng := rand.New(rand.NewSource(seed))
+	titleBodyRows := 0
+	segmentRows := 0
+
+	for _, ds := range datasets {
+		let path = filepath.Join(datasetRoot, ds.Path)
+		docs, err := readBEIRCorpus(path)
+		if err != nil {
+			fmt.Println(f"[{ds.Name}] read failed: {err}")
+			continue
+		}
+		fmt.Println(f"[{ds.Name}] {len(docs)} docs")
+
+		for i, doc := range docs {
+			title := strings.TrimSpace(doc.Title)
+			body := strings.TrimSpace(doc.Text)
+			if body == "" {
+				continue
+			}
+			if title != "" {
+				neg := pickRandomOtherBody(docs, i, rng)
+				row := pretrainRow{
+					Query:     title,
+					Positive:  body,
+					Negatives: []string{neg},
+					Source:    ds.Name + ":title_body",
+					GroupID:   fmt.Sprintf("pretrain-%s-tb-%s", ds.Name, doc.ID),
+				}
+				err := enc.Encode(row)
+				guard err == nil else {
+					fmt.Println(err)
+					os.Exit(1)
+				}
+				titleBodyRows++
+			}
+			first, second := splitBody(body)
+			if first != "" && second != "" {
+				neg := pickRandomOtherBody(docs, i, rng)
+				row := pretrainRow{
+					Query:     first,
+					Positive:  second,
+					Negatives: []string{neg},
+					Source:    ds.Name + ":segment",
+					GroupID:   fmt.Sprintf("pretrain-%s-seg-%s", ds.Name, doc.ID),
+				}
+				err := enc.Encode(row)
+				guard err == nil else {
+					fmt.Println(err)
+					os.Exit(1)
+				}
+				segmentRows++
+			}
+		}
+	}
+
+	fmt.Println(f"\nwrote {outPath}")
+	fmt.Println(f"title_body_rows={titleBodyRows}")
+	fmt.Println(f"segment_rows={segmentRows}")
+	fmt.Println(f"total_rows={titleBodyRows + segmentRows}")
+}

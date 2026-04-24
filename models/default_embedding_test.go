@@ -64,3 +64,25 @@ func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {
 		t.Fatalf("load training package: %v", err)
 	}
 }
+
+func TestInitDefaultEmbeddingPackageHonorsEncoderRepeats(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
+	paths, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
+		VocabSize:      16,
+		MaxSequence:    8,
+		EmbeddingDim:   4,
+		HiddenDim:      8,
+		EncoderRepeats: 3,
+		Seed:           7,
+	})
+	if err != nil {
+		t.Fatalf("init default embedding package: %v", err)
+	}
+	manifest, err := mantaruntime.ReadEmbeddingManifestFile(paths.EmbeddingManifestPath)
+	if err != nil {
+		t.Fatalf("read embedding manifest: %v", err)
+	}
+	if manifest.EncoderRepeats != 3 {
+		t.Fatalf("encoder repeats = %d, want 3", manifest.EncoderRepeats)
+	}
+}

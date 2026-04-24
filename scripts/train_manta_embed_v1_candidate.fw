@@ -29,7 +29,10 @@ type candidateConfig struct {
 	EvalJSONL           string
 	HardEvalJSONL       string
 	TokenizerPath       string
+	PackageTokenizerPath string
 	TokenizerCorpus     string
+	NoTokenizer         bool
+	QualityTarget       string
 	ThresholdsEnv       string
 	TrainMode           string
 	PairwiseTrain       string
@@ -39,6 +42,7 @@ type candidateConfig struct {
 	MaxSeq              string
 	EmbeddingDim        string
 	HiddenDim           string
+	EncoderRepeats      string
 	InitSeed            string
 	WeightBits          string
 	Epochs              string
@@ -49,6 +53,7 @@ type candidateConfig struct {
 	EvalEvery           string
 	EvalEverySteps      string
 	Patience            string
+	RestoreBest         string
 	MinDelta            string
 	SelectMetric        string
 	MinFreq             string
@@ -89,17 +94,24 @@ Common knobs:
   MANTA_REPO_ROOT=/path/to/manta
   MANTA_RUN_ROOT=/data/manta/runs
   MANTA_RUN_ID=manta-embed-v1-20260412
+  MANTA_ENCODER_REPEATS=2
+  MANTA_INITIAL_ARTIFACT=/path/to/previous-stage/manta-embed-v1.mll
   MANTA_EPOCHS=3
   MANTA_BATCH_SIZE=1024
   MANTA_LR=0.005
   MANTA_TEMPERATURE=0.05
   MANTA_SELECT_METRIC=mrr
   MANTA_EVAL_EVERY_STEPS=0
+  MANTA_RESTORE_BEST=false
   MANTA_PRETOKENIZE_JSONL=0
+  MANTA_NO_TOKENIZER=1
+  MANTA_PACKAGE_TOKENIZER=/path/to/tokenizer.mll
   MANTA_PAIRWISE_TRAIN=1
   MANTA_HARD_NEGATIVE_TRAIN=1
   MANTA_HARD_NEGATIVES_PER_QUERY=1
   MANTA_TRAIN_ENABLE_FAST_GELU=1
+  MANTA_QUALITY_TARGET=retrieval
+  MANTA_GATE_BM25_BASELINE=1
   MANTA_MIN_MRR=0.90
   MANTA_MIN_TOP1=0.85
   MANTA_MIN_TOP5=0.95
@@ -124,6 +136,11 @@ func getenv(name string, fallback string) string {
 
 func envEnabled(name string) bool {
 	let value = strings.ToLower(os.Getenv(name))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func configBool(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
 	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
@@ -303,12 +320,32 @@ func runRetrievalEval(cfg candidateConfig) error {
 		args = append(args, "MANTA_THRESHOLDS_ENV="+cfg.ThresholdsEnv)
 	}
 	for _, name := range []string{"MANTA_DATASET_ROOT", "MANTA_EVAL_DATASETS", "MANTA_EVAL_SPLIT", "MANTA_EVAL_BATCH_SIZE", "MANTA_EVAL_TOP_K", "MANTA_EVAL_MAX_DOCS", "MANTA_EVAL_MAX_QUERIES", "MANTA_EVAL_BM25_BASELINE", "MANTA_GATE_BM25_BASELINE", "MANTA_GATE_BM25_METRIC", "MANTA_GATE_BM25_MIN_RATIO"} {
-		if value := os.Getenv(name); value != "" {
+		if value, ok := retrievalEvalEnvValue(cfg, name); ok {
 			args = append(args, name+"="+value)
 		}
 	}
 	args = append(args, "ferrous-wheel", "run", "scripts/eval_manta_embed_v1_retrieval.fw")
 	return runCmd(cfg, "Full-corpus retrieval metrics gate", "retrieval-eval.log", "env", args)
+}
+
+func retrievalEvalEnvValue(cfg candidateConfig, name string) (string, bool) {
+	if value := os.Getenv(name); value != "" {
+		return value, true
+	}
+	if !retrievalQualityTarget(cfg) {
+		return "", false
+	}
+	switch name {
+	case "MANTA_EVAL_BM25_BASELINE":
+		return "1", true
+	case "MANTA_GATE_BM25_BASELINE":
+		return "1", true
+	case "MANTA_GATE_BM25_METRIC":
+		return "ndcg_at_10", true
+	case "MANTA_GATE_BM25_MIN_RATIO":
+		return "1.0", true
+	}
+	return "", false
 }
 
 func renderCommand(name string, args []string) string {
@@ -437,6 +474,7 @@ func writeManifest(cfg candidateConfig, status string) error {
     "max_sequence": %s,
     "embedding_dim": %s,
     "hidden_dim": %s,
+    "encoder_repeats": %s,
     "seed": %s
   },
   "training": {
@@ -450,8 +488,10 @@ func writeManifest(cfg candidateConfig, status string) error {
     "contrastive_loss": %s,
     "temperature": %s,
     "select_metric": %s,
+    "quality_target": %s,
     "eval_every": %s,
-    "eval_every_steps": %s
+    "eval_every_steps": %s,
+    "restore_best": %s
   },
   "inputs": {
     "corpus": %s,
@@ -459,6 +499,7 @@ func writeManifest(cfg candidateConfig, status string) error {
     "eval_jsonl": %s,
     "hard_eval_jsonl": %s,
     "tokenizer": %s,
+    "package_tokenizer": %s,
     "tokenizer_corpus": %s,
     "thresholds_env": %s
   },
@@ -488,6 +529,7 @@ func writeManifest(cfg candidateConfig, status string) error {
 		cfg.MaxSeq,
 		cfg.EmbeddingDim,
 		cfg.HiddenDim,
+		cfg.EncoderRepeats,
 		cfg.InitSeed,
 		jsonString(cfg.TrainMode),
 		jsonBool(envEnabled("MANTA_PAIRWISE_TRAIN") || cfg.PairwiseTrain == "1" || strings.ToLower(cfg.PairwiseTrain) == "true"),
@@ -499,13 +541,16 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonString(cfg.ContrastiveLoss),
 		cfg.Temperature,
 		jsonString(cfg.SelectMetric),
+		jsonString(cfg.QualityTarget),
 		cfg.EvalEvery,
 		cfg.EvalEverySteps,
+		jsonBool(configBool(cfg.RestoreBest)),
 		jsonString(cfg.Corpus),
 		jsonString(cfg.TrainJSONL),
 		jsonString(cfg.EvalJSONL),
 		jsonString(cfg.HardEvalJSONL),
 		jsonString(cfg.TokenizerPath),
+		jsonString(cfg.PackageTokenizerPath),
 		jsonString(cfg.TokenizerCorpus),
 		jsonString(cfg.ThresholdsEnv),
 		jsonString(cfg.Artifact),
@@ -527,6 +572,24 @@ func copyFile(src string, dst string) error {
 	info, err := os.Stat(src)
 	guard err == nil else return err
 	return os.WriteFile(dst, data, info.Mode())
+}
+
+// copyPretrainedArtifact copies the main artifact plus sibling files
+// (tokenizer, weights, embed-train checkpoint, embedding manifest, memory
+// plan, train-profile, package, train) so the fine-tuning stage starts
+// from the exact trained state. The list mirrors copyPackageForEval.
+func copyPretrainedArtifact(srcArtifact string, dstArtifact string, modelName string) error {
+	srcDir := filepath.Dir(srcArtifact)
+	dstDir := filepath.Dir(dstArtifact)
+	matches, err := filepath.Glob(filepath.Join(srcDir, modelName+".*"))
+	guard err == nil else return err
+	guard len(matches) > 0 else return fmt.Errorf("no source package files under %s for model %s", srcDir, modelName)
+	for _, src := range matches {
+		dst := filepath.Join(dstDir, filepath.Base(src))
+		err = copyFile(src, dst)
+		guard err == nil else return fmt.Errorf("copy %s -> %s: %w", src, dst, err)
+	}
+	return nil
 }
 
 func copyPackageForEval(cfg candidateConfig, name string) (string, error) {
@@ -587,6 +650,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		MaxSeq:              getenv("MANTA_MAX_SEQ", "256"),
 		EmbeddingDim:        getenv("MANTA_EMBEDDING_DIM", "128"),
 		HiddenDim:           getenv("MANTA_HIDDEN_DIM", "256"),
+		EncoderRepeats:      getenv("MANTA_ENCODER_REPEATS", "2"),
 		InitSeed:            getenv("MANTA_INIT_SEED", "1"),
 		WeightBits:          getenv("MANTA_WEIGHT_BITS", "8"),
 		Epochs:              getenv("MANTA_EPOCHS", "3"),
@@ -597,6 +661,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		EvalEvery:           getenv("MANTA_EVAL_EVERY", "1"),
 		EvalEverySteps:      getenv("MANTA_EVAL_EVERY_STEPS", "0"),
 		Patience:            getenv("MANTA_PATIENCE", "3"),
+		RestoreBest:         getenv("MANTA_RESTORE_BEST", "true"),
 		MinDelta:            getenv("MANTA_MIN_DELTA", "0"),
 		SelectMetric:        getenv("MANTA_SELECT_METRIC", "score_margin"),
 		PairwiseTrain:       getenv("MANTA_PAIRWISE_TRAIN", "0"),
@@ -610,12 +675,14 @@ func prepareConfig(root string) (candidateConfig, error) {
 		LengthBucketBatches: getenv("MANTA_LENGTH_BUCKET_BATCHES", "1"),
 		ActivationAccel:     getenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1"),
 		FastGELU:            getenv("MANTA_TRAIN_ENABLE_FAST_GELU", "1"),
+		QualityTarget:       strings.ToLower(strings.TrimSpace(getenv("MANTA_QUALITY_TARGET", "retrieval"))),
 		MantaBin:            filepath.Join(runDir, "bin", "manta"),
 		Artifact:            filepath.Join(runDir, modelName+".mll"),
 		SealedArtifact:      filepath.Join(runDir, modelName+".sealed.mll"),
 		TrainMetricsJSON:    filepath.Join(runDir, "train.metrics.json"),
 		FinalEvalMetricsJSON: filepath.Join(runDir, "final-eval.metrics.json"),
 		HardEvalMetricsJSON:  filepath.Join(runDir, "hard-eval.metrics.json"),
+		NoTokenizer:          envEnabled("MANTA_NO_TOKENIZER"),
 	}
 
 	err = os.WriteFile(cfg.DatasetSHAFile, []byte(""), 0o644)
@@ -631,9 +698,15 @@ func prepareConfig(root string) (candidateConfig, error) {
 	cfg.EvalJSONL = os.Getenv("MANTA_EVAL_JSONL")
 	cfg.HardEvalJSONL = os.Getenv("MANTA_HARD_EVAL_JSONL")
 	cfg.TokenizerPath = os.Getenv("MANTA_TOKENIZER")
+	cfg.PackageTokenizerPath = os.Getenv("MANTA_PACKAGE_TOKENIZER")
 	cfg.TokenizerCorpus = os.Getenv("MANTA_TOKENIZER_CORPUS")
 	cfg.ThresholdsEnv = thresholdsEnv
+	guard cfg.QualityTarget == "pairwise" || cfg.QualityTarget == "retrieval" || cfg.QualityTarget == "both" else return candidateConfig{}, fmt.Errorf("MANTA_QUALITY_TARGET must be pairwise, retrieval, or both")
 	guard !(pairwiseTrainEnabled(cfg) && hardNegativeTrainEnabled(cfg)) else return candidateConfig{}, fmt.Errorf("choose MANTA_PAIRWISE_TRAIN or MANTA_HARD_NEGATIVE_TRAIN, not both")
+	guard !(cfg.NoTokenizer && cfg.TokenizerPath != "") else return candidateConfig{}, fmt.Errorf("set either MANTA_NO_TOKENIZER or MANTA_TOKENIZER, not both")
+	guard !(cfg.NoTokenizer && cfg.TokenizerCorpus != "") else return candidateConfig{}, fmt.Errorf("set either MANTA_NO_TOKENIZER or MANTA_TOKENIZER_CORPUS, not both")
+	guard !(cfg.NoTokenizer && envEnabled("MANTA_PRETOKENIZE_JSONL")) else return candidateConfig{}, fmt.Errorf("set either MANTA_NO_TOKENIZER or MANTA_PRETOKENIZE_JSONL, not both")
+	guard !(retrievalQualityTarget(cfg) && cfg.NoTokenizer && cfg.PackageTokenizerPath == "") else return candidateConfig{}, fmt.Errorf("MANTA_QUALITY_TARGET=%s with MANTA_NO_TOKENIZER requires MANTA_PACKAGE_TOKENIZER so the sealed .mll can embed raw retrieval text", cfg.QualityTarget)
 
 	if cfg.Corpus != "" {
 		guard cfg.TrainJSONL == "" && cfg.EvalJSONL == "" else return candidateConfig{}, fmt.Errorf("choose MANTA_CORPUS or MANTA_TRAIN_JSONL/MANTA_EVAL_JSONL, not both")
@@ -680,6 +753,17 @@ func prepareConfig(root string) (candidateConfig, error) {
 		err = appendSHA256(cfg.DatasetSHAFile, cfg.TokenizerPath)
 		guard err == nil else return candidateConfig{}, err
 	}
+	if cfg.PackageTokenizerPath == "" && cfg.TokenizerPath != "" && retrievalQualityTarget(cfg) {
+		cfg.PackageTokenizerPath = cfg.TokenizerPath
+	}
+	if cfg.PackageTokenizerPath != "" {
+		cfg.PackageTokenizerPath, err = requireFile(cfg.PackageTokenizerPath, "MANTA_PACKAGE_TOKENIZER")
+		guard err == nil else return candidateConfig{}, err
+		err = rejectTmpPath("package tokenizer", cfg.PackageTokenizerPath)
+		guard err == nil else return candidateConfig{}, err
+		err = appendSHA256(cfg.DatasetSHAFile, cfg.PackageTokenizerPath)
+		guard err == nil else return candidateConfig{}, err
+	}
 	if cfg.TokenizerCorpus != "" {
 		guard cfg.TokenizerPath == "" else return candidateConfig{}, fmt.Errorf("set either MANTA_TOKENIZER or MANTA_TOKENIZER_CORPUS, not both")
 		cfg.TokenizerCorpus, err = requireFile(cfg.TokenizerCorpus, "MANTA_TOKENIZER_CORPUS")
@@ -707,6 +791,7 @@ func trainCommonArgs(cfg candidateConfig) []string {
 		"--eval-every", cfg.EvalEvery,
 		"--eval-every-steps", cfg.EvalEverySteps,
 		"--patience", cfg.Patience,
+		"--restore-best="+cfg.RestoreBest,
 		"--min-delta", cfg.MinDelta,
 		"--select-metric", cfg.SelectMetric,
 		"--progress-every", cfg.ProgressEvery,
@@ -723,6 +808,14 @@ func pairwiseTrainEnabled(cfg candidateConfig) bool {
 
 func hardNegativeTrainEnabled(cfg candidateConfig) bool {
 	return envEnabled("MANTA_HARD_NEGATIVE_TRAIN") || cfg.HardNegativeTrain == "1" || strings.ToLower(cfg.HardNegativeTrain) == "true"
+}
+
+func pairwiseQualityTarget(cfg candidateConfig) bool {
+	return cfg.QualityTarget == "pairwise" || cfg.QualityTarget == "both"
+}
+
+func retrievalQualityTarget(cfg candidateConfig) bool {
+	return cfg.QualityTarget == "retrieval" || cfg.QualityTarget == "both"
 }
 
 func applyCandidateRuntimeEnv(cfg candidateConfig) {
@@ -750,21 +843,30 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	err = runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/manta"})
 	guard err == nil else return cfg, err
 
-	err = runCmd(cfg, "Initialize "+cfg.ModelName, "init-model.log", cfg.MantaBin, []string{
-		"init-model",
-		"--name", cfg.ModelName,
-		"--vocab-size", cfg.VocabSize,
-		"--max-seq", cfg.MaxSeq,
-		"--embedding-dim", cfg.EmbeddingDim,
-		"--hidden-dim", cfg.HiddenDim,
-		"--seed", cfg.InitSeed,
-		"--weight-bits", cfg.WeightBits,
-		"--lr", cfg.LR,
-		"--contrastive-loss", cfg.ContrastiveLoss,
-		"--temperature", cfg.Temperature,
-		cfg.Artifact,
-	})
-	guard err == nil else return cfg, err
+	let initialArtifact = os.Getenv("MANTA_INITIAL_ARTIFACT")
+	if initialArtifact != "" {
+		step("Copy pretrained artifact as starting point")
+		fmt.Println(f"+ cp -a {initialArtifact} {cfg.Artifact}")
+		err = copyPretrainedArtifact(initialArtifact, cfg.Artifact, cfg.ModelName)
+		guard err == nil else return cfg, err
+	} else {
+		err = runCmd(cfg, "Initialize "+cfg.ModelName, "init-model.log", cfg.MantaBin, []string{
+			"init-model",
+			"--name", cfg.ModelName,
+			"--vocab-size", cfg.VocabSize,
+			"--max-seq", cfg.MaxSeq,
+			"--embedding-dim", cfg.EmbeddingDim,
+			"--hidden-dim", cfg.HiddenDim,
+			"--encoder-repeats", cfg.EncoderRepeats,
+			"--seed", cfg.InitSeed,
+			"--weight-bits", cfg.WeightBits,
+			"--lr", cfg.LR,
+			"--contrastive-loss", cfg.ContrastiveLoss,
+			"--temperature", cfg.Temperature,
+			cfg.Artifact,
+		})
+		guard err == nil else return cfg, err
+	}
 
 	let common = trainCommonArgs(cfg)
 	tokenizerForEval := cfg.TokenizerPath
@@ -787,7 +889,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	hardEvalJSONLForRun := cfg.HardEvalJSONL
 	trainTokenizer := cfg.TokenizerPath
 	evalTokenizer := tokenizerForEval
-	tokenJSONLForRun := false
+	tokenJSONLForRun := cfg.NoTokenizer
 	if cfg.TrainMode == "prepared_jsonl" && trainTokenizer == "" && tokenizerForEval != "" {
 		trainTokenizer = tokenizerForEval
 	}
@@ -902,6 +1004,9 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		err = runCmd(cfg, "Train "+cfg.ModelName+" from prepared JSONL", "train.log", cfg.MantaBin, args)
 		guard err == nil else return cfg, err
 	}
+	if cfg.PackageTokenizerPath == "" && retrievalQualityTarget(cfg) && tokenizerForEval != "" {
+		cfg.PackageTokenizerPath = tokenizerForEval
+	}
 	err = runMetricsDiagnosis(cfg, "Training metrics diagnosis", "train-diagnosis.log", cfg.TrainMetricsJSON)
 	guard err == nil else return cfg, err
 	if hasEfficiencyGateThresholds() {
@@ -945,8 +1050,16 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		guard err == nil else return cfg, err
 	}
 
-	if hasQualityGateThresholds() {
+	if hasQualityGateThresholds() && !pairwiseQualityTarget(cfg) {
+		fmt.Println("skipping pairwise quality metrics gate; quality target is " + cfg.QualityTarget)
+	}
+	if hasQualityGateThresholds() && pairwiseQualityTarget(cfg) {
 		err = runMetricsGate(cfg, "Candidate quality metrics gate", "quality-gate.log", "quality", gateMetrics)
+		guard err == nil else return cfg, err
+	}
+
+	if cfg.PackageTokenizerPath != "" {
+		err = copyFile(cfg.PackageTokenizerPath, filepath.Join(cfg.RunDir, cfg.ModelName+".tokenizer.mll"))
 		guard err == nil else return cfg, err
 	}
 
@@ -964,7 +1077,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	guard err == nil else return cfg, err
 	guard strings.Contains(string(sealedData), "package verify: OK") else return cfg, fmt.Errorf("sealed package verification did not pass")
 
-	if envEnabled("MANTA_RETRIEVAL_EVAL") {
+	if envEnabled("MANTA_RETRIEVAL_EVAL") || retrievalQualityTarget(cfg) {
 		err = runRetrievalEval(cfg)
 		guard err == nil else return cfg, err
 	}

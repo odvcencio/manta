@@ -26,6 +26,18 @@ That means the language and runtime should bias toward:
 - portable `.mll` artifacts that CorkScrewDB can load without rewriting host code
 - sealed MLL package exports that carry model definition, weights, tokenizer, memory plan, and metadata together
 
+## Training A CorkScrew Embedding
+
+The default CorkScrew embedding model is intended to be born from this repository's own pipeline: local BEIR data, Manta-native training, Manta retrieval evaluation, sealed `.mll` export, and optional CorkScrew asset installation.
+
+```bash
+MANTA_REPO_ROOT=$PWD \
+MANTA_INSTALL_CORKSCREW=1 \
+ferrous-wheel run scripts/train_manta_embed_v1_shipping_pipeline.fw
+```
+
+The shipping pipeline trains a mixed pretraining + BEIR Stage A model, mines model-hard negatives from that candidate, builds a FiQA-weighted BEIR fine-tune set, trains Stage B from the Stage A trainable package, and gates the final sealed artifact on SciFact, NfCorpus, and FiQA retrieval `ndcg@10`.
+
 ## Install
 
 ```bash

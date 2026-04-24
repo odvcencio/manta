@@ -21,6 +21,7 @@ type DefaultEmbeddingPackageConfig struct {
 	MaxSequence     int
 	EmbeddingDim    int
 	HiddenDim       int
+	EncoderRepeats  int
 	Seed            int64
 	LearningRate    float32
 	WeightDecay     float32
@@ -77,7 +78,7 @@ func DefaultEmbeddingManifest(cfg DefaultEmbeddingPackageConfig) mantaruntime.Em
 		Name:                  cfg.Name,
 		PooledEntry:           "embed_pooled",
 		BatchEntry:            "embed_pooled_batch",
-		EncoderRepeats:        2,
+		EncoderRepeats:        cfg.EncoderRepeats,
 		TokenInput:            "tokens",
 		MaskInput:             "attention_mask",
 		OutputName:            "result",
@@ -119,6 +120,9 @@ func (cfg DefaultEmbeddingPackageConfig) normalized() DefaultEmbeddingPackageCon
 	}
 	if cfg.HiddenDim == 0 {
 		cfg.HiddenDim = cfg.EmbeddingDim * 2
+	}
+	if cfg.EncoderRepeats <= 0 {
+		cfg.EncoderRepeats = 2
 	}
 	if cfg.Seed == 0 {
 		cfg.Seed = 1

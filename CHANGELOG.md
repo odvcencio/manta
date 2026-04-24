@@ -2,9 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- Added a staged `manta-embed-v1` shipping pipeline that trains a mixed pretrain/BEIR candidate, mines model-hard negatives, runs a FiQA-weighted fine-tune, evaluates BEIR retrieval metrics, and can install gated assets into CorkScrewDB.
+- Added `retrievaldump` for per-query BEIR retrieval diagnostics.
+
 ### Changed
 
 - Manta source parsing now uses a Go-authored gotreesitter grammar and lowers the CST into the existing compiler AST.
+- Default embedding package initialization now exposes `encoder_repeats` through the Go config and `manta init-model --encoder-repeats`.
 
 ## v0.1.0-alpha — 2026-04-09
 

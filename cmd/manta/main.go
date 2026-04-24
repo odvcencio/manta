@@ -721,6 +721,7 @@ func runInitModel(args []string) error {
 	var maxSequence int
 	var embeddingDim int
 	var hiddenDim int
+	var encoderRepeats int
 	var seed int64
 	var learningRate float64
 	var weightDecay float64
@@ -733,6 +734,7 @@ func runInitModel(args []string) error {
 	fs.IntVar(&maxSequence, "max-seq", 0, "maximum token sequence length")
 	fs.IntVar(&embeddingDim, "embedding-dim", 0, "embedding/model dimension")
 	fs.IntVar(&hiddenDim, "hidden-dim", 0, "FFN hidden dimension")
+	fs.IntVar(&encoderRepeats, "encoder-repeats", 0, "number of encoder layer repeats (weights are tied; default 2)")
 	fs.Int64Var(&seed, "seed", 0, "initialization seed")
 	fs.Float64Var(&learningRate, "lr", 0, "trainer learning rate")
 	fs.Float64Var(&weightDecay, "weight-decay", 0, "trainer weight decay")
@@ -762,6 +764,7 @@ func runInitModel(args []string) error {
 		MaxSequence:     maxSequence,
 		EmbeddingDim:    embeddingDim,
 		HiddenDim:       hiddenDim,
+		EncoderRepeats:  encoderRepeats,
 		Seed:            seed,
 		LearningRate:    float32(learningRate),
 		WeightDecay:     float32(weightDecay),
